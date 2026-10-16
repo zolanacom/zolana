@@ -11,7 +11,17 @@ This repository starts from upstream Agave source and a new development history.
 - `node/agave/`: preserved upstream validator source, with native integration tracked separately.
 - `docs/decisions/`: architecture and scope decisions.
 
-See LOCAL-001 for the first implementation milestone. Nothing in this repository has been deployed or connected to a production network.
+See LOCAL-001 for the first implementation milestone and its validation record. The standalone verifier and real-proof offline fixture are implemented. Native validator integration and native accounting remain pending. Nothing in this repository has been deployed or connected to a production network.
+
+## Run the local proof fixture
+
+```
+sh tools/dev.sh fetch --locked
+sh tools/dev.sh run --offline --locked -p payment-lab -- proof-smoke
+sh tools/check.sh
+```
+
+This uses a project-local dependency cache and the installed Rust 1.92 toolchain. The fixture uses public synthetic test keys and creates no real funds. It verifies real proofs and authorization, stages/decodes the payment and confirms local decryption of payment and change. It is not a wallet or an on-chain transfer.
 
 ## Attribution
 

@@ -1,0 +1,15 @@
+[package]
+name = "native-payments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+orchard.workspace = true
+blake2b_simd.workspace = true
+nonempty = "0.11"
+
+[dev-dependencies]
+rand.workspace = true
+incrementalmerkletree.workspace = true
