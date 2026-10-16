@@ -1,0 +1,9 @@
+/target/
+/.local/
+/.tools/
+/.data/
+.env
+.env.*
+*.key
+*.keypair.json
+node/agave/target/
