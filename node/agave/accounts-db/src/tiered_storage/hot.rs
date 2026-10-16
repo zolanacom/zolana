@@ -1,3 +1,6 @@
+// modular-bitfield 0.11 emits parenthesized types on Rust 1.92.
+#![allow(unused_parens)]
+
 //! The account meta and related structs for hot accounts.
 
 use {

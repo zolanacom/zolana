@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod staging;
+pub mod state;
 pub mod verification;
 pub mod wire;
 
@@ -29,6 +30,8 @@ pub enum Error {
     UnsealedPayload,
     InvalidEncoding,
     WrongNetwork,
+    CapacityExceeded,
+    InsufficientBacking,
 }
 
 impl std::fmt::Display for Error {

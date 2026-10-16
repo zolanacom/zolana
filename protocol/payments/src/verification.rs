@@ -1,6 +1,6 @@
 //! Bounded, deterministic validation; no mutable state or external verifier.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use orchard::{
     bundle::{Authorization, Authorized, BundleVersion, TxVersion},
@@ -43,7 +43,8 @@ pub struct VerifiedPayment {
     pub public_value_balance: i64,
 }
 
-/// Binds complete payment effects and submission context to one genesis.
+/// Binds effects to the unique network domain committed by the chain genesis.
+/// The caller also verifies the actual genesis fingerprint independently.
 pub fn authorization_digest<A: Authorization>(
     genesis: [u8; 32],
     bundle: &Bundle<A, i64>,
@@ -78,11 +79,15 @@ pub fn authorization_digest<A: Authorization>(
 
 pub struct PaymentVerifier {
     genesis: [u8; 32],
-    key: VerifyingKey,
+    key: Arc<VerifyingKey>,
 }
 
 impl PaymentVerifier {
     pub fn new(genesis: [u8; 32], key: VerifyingKey) -> Result<Self, Error> {
+        Self::with_shared_key(genesis, Arc::new(key))
+    }
+
+    pub fn with_shared_key(genesis: [u8; 32], key: Arc<VerifyingKey>) -> Result<Self, Error> {
         if genesis == [0; 32] {
             return Err(Error::InvalidContext);
         }

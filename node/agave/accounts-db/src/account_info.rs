@@ -1,3 +1,6 @@
+// modular-bitfield 0.11 emits parenthesized types on Rust 1.92.
+#![allow(unused_parens)]
+
 //! AccountInfo represents a reference to AccountSharedData in either an AppendVec or the write cache.
 //! AccountInfo is not persisted anywhere between program runs.
 //! AccountInfo is purely runtime state.

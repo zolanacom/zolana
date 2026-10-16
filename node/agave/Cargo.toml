@@ -389,7 +389,7 @@ solana-big-mod-exp = "3.0.0"
 solana-bincode = "3.0.0"
 solana-blake3-hasher = "3.0.0"
 solana-bloom = { path = "bloom", version = "=3.0.14" }
-solana-bn254 = "3.0.0"
+solana-bn254 = "=3.0.0"
 solana-borsh = "3.0.0"
 solana-bpf-loader-program = { path = "programs/bpf_loader", version = "=3.0.14" }
 solana-bucket-map = { path = "bucket_map", version = "=3.0.14" }
@@ -442,7 +442,7 @@ solana-hard-forks = "3.0.0"
 solana-hash = "3.0.0"
 solana-inflation = "3.0.0"
 solana-instruction = "3.0.0"
-solana-instruction-error = "2.0.0"
+solana-instruction-error = "=2.0.0"
 solana-instructions-sysvar = "3.0.0"
 solana-keccak-hasher = "3.0.0"
 solana-keypair = "3.0.0"

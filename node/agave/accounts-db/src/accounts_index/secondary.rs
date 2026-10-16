@@ -75,6 +75,7 @@ struct SecondaryIndexStats {
     num_inner_keys: AtomicU64,
 }
 
+#[allow(dead_code)] // Alternative index implementation used by upstream tests.
 #[derive(Debug, Default)]
 pub struct DashMapSecondaryIndexEntry {
     account_keys: DashMap<Pubkey, ()>,

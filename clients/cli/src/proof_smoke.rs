@@ -23,6 +23,8 @@ use orchard::{
 pub const FIXTURE_GENESIS: [u8; 32] = [0x42; 32];
 
 pub struct Fixture {
+    pub funding: Bundle<Authorized, i64>,
+    pub funding_context: AuthorizationContext,
     pub verifier: PaymentVerifier,
     pub bundle: Bundle<Authorized, i64>,
     pub context: AuthorizationContext,
@@ -70,6 +72,10 @@ impl Fixture {
 }
 
 pub fn build_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
+    build_fixture_for([0x53; 32])
+}
+
+pub fn build_fixture_for(sponsor: [u8; 32]) -> Result<Fixture, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let version = bundle_version();
     let key = ProvingKey::build(version.circuit_version());
@@ -95,7 +101,7 @@ pub fn build_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
     let funding_context = AuthorizationContext {
         expires_at: 100,
         public_value_balance: -100,
-        sponsor: [0x53; 32],
+        sponsor,
     };
     let digest = authorization_digest(FIXTURE_GENESIS, &funding, &funding_context)?;
     let funding = funding
@@ -161,12 +167,70 @@ pub fn build_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
         return Err("payment or change could not be decrypted".into());
     }
     Ok(Fixture {
+        funding,
+        funding_context,
         verifier,
         bundle,
         context,
         anchors: BTreeSet::from([anchor.to_bytes()]),
         build_ms: started.elapsed().as_millis(),
     })
+}
+
+/// Synthetic exit fixture: Bob authorizes a public withdrawal to the bound sponsor.
+pub fn withdrawal_fixture(
+    fixture: &Fixture,
+) -> Result<(Bundle<Authorized, i64>, AuthorizationContext), Box<dyn std::error::Error>> {
+    let version = bundle_version();
+    let bob = Option::<SpendingKey>::from(SpendingKey::from_bytes([8; 32])).ok_or("fixture key")?;
+    let view = FullViewingKey::from(&bob);
+    let (index, _, note, _, _) = fixture
+        .bundle
+        .decrypt_outputs_with_keys(&[view.to_ivk(Scope::External)])
+        .into_iter()
+        .find(|(_, _, n, _, _)| n.value().inner() == 40)
+        .ok_or("fixture payment")?;
+    let funding_root = MerkleHashOrchard::combine(
+        Level::from(0),
+        &MerkleHashOrchard::from_cmx(fixture.funding.actions().get(0).unwrap().cmx()),
+        &MerkleHashOrchard::from_cmx(fixture.funding.actions().get(1).unwrap().cmx()),
+    );
+    let path = MerklePath::from_parts(
+        (2 + index) as u32,
+        std::array::from_fn(|level| match level {
+            0 => {
+                MerkleHashOrchard::from_cmx(fixture.bundle.actions().get(1 - index).unwrap().cmx())
+            }
+            1 => funding_root,
+            _ => MerkleHashOrchard::empty_root(Level::from(level as u8)),
+        }),
+    );
+    let anchor = path.root(note.commitment().into());
+    let mut builder = Builder::new(
+        BundleType::DEFAULT,
+        version,
+        version.default_flags(),
+        anchor,
+    )?;
+    builder.add_spend(view, note, path)?;
+    let mut rng = rand::rng();
+    let (bundle, _) = builder
+        .build::<i64>(&mut rng)?
+        .ok_or("withdrawal fixture")?;
+    let context = AuthorizationContext {
+        public_value_balance: 40,
+        ..fixture.context
+    };
+    let digest = authorization_digest(FIXTURE_GENESIS, &bundle, &context)?;
+    let key = ProvingKey::build(version.circuit_version());
+    Ok((
+        bundle.create_proof(&key, &mut rng)?.apply_signatures(
+            &mut rng,
+            digest,
+            &[SpendAuthorizingKey::from(&bob)],
+        )?,
+        context,
+    ))
 }
 
 #[cfg(test)]

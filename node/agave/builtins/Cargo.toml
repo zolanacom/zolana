@@ -13,6 +13,7 @@ edition = { workspace = true }
 dev-context-only-utils = []
 
 [dependencies]
+native-payment-program = { path = "../../adapter" }
 agave-feature-set = { workspace = true }
 solana-bpf-loader-program = { workspace = true }
 solana-compute-budget-program = { workspace = true }

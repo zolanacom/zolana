@@ -9,6 +9,7 @@ license.workspace = true
 orchard.workspace = true
 blake2b_simd.workspace = true
 nonempty = "0.11"
+incrementalmerkletree.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

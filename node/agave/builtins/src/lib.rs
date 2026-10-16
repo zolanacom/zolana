@@ -50,6 +50,13 @@ macro_rules! testable_prototype {
 /// When migration completed, and the feature gate is enabled everywhere, please
 /// remove that builtin entry from solana-builtin-default-costs::BUILTIN_INSTRUCTION_COSTS.
 pub static BUILTINS: &[BuiltinPrototype] = &[
+    BuiltinPrototype {
+        core_bpf_migration_config: None,
+        name: "native_private_payments",
+        enable_feature_id: Some(feature_set::native_private_payments::id()),
+        program_id: native_payment_program::ID,
+        entrypoint: native_payment_program::Entrypoint::vm,
+    },
     testable_prototype!(BuiltinPrototype {
         core_bpf_migration_config: None,
         name: system_program,

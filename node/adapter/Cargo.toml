@@ -1,0 +1,28 @@
+[package]
+name = "native-payment-program"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+native-payments = { path = "../../protocol/payments" }
+orchard.workspace = true
+solana-program-runtime = { path = "../agave/program-runtime" }
+solana-pubkey = { version = "=3.0.0", features = ["curve25519", "sha2"] }
+solana-instruction = "=3.0.0"
+solana-instruction-error = "=2.0.0"
+solana-sdk-ids = "=3.0.0"
+solana-system-interface = { version = "=2.0.0", features = ["bincode"] }
+
+[dev-dependencies]
+solana-system-program = { path = "../agave/programs/system" }
+solana-account = "=3.0.0"
+solana-rent = "=3.0.0"
+solana-clock = "=3.0.0"
+solana-program-runtime = { path = "../agave/program-runtime", features = ["dev-context-only-utils"] }
+solana-transaction-context = { path = "../agave/transaction-context", features = ["dev-context-only-utils"] }
+payment-lab = { path = "../../clients/cli" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

@@ -1122,8 +1122,18 @@ pub mod raise_cpi_nesting_limit_to_8 {
     solana_pubkey::declare_id!("6TkHkRmP7JZy1fdM6fg5uXn76wChQBWGokHBJzrLB3mj");
 }
 
+pub mod native_private_payments {
+    pub const fn id() -> solana_pubkey::Pubkey {
+        solana_pubkey::Pubkey::new_from_array([
+            192, 47, 61, 8, 73, 55, 102, 89, 124, 17, 171, 200, 51, 88, 71, 95, 72, 43, 189, 112,
+            141, 91, 229, 76, 97, 21, 3, 87, 217, 161, 55, 209,
+        ])
+    }
+}
+
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
     [
+        (native_private_payments::id(), "Native private payments for the development fork"),
         (secp256k1_program_enabled::id(), "secp256k1 program"),
         (deprecate_rewards_sysvar::id(), "deprecate unused rewards sysvar"),
         (pico_inflation::id(), "pico inflation"),

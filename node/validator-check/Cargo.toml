@@ -1,0 +1,25 @@
+[package]
+name = "native-validator-check"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Preserve the syscall API and semantics used by the imported engine.
+solana-bn254 = "=3.0.0"
+native-payment-program = { path = "../adapter" }
+native-payments = { path = "../../protocol/payments" }
+payment-lab = { path = "../../clients/cli" }
+solana-runtime = { path = "../agave/runtime", features = ["dev-context-only-utils"] }
+solana-account = "=3.0.0"
+solana-pubkey = "=3.0.0"
+solana-instruction = "=3.0.0"
+solana-keypair = "=3.0.0"
+solana-signer = "=3.0.0"
+solana-transaction = "=3.0.0"
+solana-compute-budget-interface = "=3.0.0"
+solana-genesis-config = "=3.0.0"
+solana-feature-gate-interface = { version = "=3.0.0", features = ["bincode"] }
+solana-sdk-ids = "=3.0.0"
+solana-system-interface = { version = "=2.0.0", features = ["bincode"] }
