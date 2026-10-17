@@ -2,14 +2,20 @@ const screen = document.querySelector('#screen');
 const notice = document.querySelector('#notice');
 let session = {}, password = '', address = '', balance = null, receipt = null, busy = false, idle;
 
-function message(text = '', kind = '') { notice.textContent = text; notice.className = kind; }
+function message(text = '', kind = '') {
+  notice.textContent = text; notice.className = kind;
+  if (kind === 'error') notice.scrollIntoView({ block: 'nearest' });
+}
 function setScreen(html) {
   screen.innerHTML = html; message();
+  const heading = screen.querySelector('h2');
+  if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+  if (matchMedia('(max-width: 760px)').matches) window.scrollTo(0, 0);
   screen.querySelectorAll('input[type=password]').forEach(input => {
     const wrapper = document.createElement('div'); wrapper.className = 'password-field'; input.before(wrapper); wrapper.append(input);
     const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'reveal'; toggle.setAttribute('aria-label', `Show ${input.id === 'confirm' ? 'confirm password' : 'password'}`);
     toggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
-    toggle.addEventListener('click', () => { input.type = input.type === 'password' ? 'text' : 'password'; toggle.setAttribute('aria-pressed', String(input.type === 'text')); }); wrapper.append(toggle);
+    toggle.addEventListener('click', () => { input.type = input.type === 'password' ? 'text' : 'password'; toggle.setAttribute('aria-pressed', String(input.type === 'text')); toggle.setAttribute('aria-label', `${input.type === 'text' ? 'Hide' : 'Show'} ${input.id === 'confirm' ? 'confirm password' : 'password'}`); }); wrapper.append(toggle);
   });
 }
 function on(id, event, callback) { document.getElementById(id).addEventListener(event, callback); }
@@ -131,16 +137,18 @@ function receive() {
   on('copy', 'click', async () => { try { await navigator.clipboard.writeText(address); message('Receiving address copied.', 'success'); } catch { message('Select the address above and copy it.'); } });
   on('back', 'click', renderDashboard);
 }
-function send() {
+function send(draft = {}) {
   if (session.pending || session.staging) return renderDashboard();
-  setScreen(`<h2>Send privately</h2><p class="caption">Pay a private address on this local network.</p><form id="send-form"><label for="recipient">Recipient address</label><textarea id="recipient" required rows="3" maxlength="140" placeholder="npriv1…" spellcheck="false"></textarea><label for="amount">Amount in test units</label><input id="amount" type="number" min="1" step="1" required><button class="primary">Review payment</button></form><button class="text-button back" id="back">Back to wallet</button>`);
+  setScreen(`<h2>Send privately</h2><p class="caption">Pay a private address on this local network.</p><form id="send-form"><label for="recipient">Recipient address</label><textarea id="recipient" required rows="3" maxlength="140" placeholder="npriv1…" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><button class="primary">Review payment</button></form><button class="text-button back" id="back">Back to wallet</button>`);
+  document.querySelector('#recipient').value = draft.recipient || '';
+  document.querySelector('#amount').value = draft.amount || '';
   on('back', 'click', renderDashboard);
   on('send-form', 'submit', event => { event.preventDefault(); const recipient = document.querySelector('#recipient').value.trim(), amount = Number(document.querySelector('#amount').value); if (!recipient.startsWith('npriv1') || !Number.isSafeInteger(amount) || amount < 1 || amount > balance) return message('Enter a private receiving address and an amount within your balance.', 'error'); review(recipient, amount); });
 }
 function review(recipient, amount) {
   setScreen(`<h2>Review payment</h2><div class="balance" id="review-amount"></div><p class="hint">To</p><p class="address" id="review-address"></p><p class="hint">The local test sponsor pays the network fees.</p><button class="primary" id="confirm-send">Send payment</button><button class="secondary" id="back">Edit payment</button>`);
   document.querySelector('#review-amount').textContent = `${amount} test units`; document.querySelector('#review-address').textContent = recipient;
-  on('back', 'click', send); on('confirm-send', 'click', () => payment('send', { recipient, amount }));
+  on('back', 'click', () => send({ recipient, amount })); on('confirm-send', 'click', () => payment('send', { recipient, amount }));
 }
 async function payment(action, extra = {}) {
   await work('Preparing your proof, uploading, and waiting for finalization. Keep this tab open…', async () => {
