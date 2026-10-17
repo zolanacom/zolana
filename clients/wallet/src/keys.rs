@@ -41,7 +41,7 @@ impl Network {
         Ok(network)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.network == [0; 32] || bs58::decode(&self.genesis_hash).into_vec()?.len() != 32 {
             return Err("invalid network domain or genesis fingerprint".into());
         }
@@ -185,13 +185,13 @@ impl WalletKey {
     }
 }
 
-fn derive(password: &[u8], salt: &[u8]) -> Zeroizing<[u8; 32]> {
+pub(crate) fn derive(password: &[u8], salt: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut output = Zeroizing::new([0; 32]);
     pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(password, salt, ROUNDS, &mut output[..]);
     output
 }
 
-fn validate_password(password: &[u8]) -> Result<()> {
+pub(crate) fn validate_password(password: &[u8]) -> Result<()> {
     if !(12..=1024).contains(&password.len()) {
         return Err("password file must contain 12 to 1024 bytes".into());
     }
@@ -213,7 +213,11 @@ pub fn read_password_input(input: impl Read) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 pub fn read_private(path: &Path, maximum: usize) -> Result<Zeroizing<Vec<u8>>> {
-    let metadata = fs::symlink_metadata(path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
         return Err(
             "secret file must be a regular file readable only by its owner (mode 0600 or 0400)"
@@ -221,7 +225,7 @@ pub fn read_private(path: &Path, maximum: usize) -> Result<Zeroizing<Vec<u8>>> {
         );
     }
     let mut bytes = Zeroizing::new(Vec::new());
-    fs::File::open(path)?
+    (&mut file)
         .take(maximum as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > maximum {

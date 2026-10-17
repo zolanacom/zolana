@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 from pathlib import Path
 import unittest
-from localnet import newer_full_snapshot, restart_state, start, wait_finalized_progress
+from localnet import load, newer_full_snapshot, restart_state, start, wait_finalized_progress
 
 
 class SnapshotSelectionTests(unittest.TestCase):
@@ -31,6 +31,48 @@ class SnapshotSelectionTests(unittest.TestCase):
 
 
 class ConsensusStorageTests(unittest.TestCase):
+    def test_coordinated_ui_launch_can_bootstrap_a_genuinely_new_ledger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ledger-0").mkdir()
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL003", "genesis_hash": "genesis"}))
+            with patch("localnet.socket.socket"), patch("localnet.subprocess.run") as inspect, patch("localnet.subprocess.Popen") as launch, patch("localnet.restart_state", side_effect=AssertionError("fresh ledger has no tower")):
+                launch.return_value.pid = 123
+                start(root, 0, coordinated=True)
+                self.assertIn("bootstrap-check", inspect.call_args.args[0])
+                args = launch.call_args.args[0]
+                self.assertNotIn("--require-tower", args)
+                self.assertNotIn("--wait-for-supermajority", args)
+                self.assertIn("--no-wait-for-vote-to-start-leader", args)
+
+    def test_rehearsal_requires_owner_only_local_root_and_separate_voter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            root = project / ".data/rehearsal"
+            root.mkdir(parents=True, mode=0o700)
+            config = {"fixture_keys_are_public": False, "key_mode": "local-testnet-rehearsal-v1",
+                      "pool_format": "NPOOL003", "genesis_hash": "genesis", "vote_accounts": ["public-vote-0", "public-vote-1"]}
+            (root / "network.json").write_text(json.dumps(config))
+            (root / "ledger-0").mkdir()
+            (root / "consensus-0").mkdir()
+            (root / "consensus-0/tower-fixture.bin").touch()
+            for role in ["identity", "voter"]:
+                path = root / f"{role}-0.keypair.json"
+                path.write_text("[]")
+                path.chmod(0o600)
+            with patch("localnet.PROJECT", project), patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch:
+                launch.return_value.pid = 123
+                start(root, 0)
+                args = launch.call_args.args[0]
+                self.assertEqual(args[args.index("--vote-account") + 1], "public-vote-0")
+                self.assertEqual(args[args.index("--authorized-voter") + 1], str(root / "voter-0.keypair.json"))
+                (root / "voter-0.keypair.json").chmod(0o644)
+                with self.assertRaisesRegex(RuntimeError, "hot keys"):
+                    start(root, 0)
+                root.chmod(0o755)
+                with self.assertRaisesRegex(RuntimeError, "owner-only"):
+                    load(root)
+
     def test_fault_control_cannot_leak_into_ordinary_startup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

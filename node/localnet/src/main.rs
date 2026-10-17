@@ -1,5 +1,6 @@
 //! Disposable local-network tooling. Fixture spending keys are intentionally public.
 mod fault_lab;
+mod key_setup;
 mod load_lab;
 // Exercise the exact validator fault guard in a first-party workspace target.
 #[cfg(test)]
@@ -52,7 +53,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 // Primary RocksDB access rejects inspection while a validator owns the ledger.
 // No slots, hashes, or tower lockouts are altered by this inspection.
-fn restart_state(root: &Path, index: usize, name: &str) -> Result<()> {
+fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Result<()> {
     use solana_core::consensus::{tower_storage::FileTowerStorage, Tower};
     if index > 1
         || !name.starts_with("ledger-")
@@ -68,6 +69,7 @@ fn restart_state(root: &Path, index: usize, name: &str) -> Result<()> {
     )?;
     let blockstore = Blockstore::open(&root.join(name))?;
     let highest_stored_slot = blockstore.highest_slot()?.ok_or("empty restart ledger")?;
+    let mut complete_tail = None;
     let slot = if blockstore.get_bank_hash(highest_stored_slot).is_some() {
         highest_stored_slot
     } else {
@@ -78,10 +80,19 @@ fn restart_state(root: &Path, index: usize, name: &str) -> Result<()> {
             .meta(highest_stored_slot)?
             .ok_or("missing tip metadata")?;
         let parent = highest_stored_slot.checked_sub(1).ok_or("invalid tip")?;
-        if meta.is_full() || meta.parent_slot != Some(parent) {
+        if meta.parent_slot != Some(parent)
+            || blockstore.is_dead(highest_stored_slot)
+            || blockstore.has_duplicate_shreds_in_slot(highest_stored_slot)
+        {
             return Err(
-                "incomplete or nonadjacent restart tip; manual ledger repair required".into(),
+                "complex/dead/duplicate restart tail; manual ledger repair required".into(),
             );
+        }
+        if meta.is_full() {
+            if !replay_plan {
+                return Err("restart requires verified replay of a fully received unfrozen child; run the local tail replay helper while both validators are stopped".into());
+            }
+            complete_tail = Some(highest_stored_slot);
         }
         parent
     };
@@ -151,6 +162,7 @@ fn restart_state(root: &Path, index: usize, name: &str) -> Result<()> {
         json!({
             "slot": slot, "bank_hash": bank_hash.to_string(), "tower_root": tower.root(),
             "highest_stored_slot": highest_stored_slot,
+            "complete_tail_replay_slot": complete_tail,
             "blockstore_root": blockstore.max_root(),
             "frozen_hashes": hashes, "shred_digests": shreds,
             "last_vote": tower.last_voted_slot(), "identity": identity.pubkey().to_string(),
@@ -163,33 +175,49 @@ fn restart_state(root: &Path, index: usize, name: &str) -> Result<()> {
 
 fn save_key(root: &Path, name: &str, key: &Keypair) -> Result<()> {
     let path = root.join(name);
-    write_keypair_file(key, &path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    let raw = zeroize::Zeroizing::new(serde_json::to_vec(&key.to_bytes().as_slice())?);
+    native_wallet::keys::write_private_new(&path, &raw)
 }
 
-fn initialize(root: &Path) -> Result<()> {
+fn initialize(root: &Path, passwords: Option<(&[u8], &[u8])>) -> Result<()> {
     if root.exists() {
         return Err("refusing to replace an existing local network".into());
     }
-    fs::create_dir_all(root)?;
-    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::DirBuilder::new().mode(0o700).create(root)?;
     let sponsor = Keypair::new();
     let poor = Keypair::new();
-    save_key(root, "sponsor.keypair.json", &sponsor)?;
-    save_key(root, "unfunded.keypair.json", &poor)?;
+    if passwords.is_none() {
+        save_key(root, "sponsor.keypair.json", &sponsor)?;
+    }
+    if passwords.is_none() {
+        save_key(root, "unfunded.keypair.json", &poor)?;
+    }
     let nodes = [
         ValidatorVoteKeypairs::new_rand(),
         ValidatorVoteKeypairs::new_rand(),
     ];
     let network = Keypair::new().pubkey().to_bytes();
+    let private = passwords.is_some();
+    let treasury = Keypair::new();
+    let voters = [Keypair::new(), Keypair::new()];
+    let withdrawers = [Keypair::new(), Keypair::new()];
+    let stake_controls = [Keypair::new(), Keypair::new()];
+    let mint = if private {
+        treasury.pubkey()
+    } else {
+        sponsor.pubkey()
+    };
     let rent = Rent::default();
     let floor = rent.minimum_balance(STATE_BYTES);
     let mut pool = AccountSharedData::new(floor, STATE_BYTES, &id());
     pool.set_data_from_slice(&PoolState::new(network, floor)?.encode());
     let mut genesis = create_genesis_config_with_leader_ex_no_features(
         10_000_000_000,
-        &sponsor.pubkey(),
+        &mint,
         &nodes[0].node_keypair.pubkey(),
         &nodes[0].vote_keypair.pubkey(),
         &nodes[0].stake_keypair.pubkey(),
@@ -208,7 +236,7 @@ fn initialize(root: &Path) -> Result<()> {
     );
     let second = create_genesis_config_with_leader_ex_no_features(
         10_000_000_000,
-        &sponsor.pubkey(),
+        &mint,
         &nodes[1].node_keypair.pubkey(),
         &nodes[1].vote_keypair.pubkey(),
         &nodes[1].stake_keypair.pubkey(),
@@ -228,6 +256,44 @@ fn initialize(root: &Path) -> Result<()> {
             .accounts
             .insert(address, second.accounts[&address].clone());
     }
+    if private {
+        genesis.accounts.insert(
+            sponsor.pubkey(),
+            AccountSharedData::new(1_000_000_000, 0, &solana_sdk_ids::system_program::id()).into(),
+        );
+        for (index, node) in nodes.iter().enumerate() {
+            let stake = if index == 0 {
+                80_000_000_000
+            } else {
+                20_000_000_000
+            };
+            let vote = solana_vote_program::vote_state::create_account_with_authorized(
+                &node.node_keypair.pubkey(),
+                &voters[index].pubkey(),
+                &withdrawers[index].pubkey(),
+                0,
+                stake,
+            );
+            let staked = solana_stake_program::stake_state::create_account(
+                &stake_controls[index].pubkey(),
+                &node.vote_keypair.pubkey(),
+                &vote,
+                &genesis.rent,
+                stake,
+            );
+            genesis
+                .accounts
+                .insert(node.vote_keypair.pubkey(), vote.into());
+            genesis
+                .accounts
+                .insert(node.stake_keypair.pubkey(), staked.into());
+            genesis
+                .accounts
+                .get_mut(&node.node_keypair.pubkey())
+                .ok_or("missing identity")?
+                .lamports = 100_000_000;
+        }
+    }
     activate_feature(&mut genesis, ACTIVATION_ID);
     genesis.poh_config.hashes_per_tick = None;
     genesis.epoch_schedule = EpochSchedule::custom(128, 128, false);
@@ -238,16 +304,23 @@ fn initialize(root: &Path) -> Result<()> {
             &format!("identity-{index}.keypair.json"),
             &node.node_keypair,
         )?;
-        save_key(
-            root,
-            &format!("vote-{index}.keypair.json"),
-            &node.vote_keypair,
-        )?;
-        save_key(
-            root,
-            &format!("stake-{index}.keypair.json"),
-            &node.stake_keypair,
-        )?;
+        if !private {
+            save_key(
+                root,
+                &format!("vote-{index}.keypair.json"),
+                &node.vote_keypair,
+            )?;
+        }
+        if !private {
+            save_key(
+                root,
+                &format!("stake-{index}.keypair.json"),
+                &node.stake_keypair,
+            )?;
+        }
+        if private {
+            save_key(root, &format!("voter-{index}.keypair.json"), &voters[index])?;
+        }
         create_new_ledger(
             &root.join(format!("ledger-{index}")),
             &genesis,
@@ -256,15 +329,39 @@ fn initialize(root: &Path) -> Result<()> {
         )?;
         identities.push(node.node_keypair.pubkey().to_string());
     }
-    fs::write(
-        root.join("network.json"),
-        serde_json::to_vec_pretty(&json!({
+    let network_config = native_wallet::keys::Network {
+        network,
+        genesis_hash: genesis.hash().to_string(),
+    };
+    let roles = if let Some((cold_password, sponsor_password)) = passwords {
+        Some(key_setup::save(
+            root,
+            &network_config,
+            &nodes,
+            &voters,
+            &withdrawers,
+            &stake_controls,
+            &treasury,
+            &sponsor,
+            cold_password,
+            sponsor_password,
+        )?)
+    } else {
+        None
+    };
+    native_wallet::keys::write_private_new(
+        &root.join("network.json"),
+        &serde_json::to_vec_pretty(&json!({
             "network": network, "genesis_hash": genesis.hash().to_string(), "identities": identities,
             "pool": pool_address().to_string(), "program": id().to_string(),
             "pool_format": "NPOOL003",
-            "fixture_keys_are_public": true
+            "fixture_keys_are_public": !private,
+            "key_mode": if private {"local-testnet-rehearsal-v1"} else {"disposable-fixture"},
+            "roles": roles,
+            "vote_accounts": nodes.iter().map(|node|node.vote_keypair.pubkey().to_string()).collect::<Vec<_>>()
         }))?,
     )?;
+    fs::File::open(root)?.sync_all()?;
     println!(
         "{}",
         json!({"genesis_hash":genesis.hash().to_string(),"pool":pool_address().to_string()})
@@ -725,7 +822,16 @@ fn main() -> Result<()> {
         return fault_lab::run(&command, &root, &args.collect::<Vec<_>>());
     }
     if command == "init" {
-        return initialize(&root);
+        return initialize(&root, None);
+    }
+    if command == "init-private" {
+        return key_setup::initialize_private(&root, &args.collect::<Vec<_>>());
+    }
+    if command == "restore-hot" {
+        return key_setup::restore_hot(&root, &args.collect::<Vec<_>>());
+    }
+    if command == "restore-sponsor" {
+        return key_setup::restore_sponsor(&root, &args.collect::<Vec<_>>());
     }
     if command == "bootstrap-check" {
         let name = args.next().ok_or("expected ledger name")?;
@@ -744,7 +850,21 @@ fn main() -> Result<()> {
     }
     if command == "restart-state" {
         let index = args.next().ok_or("expected validator index")?.parse()?;
-        return restart_state(&root, index, &args.next().ok_or("expected ledger name")?);
+        return restart_state(
+            &root,
+            index,
+            &args.next().ok_or("expected ledger name")?,
+            false,
+        );
+    }
+    if command == "replay-plan" {
+        let index = args.next().ok_or("expected validator index")?.parse()?;
+        return restart_state(
+            &root,
+            index,
+            &args.next().ok_or("expected ledger name")?,
+            true,
+        );
     }
     if command == "prepare-recovery" {
         let name = args.next().unwrap_or_else(|| "ledger-recovered".to_owned());

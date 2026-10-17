@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import shutil
 import socket
+import stat
 import subprocess
 import time
 import urllib.request
@@ -35,7 +36,11 @@ def rpc(port, method, params=None):
 def load(root):
     config = json.loads((root / "network.json").read_text())
     if config.get("fixture_keys_are_public") is not True:
-        raise RuntimeError("not a disposable fixture network")
+        if (config.get("fixture_keys_are_public") is not False or
+                config.get("key_mode") != "local-testnet-rehearsal-v1" or
+                root.is_symlink() or not root.resolve().is_relative_to(PROJECT / ".data") or
+                root.stat().st_mode & 0o077):
+            raise RuntimeError("not a disposable fixture or owner-only local testnet rehearsal")
     return config
 
 
@@ -91,6 +96,16 @@ def restart_state(root, index):
 
 def start(root, index, archive=False, coordinated=False, faults=False):
     config = load(root)
+    private = config.get("key_mode") == "local-testnet-rehearsal-v1"
+    if private and faults:
+        raise RuntimeError("fault fixtures require disposable keys")
+    if private:
+        for role in ["identity", "voter"]:
+            key_path = root / f"{role}-{index}.keypair.json"
+            with os.fdopen(os.open(key_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as key:
+                metadata = os.fstat(key.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_size > 4096:
+                    raise RuntimeError("rehearsal validator hot keys must be bounded owner-only regular files")
     if config.get("pool_format") != "NPOOL003":
         raise RuntimeError("incompatible development pool format; preserve this network and initialize a fresh --root")
     with socket.socket() as probe:
@@ -110,12 +125,12 @@ def start(root, index, archive=False, coordinated=False, faults=False):
         if list(path.glob("snapshot-*.tar.zst")) or (path / "snapshots").exists():
             raise RuntimeError("snapshot ledger requires a saved tower")
         subprocess.run([str(LAB), "bootstrap-check", str(root), path.name], check=True, capture_output=True, timeout=30)
-    checkpoint = restart_state(root, index) if coordinated else None
+    checkpoint = restart_state(root, index) if coordinated and has_tower else None
     args = [str(VALIDATOR), "--ledger", str(path),
         "--identity", str(root / f"identity-{index}.keypair.json"),
         "--tower", str(tower),
-        "--vote-account", str(root / f"vote-{index}.keypair.json"),
-        "--authorized-voter", str(root / f"vote-{index}.keypair.json"),
+        "--vote-account", config["vote_accounts"][index] if private else str(root / f"vote-{index}.keypair.json"),
+        "--authorized-voter", str(root / f"{'voter' if private else 'vote'}-{index}.keypair.json"),
         "--expected-genesis-hash", config["genesis_hash"],
         "--bind-address", "127.0.0.1", "--gossip-host", "127.0.0.1",
         "--gossip-port", str(18000 + index * 1000),

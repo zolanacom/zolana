@@ -8,6 +8,35 @@ from wallet_ui import Handler, WalletApp
 
 
 class WalletUiTests(unittest.TestCase):
+    def test_rehearsal_sponsor_is_operator_selected_and_requires_private_password_file(self):
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name).resolve()
+            root = project / ".data" / "rehearsal"
+            root.mkdir(parents=True, mode=0o700)
+            secret = project / "operator.password"
+            secret.write_bytes(b"separate operator password")
+            secret.chmod(0o600)
+            config = {"pool_format": "NPOOL003", "fixture_keys_are_public": False,
+                      "key_mode": "local-testnet-rehearsal-v1"}
+            with patch("wallet_ui.PROJECT", project), patch("wallet_ui.load", return_value=config):
+                with self.assertRaisesRegex(ValueError, "operator"):
+                    WalletApp(root)
+                secret.chmod(0o644)
+                with self.assertRaisesRegex(ValueError, "owner-only"):
+                    WalletApp(root, sponsor_password_file=secret)
+                secret.chmod(0o600)
+                app = WalletApp(root, sponsor_password_file=secret)
+                app.ack.touch()
+                with patch.object(app, "cli", return_value={}) as cli:
+                    app.action({"action": "fund", "password": "local-test-password",
+                                "sponsor_password_file": "attacker", "sponsor_request_id": "reuse-this-request"})
+                    extra = cli.call_args.args[2]
+                    self.assertNotIn("--sponsor", extra)
+                    self.assertEqual(extra[extra.index("--sponsor-password-file") + 1], str(secret))
+                    self.assertNotIn("reuse-this-request", extra)
+                    app.action({"action": "reclaim", "password": "local-test-password"})
+                    self.assertNotIn("--sponsor-request-id", cli.call_args.args[2])
+
     def app(self, root):
         root = root.resolve()
         with patch("wallet_ui.PROJECT", root), patch("wallet_ui.load", return_value={"pool_format": "NPOOL003", "fixture_keys_are_public": True}):

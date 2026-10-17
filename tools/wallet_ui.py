@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import secrets
+import stat
 import subprocess
 import tempfile
 import threading
@@ -17,13 +18,24 @@ WALLET = PROJECT / "target/debug/native-wallet"
 
 
 class WalletApp:
-    def __init__(self, root, profile="default", rpc_index=0):
+    def __init__(self, root, profile="default", rpc_index=0, sponsor_password_file=None):
         self.root = root.resolve()
         if not self.root.is_relative_to(PROJECT / ".data"):
             raise ValueError("wallet UI requires a local .data fixture")
         config = load(self.root)
-        if config.get("pool_format") != "NPOOL003" or config.get("fixture_keys_are_public") is not True:
-            raise ValueError("wallet UI requires a disposable NPOOL003 fixture")
+        self.private_setup = config.get("key_mode") == "local-testnet-rehearsal-v1" and config.get("fixture_keys_are_public") is False
+        if config.get("pool_format") != "NPOOL003" or (config.get("fixture_keys_are_public") is not True and not self.private_setup):
+            raise ValueError("wallet UI requires a local NPOOL003 fixture or rehearsal")
+        self.sponsor_password_file = None
+        if self.private_setup:
+            if sponsor_password_file is None:
+                raise ValueError("rehearsal wallet requires an operator sponsor password file")
+            path = Path(sponsor_password_file).absolute()
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as secret:
+                metadata = os.fstat(secret.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or not 12 <= metadata.st_size <= 1024:
+                    raise ValueError("sponsor password file must be bounded and owner-only")
+            self.sponsor_password_file = path
         if not isinstance(profile, str) or not 1 <= len(profile) <= 24 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in profile):
             raise ValueError("use a short lowercase wallet profile name")
         self.directory = self.root / ("wallet-ui" if profile == "default" else "wallet-ui-" + profile)
@@ -43,7 +55,7 @@ class WalletApp:
         return {"exists": self.wallet.exists() or self.backup.exists(), "needs_backup": not self.ack.exists(),
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
-                "network": "Local test network", "solana_funding_available": False}
+                "network": "Local testnet rehearsal" if self.private_setup else "Local test network", "solana_funding_available": False}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -90,6 +102,10 @@ class WalletApp:
             if not self.ack.exists():
                 raise ValueError("Save and confirm your encrypted recovery file before making payments.")
             sponsor = ["--sponsor", str(self.root / "sponsor.keypair.json")]
+            if self.private_setup:
+                sponsor = ["--sponsor-password-file", str(self.sponsor_password_file)]
+                if action in {"fund", "send"}:
+                    sponsor += ["--sponsor-request-id", secrets.token_hex(16)]
             if action == "fund":
                 return self.cli("deposit", password, sponsor + ["--amount", "100"])
             if action == "send":
@@ -186,13 +202,17 @@ if __name__ == "__main__":
     parser.add_argument("--start-network", action="store_true")
     parser.add_argument("--profile", default="default")
     parser.add_argument("--rpc-index", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--sponsor-password-file", type=Path)
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535 or not 60 <= args.duration <= 3600:
         parser.error("use a nonprivileged port and a session of 60..3600 seconds")
-    app = WalletApp(args.root, args.profile, args.rpc_index)
+    app = WalletApp(args.root, args.profile, args.rpc_index, args.sponsor_password_file)
     children = [None, None]
     try:
         if args.start_network:
+            if all(list((app.root / f"consensus-{index}").glob("tower-*.bin")) for index in [0, 1]):
+                from replay_localnet import prepare
+                prepare(app.root)
             for index in [0, 1]:
                 children[index] = start(app.root, index, coordinated=True)
                 wait_rpc(app.root, index)

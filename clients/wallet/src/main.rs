@@ -21,6 +21,8 @@ fn run() -> Result<()> {
         println!("init/restore: --backup <encrypted-seed-backup.json>");
         println!("balance/deposit/send/withdraw/resolve/reclaim: --rpc http://127.0.0.1:<port>");
         println!("deposit/send/withdraw: --sponsor <private-keypair.json> --amount <native-units>");
+        println!("rehearsal deposit/send: --sponsor-password-file <private-operator-file> --sponsor-request-id <unique-id> --amount <native-units>; fixed encrypted sponsor/policy beside network.json");
+        println!("rehearsal reclaim: --sponsor-password-file; reuses the saved original reservation for cleanup only. Sponsored withdrawals are disabled.");
         println!("deposit/send: --to <npriv1-address> (deposit defaults to this wallet)");
         println!("Withdrawal pays the signed public sponsor; --to is not supported.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
@@ -49,6 +51,8 @@ fn run() -> Result<()> {
             "--amount",
             "--to",
             "--history",
+            "--sponsor-password-file",
+            "--sponsor-request-id",
         ]
         .contains(&flag.as_str())
         {
@@ -68,6 +72,17 @@ fn run() -> Result<()> {
             .ok_or_else(|| format!("missing {name}").into())
     };
     let network = Network::load(Path::new(required("--network")?))?;
+    let configuration: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(required("--network")?)?)?;
+    let private_setup = configuration["key_mode"] == "local-testnet-rehearsal-v1";
+    if !private_setup && configuration["fixture_keys_are_public"] != true {
+        return Err(
+            "network must explicitly select disposable fixture or guarded rehearsal keys".into(),
+        );
+    }
+    if private_setup && args.contains_key("--sponsor") {
+        return Err("rehearsal network requires its encrypted sponsor and durable policy; plaintext sponsor override is forbidden".into());
+    }
     if command == "archive" {
         let chain = Chain::connect(required("--rpc")?, network)?;
         println!(
@@ -120,13 +135,32 @@ fn run() -> Result<()> {
     }
     // Hold the OS lock from before sync/proving until all submission/recovery work ends.
     let operation = WalletOperation::acquire(path)?;
-    let chain = Chain::connect(required("--rpc")?, network)?;
+    let mut chain = Chain::connect(required("--rpc")?, network.clone())?;
     if command == "resolve" {
         println!("{}", chain.resolve(&wallet, &operation)?);
         return Ok(());
     }
     if command == "reclaim" {
-        let sponsor = load_sponsor(Path::new(required("--sponsor")?))?;
+        let sponsor = sponsor_for(&args, private_setup, &network)?;
+        if private_setup {
+            let staged: serde_json::Value = serde_json::from_slice(&read_private(
+                Path::new(&format!("{}.staging.json", path.display())),
+                4096,
+            )?)?;
+            let request = staged["sponsor_request_id"]
+                .as_str()
+                .ok_or("staging journal has no original sponsor reservation")?;
+            let root = Path::new(required("--network")?)
+                .parent()
+                .unwrap_or(Path::new("."));
+            chain = chain.with_sponsor_budget(native_wallet::sponsor::Budget::recover(
+                &root.join("sponsor-policy.json"),
+                &network,
+                &sponsor.pubkey(),
+                &wallet.address_text(),
+                request,
+            )?);
+        }
         println!("{}", chain.reclaim(&sponsor, &operation)?);
         return Ok(());
     }
@@ -145,7 +179,7 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
-    let sponsor = load_sponsor(Path::new(required("--sponsor")?))?;
+    let sponsor = sponsor_for(&args, private_setup, &network)?;
     let amount = required("--amount")?.parse::<u64>()?;
     let own_address = wallet.address_text();
     let payment = match command.as_str() {
@@ -160,6 +194,20 @@ fn run() -> Result<()> {
         "withdraw" => Payment::Withdraw { amount },
         _ => return Err("unknown wallet command; use --help".into()),
     };
+    // Managed withdrawals are denied by policy even if the wallet has no funds.
+    if command != "withdraw" {
+        payments::validate(&wallet, &synced.state, &payment)?;
+    }
+    if private_setup {
+        chain = chain.with_sponsor_budget(reserve_sponsor(
+            &args,
+            &network,
+            &sponsor,
+            &wallet.address_text(),
+            &command,
+            amount,
+        )?);
+    }
     let bytes = payments::build(
         &wallet,
         &synced.state,
@@ -177,6 +225,60 @@ fn load_sponsor(path: &Path) -> Result<Keypair> {
     let secret: zeroize::Zeroizing<Vec<u8>> =
         zeroize::Zeroizing::new(serde_json::from_slice(&raw)?);
     Ok(Keypair::try_from(secret.as_slice())?)
+}
+
+fn sponsor_for(
+    args: &BTreeMap<String, String>,
+    private: bool,
+    network: &Network,
+) -> Result<Keypair> {
+    if !private {
+        if args.contains_key("--sponsor-password-file") || args.contains_key("--sponsor-request-id")
+        {
+            return Err("guarded sponsor options require a rehearsal network".into());
+        }
+        return load_sponsor(Path::new(args.get("--sponsor").ok_or("missing --sponsor")?));
+    }
+    let password_path = args
+        .get("--sponsor-password-file")
+        .ok_or("missing --sponsor-password-file")?;
+    if password_path == "-" {
+        return Err("sponsor password needs a separate owner-only operator file".into());
+    }
+    let password = read_password(Path::new(password_path))?;
+    let root = Path::new(args.get("--network").ok_or("missing --network")?)
+        .parent()
+        .unwrap_or(Path::new("."));
+    let mut keys =
+        native_wallet::operator::open(&root.join("sponsor.enc.json"), network, &password)?;
+    if keys.len() != 1 {
+        return Err("hot sponsor vault must contain only the sponsor".into());
+    }
+    keys.remove("sponsor")
+        .ok_or_else(|| "hot sponsor role missing".into())
+}
+
+fn reserve_sponsor(
+    args: &BTreeMap<String, String>,
+    network: &Network,
+    sponsor: &Keypair,
+    wallet: &str,
+    kind: &str,
+    amount: u64,
+) -> Result<native_wallet::sponsor::Budget> {
+    let root = Path::new(args.get("--network").ok_or("missing --network")?)
+        .parent()
+        .unwrap_or(Path::new("."));
+    native_wallet::sponsor::Budget::reserve(
+        &root.join("sponsor-policy.json"),
+        network,
+        &sponsor.pubkey(),
+        wallet,
+        kind,
+        amount,
+        args.get("--sponsor-request-id")
+            .ok_or("missing --sponsor-request-id")?,
+    )
 }
 
 fn main() {

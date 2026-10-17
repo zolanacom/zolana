@@ -21,6 +21,35 @@ pub enum Payment<'a> {
     Withdraw { amount: u64 },
 }
 
+/// Reject address/amount/balance mistakes before reserving a sponsor attempt or
+/// constructing the expensive proving key. Proof building still checks spends.
+pub fn validate(wallet: &WalletKey, state: &WalletState, payment: &Payment<'_>) -> Result<()> {
+    if state.pool.network != wallet.network.network {
+        return Err("wallet and payment state are on different networks".into());
+    }
+    let (amount, spends) = match payment {
+        Payment::Deposit { amount, recipient } => {
+            decode_address(&wallet.network, recipient)?;
+            (*amount, false)
+        }
+        Payment::Send { amount, recipient } => {
+            decode_address(&wallet.network, recipient)?;
+            (*amount, true)
+        }
+        Payment::Withdraw { amount } => (*amount, true),
+    };
+    i64::try_from(amount)?;
+    if amount == 0 {
+        return Err("payment amount must be positive".into());
+    }
+    if spends && amount > state.max_payment()? {
+        return Err(
+            "insufficient value in two notes; consolidate smaller notes before this payment".into(),
+        );
+    }
+    Ok(())
+}
+
 pub fn build(
     wallet: &WalletKey,
     state: &WalletState,
@@ -53,6 +82,7 @@ impl PaymentProver {
         expires_at: u64,
         payment: Payment<'_>,
     ) -> Result<Vec<u8>> {
+        validate(wallet, state, &payment)?;
         if state.pool.network != wallet.network.network {
             return Err("wallet and payment state are on different networks".into());
         }

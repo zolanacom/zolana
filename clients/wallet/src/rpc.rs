@@ -6,6 +6,7 @@ use crate::{
     operation::WalletOperation,
     Result,
 };
+use base64::Engine;
 use native_payment_program::{
     id, instructions, pool_address,
     staging::{Buffer, ACCOUNT_BYTES},
@@ -45,6 +46,7 @@ use std::{
 pub struct Chain {
     rpc: RpcClient,
     network: Network,
+    sponsor_budget: Option<crate::sponsor::Budget>,
 }
 
 pub struct Synced {
@@ -202,6 +204,8 @@ struct StagingRecovery {
     expiry: u64,
     payload_len: u32,
     payload_digest: [u8; 32],
+    #[serde(default)]
+    sponsor_request_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -235,7 +239,38 @@ impl Chain {
         if rpc.get_genesis_hash()?.to_string() != network.genesis_hash {
             return Err("RPC genesis does not match the wallet network".into());
         }
-        Ok(Self { rpc, network })
+        Ok(Self {
+            rpc,
+            network,
+            sponsor_budget: None,
+        })
+    }
+
+    pub fn with_sponsor_budget(mut self, budget: crate::sponsor::Budget) -> Self {
+        self.sponsor_budget = Some(budget);
+        self
+    }
+
+    fn charge_sponsor(&self, tx: &Transaction, native_debit: u64) -> Result<()> {
+        if let Some(budget) = &self.sponsor_budget {
+            // Initialization/finalization use a confirmed recent blockhash. A
+            // finalized-bank fee lookup can reject a perfectly live hash.
+            let response: solana_rpc_client_api::response::Response<Option<u64>> = self.rpc.send(
+                solana_rpc_client_api::request::RpcRequest::GetFeeForMessage,
+                serde_json::json!([
+                    base64::engine::general_purpose::STANDARD.encode(tx.message.serialize()),
+                    CommitmentConfig::confirmed()
+                ]),
+            )?;
+            let fee = response
+                .value
+                .ok_or("sponsor fee unavailable for this blockhash")?;
+            budget.charge(
+                fee.checked_add(native_debit)
+                    .ok_or("sponsor debit overflow")?,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn sync(&self, wallet: &WalletKey) -> Result<Synced> {
@@ -531,9 +566,14 @@ impl Chain {
     }
 
     fn send_signed(&self, tx: &Transaction) -> Result<Signature> {
+        self.send_signed_debit(tx, 0)
+    }
+
+    fn send_signed_debit(&self, tx: &Transaction, native_debit: u64) -> Result<Signature> {
         if 1 + tx.signatures.len() * 64 + tx.message_data().len() > 1232 {
             return Err("signed wallet transaction exceeds the network packet limit".into());
         }
+        self.charge_sponsor(tx, native_debit)?;
         let signature = self.rpc.send_transaction_with_config(
             tx,
             RpcSendTransactionConfig {
@@ -656,13 +696,15 @@ impl Chain {
         let (blockhash, last_valid_block_height) = self
             .rpc
             .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?;
+        let staging_rent = self
+            .rpc
+            .get_minimum_balance_for_rent_exemption(ACCOUNT_BYTES)?;
         let initialization = Transaction::new_signed_with_payer(
             &[
                 system::create_account(
                     &sponsor.pubkey(),
                     &buffer.pubkey(),
-                    self.rpc
-                        .get_minimum_balance_for_rent_exemption(ACCOUNT_BYTES)?,
+                    staging_rent,
                     ACCOUNT_BYTES as u64,
                     &id(),
                 ),
@@ -692,9 +734,13 @@ impl Chain {
                 expiry,
                 payload_len: bytes.len() as u32,
                 payload_digest: payload_digest(bytes),
+                sponsor_request_id: self
+                    .sponsor_budget
+                    .as_ref()
+                    .map(|budget| budget.request_id().to_owned()),
             })?,
         )?;
-        self.send_signed(&initialization)?;
+        self.send_signed_debit(&initialization, staging_rent)?;
         let batches = crate::upload::remaining(buffer.pubkey(), sponsor.pubkey(), bytes);
         let upload_transactions = 1 + batches.len();
         for batch in batches {
@@ -728,6 +774,21 @@ impl Chain {
             return Err("finalization exceeds the signed packet limit".into());
         }
         let signature = tx.signatures[0];
+        // Gross debit includes the temporary staging rent, permanent markers,
+        // public deposit and every fee. Refunds/withdrawal credits never refill it.
+        let marker_rent = self.rpc.get_minimum_balance_for_rent_exemption(
+            native_payment_program::nullifiers::MARKER_BYTES,
+        )?;
+        let deposit = if payment.context.public_value_balance < 0 {
+            payment.context.public_value_balance.unsigned_abs()
+        } else {
+            0
+        };
+        let native_debit = marker_rent
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(deposit))
+            .ok_or("sponsor debit overflow")?;
+        self.charge_sponsor(&tx, native_debit)?;
         // Durable create_new is also an inter-process lock. The signed identity
         // is saved before the first possible broadcast of value-changing effects.
         write_private_new(
@@ -906,6 +967,67 @@ mod recovery_tests {
     use solana_rpc_client::mock_sender::MocksMap;
     use solana_rpc_client_api::request::RpcRequest;
 
+    #[test]
+    fn sponsor_checks_rpc_fee_plus_native_debit_before_broadcast() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("policy");
+        let payer = Keypair::new();
+        let network = Network {
+            network: [3; 32],
+            genesis_hash: bs58::encode([4; 32]).into_string(),
+        };
+        crate::sponsor::Policy {
+            format: "native-sponsor-policy-v1".into(),
+            network: network.clone(),
+            sponsor: payer.pubkey().to_string(),
+            operation_allowance: 10,
+            lifetime_allowance: 10,
+            max_deposit: 100,
+            max_send: 100,
+            max_requests_per_wallet: 1,
+        }
+        .create(&path)
+        .unwrap();
+        let budget = crate::sponsor::Budget::reserve(
+            &path,
+            &network,
+            &payer.pubkey(),
+            "wallet",
+            "deposit",
+            1,
+            "fee-test-request-0001",
+        )
+        .unwrap();
+        let chain = Chain {
+            rpc: RpcClient::new_mock_with_mocks_map(
+                "succeeds",
+                MocksMap::from_iter(std::iter::repeat_n(
+                    (
+                        RpcRequest::GetFeeForMessage,
+                        json!({"context":{"slot":1},"value":7}),
+                    ),
+                    3,
+                )),
+            ),
+            network,
+            sponsor_budget: Some(budget),
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[system::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1)],
+            Some(&payer.pubkey()),
+            &[&payer],
+            Default::default(),
+        );
+        assert!(chain.charge_sponsor(&tx, 4).is_err());
+        chain.charge_sponsor(&tx, 3).unwrap();
+        assert!(chain.charge_sponsor(&tx, 0).is_err());
+        let ledger: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.path().join("policy.reservations.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ledger["requests"][0]["charged"], 10);
+    }
+
     fn cached_fixture(
         target: u64,
         blocks: Vec<serde_json::Value>,
@@ -941,6 +1063,7 @@ mod recovery_tests {
         }
         let chain = Chain {
             rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
+            sponsor_budget: None,
             network,
         };
         (wallet, checkpoint, chain)
@@ -1133,6 +1256,7 @@ mod recovery_tests {
             expiry: 2000,
             payload_len: 10,
             payload_digest: [7; 32],
+            sponsor_request_id: None,
         };
         write_private_new(&operation.staging, &serde_json::to_vec(&recovery).unwrap()).unwrap();
         network
@@ -1146,6 +1270,7 @@ mod recovery_tests {
         ]);
         Chain {
             rpc: RpcClient::new_mock_with_mocks_map(url, mocks),
+            sponsor_budget: None,
             network,
         }
     }
