@@ -231,6 +231,25 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def prepare_snapshot_recovery(root, name, shutdown_tip):
+    """Copy a newer full archive to a genesis-only ledger before selecting it."""
+    load(root)
+    if len(os.fsencode(root / name / "admin.rpc")) >= 104:
+        raise RuntimeError("recovered ledger path exceeds the portable local admin socket limit")
+    selected = newer_full_snapshot(ledger(root, 0), shutdown_tip)
+    if selected is None:
+        raise RuntimeError("no full snapshot beyond the shutdown tip")
+    slot, archive = selected
+    checksum = digest(archive)
+    subprocess.run([str(LAB), "prepare-recovery", str(root), name], check=True, capture_output=True, timeout=30)
+    destination = root / name / archive.name
+    shutil.copy2(archive, destination)
+    if digest(destination) != checksum:
+        raise RuntimeError("snapshot copy digest mismatch; active ledger unchanged")
+    return {"archive": archive.name, "archive_slot": slot, "archive_sha256": checksum,
+            "fresh_ledger": name, "shutdown_slot_barrier": shutdown_tip}
+
+
 def verify(root):
     wait_rpc(root, 0)
     if (root / "recovery-result.json").exists():
@@ -262,15 +281,11 @@ def verify(root):
     while (root / f"ledger-recovered-{recovery_index}").exists():
         recovery_index += 1
     recovery_name = f"ledger-recovered-{recovery_index}"
-    subprocess.run([str(LAB), "prepare-recovery", str(root), recovery_name], check=True)
-    recovered = root / recovery_name
-    destination = recovered / archive.name
-    archive_digest = digest(archive)
-    shutil.copy2(archive, destination)
-    if digest(destination) != archive_digest:
-        raise RuntimeError("snapshot copy digest mismatch")
-    (root / "snapshot-input.json").write_text(json.dumps({"archive": archive.name, "archive_slot": archive_slot, "archive_sha256": archive_digest, "fresh_ledger": recovered.name}, indent=2))
-    (root / "active-ledger-1.json").write_text(json.dumps(recovered.name))
+    snapshot = prepare_snapshot_recovery(root, recovery_name, snapshot_barrier)
+    archive_slot, archive_digest = snapshot["archive_slot"], snapshot["archive_sha256"]
+    archive = Path(snapshot["archive"])
+    (root / "snapshot-input.json").write_text(json.dumps(snapshot, indent=2))
+    (root / "active-ledger-1.json").write_text(json.dumps(recovery_name))
     log = root / "validator-1.log"
     previous_size = log.stat().st_size
     start(root, 1, archive=True)

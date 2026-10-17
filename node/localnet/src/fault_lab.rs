@@ -20,7 +20,7 @@ pub(super) fn run(command: &str, root: &Path, args: &[String]) -> Result<()> {
     let staging = root.join(format!("{label}-staging.json"));
     let network: [u8; 32] = serde_json::from_value(config["network"].clone())?;
     let sponsor = read_keypair_file(root.join("sponsor.keypair.json"))?;
-    if command == "fault-prepare" {
+    if command == "fault-prepare" || command == "fault-prepare-deposit" {
         let amount = args.get(1).ok_or("expected transfer amount")?.parse()?;
         let net = Network::load(&root.join("network.json"))?;
         let password = read_password(&root.join("wallets/unlock.password"))?;
@@ -28,15 +28,25 @@ pub(super) fn run(command: &str, root: &Path, args: &[String]) -> Result<()> {
         let bob = WalletKey::open(&root.join("wallets/bob.wallet.json"), &password, &net)?;
         let chain = Chain::connect("http://127.0.0.1:18899", net)?;
         let synced = chain.sync(&alice)?;
+        let recipient = bob.address_text();
+        let deposit_recipient = alice.address_text();
+        let payment = if command == "fault-prepare-deposit" {
+            Payment::Deposit {
+                amount,
+                recipient: &deposit_recipient,
+            }
+        } else {
+            Payment::Send {
+                amount,
+                recipient: &recipient,
+            }
+        };
         let bytes = payments::build(
             &alice,
             &synced.state,
             sponsor.pubkey().to_bytes(),
             chain.expiry()?,
-            Payment::Send {
-                amount,
-                recipient: &bob.address_text(),
-            },
+            payment,
         )?;
         fs::write(&payload, bytes)?;
     }
@@ -45,7 +55,10 @@ pub(super) fn run(command: &str, root: &Path, args: &[String]) -> Result<()> {
     let expiry = payment.context.expires_at;
     let markers = marker_keys(network, &bytes)?;
     let describe = json!({"expiry":expiry,"markers":markers.iter().map(ToString::to_string).collect::<Vec<_>>(),"public_balance":payment.context.public_value_balance});
-    if command == "fault-prepare" || command == "fault-describe" {
+    if command == "fault-prepare"
+        || command == "fault-prepare-deposit"
+        || command == "fault-describe"
+    {
         println!("{describe}");
         return Ok(());
     }
@@ -71,6 +84,43 @@ pub(super) fn run(command: &str, root: &Path, args: &[String]) -> Result<()> {
         .parse()?;
     match command {
         "fault-finalize" => finalize(&rpc, &sponsor, &sponsor, buffer, false)?,
+        "fault-expired" => {
+            if rpc.get_slot()? <= expiry {
+                return Err("candidate is still within its authorization lifetime".into());
+            }
+            let before = pool(&rpc)?.0;
+            let staged = rpc.get_account(&buffer)?;
+            if staged.data[88] != 1 {
+                return Err("expired candidate was not sealed".into());
+            }
+            for marker in &markers {
+                if rpc
+                    .get_account_with_commitment(marker, CommitmentConfig::confirmed())?
+                    .value
+                    .is_some()
+                {
+                    return Err("expired deposit fixture already has a nullifier account".into());
+                }
+            }
+            rejected(
+                finalize(&rpc, &sponsor, &sponsor, buffer, false),
+                "expired staged payment",
+                1,
+                InstructionError::InvalidArgument,
+            )?;
+            if pool(&rpc)?.0 != before || rpc.get_account(&buffer)? != staged {
+                return Err("expired payment changed pool or staging".into());
+            }
+            for marker in &markers {
+                if rpc
+                    .get_account_with_commitment(marker, CommitmentConfig::confirmed())?
+                    .value
+                    .is_some()
+                {
+                    return Err("expired payment created a nullifier".into());
+                }
+            }
+        }
         "fault-reject" => {
             let before = pool(&rpc)?.0;
             rejected(

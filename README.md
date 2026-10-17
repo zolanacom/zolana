@@ -4,6 +4,8 @@ Local development of protocol-native shielded payments for an independent Agave-
 
 This repository starts from upstream Agave source and a new development history. Networking and consensus are retained while a separate payment module is evaluated. Public transfers remain supported in the minimal design; privacy is an additional native capability, not a claim about every transaction or application.
 
+See development status for the current prototype stage, completed components and production gaps.
+
 ## Layout
 
 - `protocol/payments/`: bounded payment validation and submission primitives.
@@ -34,6 +36,8 @@ The local wallet supports random private keys, encrypted seed-only backups, netw
 For majority or whole-cluster restarts, use the [coordinated restart runbook](docs/coordinated-restart-runbook.md). The explicit path verifies a saved tower and retained bank checkpoint before invoking the upstream hash/shred-version/stake gate, then requires new finalization. It preserves ordinary restart guards and signed ledger data.
 
 The [fault recovery runner](docs/fault-recovery-runbook.md) exercises owned-process SIGKILL, competing private payments during a shred partition and canonical rejoin. Its explicitly enabled loopback fault control uses the upstream shred-reception gate. See the fault validation record for observed recovery, nullifier rollback and remaining coverage.
+
+The [offline recovery runner](docs/offline-recovery-runbook.md) covers multiple epoch boundaries, expired staging, snapshot fallback and damaged-archive rejection. Its validation record preserves the failed ordinary-repair attempt separately from successful snapshot-assisted recovery.
 
 ## Attribution
 
