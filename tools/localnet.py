@@ -70,7 +70,26 @@ def wait_rpc(root, index, timeout=120):
     raise RuntimeError(f"validator {index} did not become ready: {last}; inspect its local log")
 
 
-def start(root, index, archive=False):
+def restart_state(root, index):
+    config = load(root)
+    result = subprocess.run([str(LAB), "restart-state", str(root), str(index), ledger(root, index).name],
+                            check=True, capture_output=True, text=True, timeout=30)
+    state = json.loads(result.stdout)
+    if state["genesis_hash"] != config["genesis_hash"] or state["identity"] != config["identities"][index]:
+        raise RuntimeError("restart checkpoint identity/genesis mismatch")
+    # Upstream treats wait_slot == restored root as a hard fork and relaxes
+    # tower restoration. This helper never authorizes that branch.
+    archives = newer_full_snapshot(ledger(root, index), -1)
+    bank_snapshots = ledger(root, index) / "snapshots"
+    snapshot_slots = [int(p.name) for p in bank_snapshots.iterdir() if p.is_dir() and p.name.isdigit()] if bank_snapshots.exists() else []
+    if archives:
+        snapshot_slots.append(archives[0])
+    if any(slot >= state["slot"] for slot in snapshot_slots):
+        raise RuntimeError("snapshot root reaches restart checkpoint; refusing tower-discard hard-fork path")
+    return state
+
+
+def start(root, index, archive=False, coordinated=False):
     config = load(root)
     if config.get("pool_format") != "NPOOL002":
         raise RuntimeError("incompatible development pool format; preserve this network and initialize a fresh --root")
@@ -83,6 +102,15 @@ def start(root, index, archive=False):
         raise RuntimeError("ledger path exceeds the portable local admin socket limit")
     tower = root / f"consensus-{index}"
     tower.mkdir(mode=0o700, exist_ok=True)
+    has_tower = bool(list(tower.glob("tower-*.bin")))
+    launched = root / f"validator-{index}.started"
+    if not has_tower and ((root / f"validator-{index}.pid").exists() or launched.exists()):
+        raise RuntimeError("previously launched identity has no saved tower; refusing bootstrap leadership")
+    if not has_tower:
+        if list(path.glob("snapshot-*.tar.zst")) or (path / "snapshots").exists():
+            raise RuntimeError("snapshot ledger requires a saved tower")
+        subprocess.run([str(LAB), "bootstrap-check", str(root), path.name], check=True, capture_output=True, timeout=30)
+    checkpoint = restart_state(root, index) if coordinated else None
     args = [str(VALIDATOR), "--ledger", str(path),
         "--identity", str(root / f"identity-{index}.keypair.json"),
         "--tower", str(tower),
@@ -104,20 +132,31 @@ def start(root, index, archive=False):
         "--accounts-index-flush-threads", "1", "--replay-transactions-threads", "2",
         "--block-production-num-workers", "2", "--rocksdb-compaction-threads", "1",
         "--rocksdb-flush-threads", "1", "--log", str(root / f"validator-{index}.log")]
-    if list(tower.glob("tower-*.bin")):
+    if has_tower:
         args += ["--require-tower"]
     elif index == 0:
         args += ["--no-wait-for-vote-to-start-leader"]
     if index:
         args += ["--entrypoint", "127.0.0.1:18000"]
+    if checkpoint:
+        args += ["--wait-for-supermajority", str(checkpoint["slot"]),
+                 "--expected-bank-hash", checkpoint["bank_hash"],
+                 "--expected-shred-version", str(checkpoint["shred_version"])]
+        if not index:
+            args += ["--entrypoint", "127.0.0.1:19000"]
+        # Retain the signed inputs for review. Never copy, delete or reset a tower.
+        checkpoint["tower_files"] = {p.name: digest(p) for p in tower.glob("tower-*.bin")}
+        (root / f"restart-checkpoint-{index}.json").write_text(json.dumps(checkpoint, indent=2))
     if archive:
         args += ["--use-snapshot-archives-at-startup", "always"]
-    env = dict(os.environ, SOLANA_METRICS_CONFIG="", RUST_LOG=LOG_FILTER)
+    env = dict(os.environ, SOLANA_METRICS_CONFIG="", RUST_LOG=LOG_FILTER + ",solana_core::validator=info")
+    launched.touch(mode=0o600, exist_ok=True)
     with (root / f"validator-{index}.console.log").open("ab") as output:
         process = subprocess.Popen(args, cwd=PROJECT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
     (root / f"validator-{index}.pid").write_text(str(process.pid))
     (root / f"validator-{index}.command.json").write_text(json.dumps(args, indent=2))
     print(f"Started local validator {index}; PID {process.pid}, RPC http://127.0.0.1:{port(index)}", flush=True)
+    return process
 
 
 def stop(root, index):
@@ -156,6 +195,17 @@ def quiet(root):
         wait_rpc(root, index, timeout=10)
         subprocess.run([str(VALIDATOR), "--ledger", str(ledger(root, index)), "set-log-filter", "warn"], check=True, timeout=10)
     print("Both local validators now log warnings/errors while running in the background", flush=True)
+
+
+def wait_finalized_progress(root, indices, checkpoint, timeout=120):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        slots = [rpc(port(index), "getSlot", [{"commitment": "finalized"}]) for index in indices]
+        if min(slots) > checkpoint + 8 and max(slots) - min(slots) <= 12:
+            print(f"New finalized slots after coordinated restart: {slots}", flush=True)
+            return slots
+        time.sleep(0.5)
+    raise RuntimeError("coordinated startup has not resumed finalization; preserve ledgers/towers and inspect logs")
 
 
 def lab(root, command, primary=0, peer=1):
@@ -254,7 +304,7 @@ def verify(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["init", "start", "stop", "status", "verify", "quiet"])
+    parser.add_argument("command", choices=["init", "start", "coordinated-start", "stop", "status", "verify", "quiet"])
     parser.add_argument("--root", type=Path, default=PROJECT / ".data/localnet")
     parser.add_argument("--validator", type=int, choices=[0, 1], help="start or stop only this validator")
     args = parser.parse_args()
@@ -263,10 +313,16 @@ def main():
         raise RuntimeError("local networks must stay inside this project's ignored .data directory")
     if args.command == "init":
         subprocess.run([str(LAB), "init", str(root)], check=True)
-    elif args.command == "start":
-        for index in ([args.validator] if args.validator is not None else [0, 1]):
-            start(root, index)
+    elif args.command in ["start", "coordinated-start"]:
+        indices = [args.validator] if args.validator is not None else [0, 1]
+        for index in indices:
+            # Only the majority identity uses the explicit checkpoint gate when
+            # bringing up the whole fixture; the minority catches up normally.
+            start(root, index, coordinated=args.command == "coordinated-start" and (args.validator is not None or index == 0))
             wait_rpc(root, index)
+        if args.command == "coordinated-start":
+            checkpoint = json.loads((root / f"restart-checkpoint-{indices[0]}.json").read_text())["highest_stored_slot"]
+            wait_finalized_progress(root, indices, checkpoint)
     elif args.command == "stop":
         for index in ([args.validator] if args.validator is not None else [1, 0]):
             stop(root, index)

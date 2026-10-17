@@ -4342,6 +4342,7 @@ name = "native-localnet"
 version = "0.1.0"
 dependencies = [
  "agave-validator",
+ "blake2b_simd",
  "crossbeam-deque",
  "crossbeam-epoch",
  "native-payment-program",
@@ -4364,6 +4365,7 @@ dependencies = [
  "solana-cluster-type",
  "solana-commitment-config",
  "solana-compute-budget-interface",
+ "solana-core",
  "solana-cpi",
  "solana-define-syscall 3.0.0",
  "solana-derivation-path",

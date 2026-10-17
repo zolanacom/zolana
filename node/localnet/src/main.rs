@@ -17,7 +17,10 @@ use solana_epoch_schedule::EpochSchedule;
 use solana_fee_calculator::FeeRateGovernor;
 use solana_instruction::{error::InstructionError, Instruction};
 use solana_keypair::{read_keypair_file, write_keypair_file, Keypair};
-use solana_ledger::{blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions};
+use solana_ledger::{
+    blockstore::{create_new_ledger, Blockstore},
+    blockstore_options::LedgerColumnOptions,
+};
 use solana_pubkey::Pubkey;
 use solana_rent::Rent;
 use solana_rpc_client::rpc_client::RpcClient;
@@ -39,6 +42,117 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+// Primary RocksDB access rejects inspection while a validator owns the ledger.
+// No slots, hashes, or tower lockouts are altered by this inspection.
+fn restart_state(root: &Path, index: usize, name: &str) -> Result<()> {
+    use solana_core::consensus::{tower_storage::FileTowerStorage, Tower};
+    if index > 1
+        || !name.starts_with("ledger-")
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err("invalid local validator or ledger".into());
+    }
+    let identity = read_keypair_file(root.join(format!("identity-{index}.keypair.json")))?;
+    let genesis = solana_genesis_config::GenesisConfig::load(&root.join(name))?;
+    let tower = Tower::restore(
+        &FileTowerStorage::new(root.join(format!("consensus-{index}"))),
+        &identity.pubkey(),
+    )?;
+    let blockstore = Blockstore::open(&root.join(name))?;
+    let highest_stored_slot = blockstore.highest_slot()?.ok_or("empty restart ledger")?;
+    let slot = if blockstore.get_bank_hash(highest_stored_slot).is_some() {
+        highest_stored_slot
+    } else {
+        // A shutdown may leave exactly one adjacent partial slot. Keep its
+        // shreds: upstream next_leader_slot skips slots with existing shreds.
+        // Never rewind/delete it, and refuse more complex tails or forks.
+        let meta = blockstore
+            .meta(highest_stored_slot)?
+            .ok_or("missing tip metadata")?;
+        let parent = highest_stored_slot.checked_sub(1).ok_or("invalid tip")?;
+        if meta.is_full() || meta.parent_slot != Some(parent) {
+            return Err(
+                "incomplete or nonadjacent restart tip; manual ledger repair required".into(),
+            );
+        }
+        parent
+    };
+    let bank_hash = blockstore
+        .get_bank_hash(slot)
+        .ok_or("restart tip has no adjacent frozen checkpoint; refusing rollback")?;
+    if blockstore.is_dead(slot) || blockstore.has_duplicate_shreds_in_slot(slot) {
+        return Err("restart checkpoint is dead or has duplicate shreds".into());
+    }
+    if tower.last_voted_slot().is_none_or(|vote| vote > slot)
+        || tower.root() >= slot
+        || blockstore.max_root() >= slot
+    {
+        return Err(
+            "tower is ahead of checkpoint or checkpoint would discard tower restoration".into(),
+        );
+    }
+    let (vote_slot, vote_hash) = tower.last_voted_slot_hash().ok_or("empty voting tower")?;
+    if blockstore.get_bank_hash(vote_slot) != Some(vote_hash) {
+        return Err("signed tower vote does not match retained bank hash".into());
+    }
+    let mut ancestor = slot;
+    while ancestor > vote_slot {
+        let parent = blockstore
+            .meta(ancestor)?
+            .and_then(|meta| meta.parent_slot)
+            .ok_or("checkpoint has incomplete ancestry")?;
+        if parent >= ancestor {
+            return Err("invalid checkpoint ancestry".into());
+        }
+        ancestor = parent;
+    }
+    if ancestor != vote_slot {
+        return Err("checkpoint is not descended from the signed tower vote".into());
+    }
+    let mut hashes = serde_json::Map::new();
+    let mut shreds = serde_json::Map::new();
+    for (stored_slot, _) in blockstore.slot_meta_iterator(0)? {
+        if let Some(hash) = blockstore.get_bank_hash(stored_slot) {
+            hashes.insert(stored_slot.to_string(), json!(hash.to_string()));
+        }
+        for (kind, values) in [
+            (
+                "data",
+                blockstore
+                    .slot_data_iterator(stored_slot, 0)?
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "coding",
+                blockstore
+                    .slot_coding_iterator(stored_slot, 0)?
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            for ((_, index), bytes) in values {
+                let digest = blake2b_simd::Params::new().hash_length(32).hash(&bytes);
+                shreds.insert(
+                    format!("{stored_slot}/{kind}/{index}"),
+                    json!(digest.to_hex().as_str()),
+                );
+            }
+        }
+    }
+    println!(
+        "{}",
+        json!({
+            "slot": slot, "bank_hash": bank_hash.to_string(), "tower_root": tower.root(),
+            "highest_stored_slot": highest_stored_slot,
+            "blockstore_root": blockstore.max_root(),
+            "frozen_hashes": hashes, "shred_digests": shreds,
+            "last_vote": tower.last_voted_slot(), "identity": identity.pubkey().to_string(),
+            "genesis_hash": genesis.hash().to_string(),
+            "shred_version": solana_shred_version::compute_shred_version(&genesis.hash(), None)
+        })
+    );
+    Ok(())
+}
 
 fn save_key(root: &Path, name: &str, key: &Keypair) -> Result<()> {
     let path = root.join(name);
@@ -552,6 +666,45 @@ fn recovery_check(root: &Path, rpc: &RpcClient, peer: &RpcClient) -> Result<()> 
     Ok(())
 }
 
+fn replay_check(root: &Path, rpc: &RpcClient, peer: &RpcClient) -> Result<()> {
+    let bytes = fs::read(root.join("restart-spent-payment.bin"))?;
+    let before = pool(rpc)?.0;
+    let payment = wire::decode(pool(rpc)?.1.network, &bytes)?;
+    let expiry = payment.context.expires_at;
+    let slot = rpc.get_slot()?;
+    if expiry <= slot || expiry - slot > 1024 {
+        return Err("spent proof is not within its live expiry window".into());
+    }
+    let payer = read_keypair_file(root.join("sponsor.keypair.json"))?;
+    if payer.pubkey().to_bytes() != payment.context.sponsor {
+        return Err("spent proof sponsor differs".into());
+    }
+    let markers = marker_receipt(rpc, pool(rpc)?.1.network, &[&bytes])?;
+    let buffer = stage(rpc, &payer, &payer, &bytes, expiry)?;
+    rejected(
+        finalize(rpc, &payer, &payer, buffer, false),
+        "spent proof after coordinated restart",
+        1,
+        InstructionError::InvalidInstructionData,
+    )?;
+    if pool(rpc)?.0 != before {
+        return Err("replayed payment changed pool".into());
+    }
+    check_markers(rpc, &markers)?;
+    check_markers(peer, &markers)?;
+    send(
+        rpc,
+        &payer,
+        &[instructions::close(buffer, payer.pubkey())],
+        &[],
+    )?;
+    equal_pool(rpc, peer)?;
+    println!(
+        "Live spent proof rejected after coordinated restart; exact pool and markers retained"
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args
@@ -560,6 +713,25 @@ fn main() -> Result<()> {
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
     if command == "init" {
         return initialize(&root);
+    }
+    if command == "bootstrap-check" {
+        let name = args.next().ok_or("expected ledger name")?;
+        if !name.starts_with("ledger-")
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err("invalid bootstrap ledger name".into());
+        }
+        if Blockstore::open(&root.join(name))?
+            .highest_slot()?
+            .is_some_and(|slot| slot > 0)
+        {
+            return Err("existing ledger history requires a saved tower".into());
+        }
+        return Ok(());
+    }
+    if command == "restart-state" {
+        let index = args.next().ok_or("expected validator index")?.parse()?;
+        return restart_state(&root, index, &args.next().ok_or("expected ledger name")?);
     }
     if command == "prepare-recovery" {
         let name = args.next().unwrap_or_else(|| "ledger-recovered".to_owned());
@@ -590,6 +762,7 @@ fn main() -> Result<()> {
     match command.as_str() {
         "exercise" => exercise(&root, &rpc, &peer, &config),
         "recovery-check" => recovery_check(&root, &rpc, &peer),
+        "replay-check" => replay_check(&root, &rpc, &peer),
         _ => Err("unknown localnet command".into()),
     }
 }

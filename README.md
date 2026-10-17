@@ -31,6 +31,8 @@ This uses a project-local dependency cache and the installed Rust 1.92 toolchain
 
 The local wallet supports random private keys, encrypted seed-only backups, network-bound addresses, finalized note discovery, balances, private sends with change, withdrawal and pending-payment resolution. See [the wallet runbook](docs/local-wallet-runbook.md) and LOCAL-003 validation. It reconstructs private notes from complete archive history and fails closed when history is missing. RPC consensus remains trusted; the scanner is not a light client. No note cache is needed for seed recovery, but archive availability, scan performance, independent security review and production economics remain development work.
 
+For majority or whole-cluster restarts, use the [coordinated restart runbook](docs/coordinated-restart-runbook.md). The explicit path verifies a saved tower and retained bank checkpoint before invoking the upstream hash/shred-version/stake gate, then requires new finalization. It preserves ordinary restart guards and signed ledger data.
+
 ## Attribution
 
 Upstream attribution is preserved in [THIRD_PARTY.md](THIRD_PARTY.md) and vendored notices.

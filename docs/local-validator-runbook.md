@@ -21,6 +21,8 @@ The default RPC endpoints are `http://127.0.0.1:18899` and `http://127.0.0.1:198
 
 The current pool format is `NPOOL002`; the original `.data/localnet` network uses `NPOOL001` and must remain preserved. Startup rejects that old format before launching the new binary. This development change requires a fresh genesis; it does not migrate existing notes. Initialization refuses an existing network directory. To repeat the complete fresh-pool experiment, stop the current network and choose a new directory using `--root .data/<new-directory>` on every command. No reset/delete command is provided.
 
+Restarting majority stake needs the explicit [coordinated restart procedure](coordinated-restart-runbook.md). Ordinary startup can expose RPC before ledger replay and quorum startup finish; use new finalized blocks as the liveness criterion.
+
 ## Verification contract
 
 The test stages real two-action Orchard v2 proofs in signed transactions and checks the serialized signed packet bound. Deposits debit a real sponsor account; a private payment sends 40 with 60 change; withdrawal returns 40, leaving 60 units of backing and six commitments. Negative tests require confirmed on-chain instruction errors at the expected instruction index. RPC errors, timeouts and preflight failures do not count as successful rejection tests.
