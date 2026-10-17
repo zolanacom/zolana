@@ -1,0 +1,13 @@
+# Durable finalized payment history for wallet recovery
+
+The next local testnet preparation step is a recovery archive independent of validator transaction-ledger retention. A full validator snapshot restores the native pool and permanent nullifiers, but closed staging buffers no longer contain old encrypted outputs. An encrypted seed backup needs those outputs to discover its notes. Incremental per-wallet caches accelerate scans but are disposable and cannot replace this shared history.
+
+Keep the native protocol and NPOOL003 unchanged. Retain compact finalized block headers and successful signed native-payment transactions, including ordered staging instructions and required address-table metadata. Exclude unrelated vote/transaction bodies. Store bounded immutable checksum-addressed segments and publish a small atomic manifest only after the complete extension verifies against the live finalized pool. Serialize writers with an OS lock; retain old segments and interrupted orphan files. Restart must extend the same network/history rather than silently replace it.
+
+The wallet may reconstruct notes from this archive and continue from the recent RPC tail. It still verifies transaction signatures, staging authorization, Orchard proofs, tree/nullifier/backing effects, block continuity and the complete finalized pool on the selected RPC. The final block hash must match that RPC's finalized header. Checksums detect storage damage; they are not signatures or a separate consensus proof. RPC consensus/genesis remain trusted, and the archive is not a light client or a canonical transaction-inclusion/exclusion proof.
+
+Do not use archive transaction identities to resolve unknown finalizations. The existing uncached full-RPC resolution path and pending/staging guards remain. Archived proof effects can reconstruct wallet state; a claim that a particular outer signature did or did not execute needs the canonical history/status checks. A later proof-intent recovery design would require its own review and tests.
+
+The archive contains public on-chain ciphertexts/metadata, not wallet seeds, passwords or decrypted notes. Initial collection requires full history from genesis and must start before pruning. Snapshot-only peers can serve recovery only when the independent archive supplies the missing prefix and recent RPC blocks supply a continuous suffix. Missing, modified, mismatched or discontinuous data must fail closed, never report a partial zero balance.
+
+This is local retention/recovery infrastructure. Operators still need archive replication, monitoring, durable backups, capacity planning, production key/sponsor architecture and independent security review before public testnet. No service exposure or public network is authorized.

@@ -17,7 +17,7 @@ WALLET = PROJECT / "target/debug/native-wallet"
 
 
 class WalletApp:
-    def __init__(self, root, profile="default"):
+    def __init__(self, root, profile="default", rpc_index=0):
         self.root = root.resolve()
         if not self.root.is_relative_to(PROJECT / ".data"):
             raise ValueError("wallet UI requires a local .data fixture")
@@ -31,6 +31,9 @@ class WalletApp:
         if self.directory.is_symlink() or self.directory.stat().st_mode & 0o077:
             raise ValueError("wallet UI directory must be owner-only")
         self.wallet = self.directory / "wallet.json"
+        if type(rpc_index) is not int or rpc_index not in (0, 1):
+            raise ValueError("use one of this fixture's two local RPC peers")
+        self.rpc_index = rpc_index
         self.backup = self.directory / "recovery.json"
         self.ack = self.directory / "backup-confirmed"
         self.token = secrets.token_urlsafe(32)
@@ -49,7 +52,10 @@ class WalletApp:
         # environment variable, command argument, URL or browser storage.
         args = [str(WALLET), command, "--network", str(self.root / "network.json"),
                 "--wallet", str(self.wallet), "--password-file", "-",
-                "--rpc", "http://127.0.0.1:18899", *extra]
+                "--rpc", f"http://127.0.0.1:{18899+self.rpc_index*1000}", *extra]
+        history = self.root / "recovery-history"
+        if command in {"balance", "deposit", "send", "withdraw"} and (history / "manifest.json").exists():
+            args += ["--history", str(history)]
         result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
         if result.returncode:
             raise ValueError(result.stderr.strip().removeprefix("Wallet error: "))
@@ -179,10 +185,11 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=int, default=1800)
     parser.add_argument("--start-network", action="store_true")
     parser.add_argument("--profile", default="default")
+    parser.add_argument("--rpc-index", type=int, choices=[0, 1], default=0)
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535 or not 60 <= args.duration <= 3600:
         parser.error("use a nonprivileged port and a session of 60..3600 seconds")
-    app = WalletApp(args.root, args.profile)
+    app = WalletApp(args.root, args.profile, args.rpc_index)
     children = [None, None]
     try:
         if args.start_network:

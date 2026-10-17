@@ -15,7 +15,7 @@ fn run() -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
         println!(
-            "native-wallet init|restore|address|balance|deposit|send|withdraw|resolve|reclaim"
+            "native-wallet init|restore|address|balance|deposit|send|withdraw|resolve|reclaim|archive"
         );
         println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
@@ -25,11 +25,13 @@ fn run() -> Result<()> {
         println!("Withdrawal pays the signed public sponsor; --to is not supported.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
+        println!("archive: --network --rpc --history <directory>; public collector needs no wallet/password/sponsor");
+        println!("balance/deposit/send/withdraw: optional --history <directory> supplies retained verified ciphertext history");
         return Ok(());
     }
     if ![
         "init", "restore", "address", "balance", "deposit", "send", "withdraw", "resolve",
-        "reclaim",
+        "reclaim", "archive",
     ]
     .contains(&command.as_str())
     {
@@ -46,6 +48,7 @@ fn run() -> Result<()> {
             "--sponsor",
             "--amount",
             "--to",
+            "--history",
         ]
         .contains(&flag.as_str())
         {
@@ -65,6 +68,19 @@ fn run() -> Result<()> {
             .ok_or_else(|| format!("missing {name}").into())
     };
     let network = Network::load(Path::new(required("--network")?))?;
+    if command == "archive" {
+        let chain = Chain::connect(required("--rpc")?, network)?;
+        println!(
+            "{}",
+            chain.export_history(Path::new(required("--history")?))?
+        );
+        return Ok(());
+    }
+    if args.contains_key("--history")
+        && !["balance", "deposit", "send", "withdraw"].contains(&command.as_str())
+    {
+        return Err("--history is only for balance/payment reconstruction; unknown-payment resolution requires canonical full RPC history".into());
+    }
     let password = if required("--password-file")? == "-" {
         read_password_input(std::io::stdin().lock())?
     } else {
@@ -117,7 +133,11 @@ fn run() -> Result<()> {
     if command != "balance" {
         operation.ensure_resolved()?;
     }
-    let synced = chain.sync_cached(&wallet, &operation)?;
+    let synced = if let Some(history) = args.get("--history") {
+        chain.sync_cached_with_history(&wallet, &operation, Path::new(history))?
+    } else {
+        chain.sync_cached(&wallet, &operation)?
+    };
     if command == "balance" {
         println!(
             "{}",

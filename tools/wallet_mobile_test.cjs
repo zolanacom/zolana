@@ -5,7 +5,7 @@ const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const [root, recipient, evidence] = process.argv.slice(2);
 const password = 'Disposable mobile acceptance password';
-const result = { status: 'running', layouts: [], checks: [], errors: [] };
+const result = { status: 'running', layouts: [], checks: [], errors: [], expectedRequestErrors: [] };
 let browser;
 
 async function layout(page, name, screenshot = false) {
@@ -38,9 +38,15 @@ async function run() {
   browser = await chromium.launch({headless:true});
   const context = await browser.newContext({ viewport:{width:390,height:844}, isMobile:true, hasTouch:true, deviceScaleFactor:2, acceptDownloads:true });
   await context.route('**/*', route => new URL(route.request().url()).hostname === '127.0.0.1' || route.request().url().startsWith('blob:') ? route.continue() : route.abort());
-  context.on('page', page => page.on('pageerror', error => result.errors.push(error.message)));
+  context.on('page', page => {
+    page.on('pageerror', error => result.errors.push(error.message));
+    page.on('console', entry => {
+      if (!['warning','error'].includes(entry.type())) return;
+      if (entry.type() === 'error' && /status of 400/.test(entry.text()) && /\/api\/wallet$/.test(entry.location().url)) result.expectedRequestErrors.push(entry.text());
+      else result.errors.push(entry.text());
+    });
+  });
   const page = await context.newPage();
-  page.on('console', entry => { if (entry.type() === 'warning') result.errors.push(entry.text()); });
   for (const [width,height] of [[320,568],[375,812],[390,844],[430,932],[1600,900]]) {
     await page.setViewportSize({width,height});
     await page.goto('http://127.0.0.1:8769/');
@@ -128,6 +134,7 @@ async function run() {
   await layout(page,'final-390',true);
   result.checks.push('draft preserved, reduced-height keyboard viewport, real private send, lock/unlock, original copy refresh, privacy dialog');
   assert.deepEqual(result.errors,[]);
+  assert.equal(result.expectedRequestErrors.length,1,'only the intentional wrong-password request should fail');
   result.status = 'passed';
 }
 run().catch(error=>{result.status='failed';result.error=String(error.stack||error);process.exitCode=1;console.error(result.error);})

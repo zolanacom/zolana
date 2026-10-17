@@ -1,4 +1,5 @@
 use crate::{
+    archive::{Archive, HistoryBlock, Writer},
     cache::{self, Checkpoint},
     history::{HistoryInstruction, Replay, WalletState},
     keys::{read_private, write_private_new, Network, WalletKey},
@@ -35,6 +36,7 @@ use solana_transaction_status_client_types::{
 use std::{
     collections::BTreeSet,
     fs,
+    path::Path,
     str::FromStr,
     thread,
     time::{Duration, Instant},
@@ -61,6 +63,7 @@ pub struct ScanStats {
     pub payments_verified: usize,
     pub from_slot: u64,
     pub cache_reset: Option<String>,
+    pub history_blocks_read: usize,
 }
 
 struct ScanResult {
@@ -74,6 +77,95 @@ struct ScanResult {
 }
 
 impl ScanResult {
+    fn apply_block(&mut self, mut block: HistoryBlock) -> Result<HistoryBlock> {
+        if block.slot <= self.slot
+            || block.parent_slot != self.slot
+            || self
+                .block_hash
+                .as_ref()
+                .is_some_and(|hash| hash != &block.previous_blockhash)
+            || !crate::archive::valid_hash(&block.blockhash)
+            || !crate::archive::valid_hash(&block.previous_blockhash)
+        {
+            return Err("finalized block history is incomplete or discontinuous; an archive RPC or recovery history is required".into());
+        }
+        let mut retained = Vec::new();
+        for encoded in block.transactions.drain(..) {
+            let tx = encoded
+                .transaction
+                .decode()
+                .ok_or("cannot decode archived transaction")?;
+            let mut keys = tx.message.static_account_keys().to_vec();
+            if tx
+                .message
+                .address_table_lookups()
+                .is_some_and(|lookups| !lookups.is_empty())
+            {
+                let meta = encoded
+                    .meta
+                    .as_ref()
+                    .ok_or("versioned transaction metadata is unavailable")?;
+                let OptionSerializer::Some(loaded) = &meta.loaded_addresses else {
+                    return Err("loaded account addresses are unavailable".into());
+                };
+                for address in loaded.writable.iter().chain(&loaded.readonly) {
+                    keys.push(Pubkey::from_str(address)?);
+                }
+            }
+            if !tx
+                .message
+                .instructions()
+                .iter()
+                .any(|ix| keys.get(ix.program_id_index as usize) == Some(&id()))
+            {
+                continue;
+            }
+            let meta = encoded
+                .meta
+                .as_ref()
+                .ok_or("native payment execution metadata is unavailable")?;
+            if meta.err.is_some() {
+                continue;
+            }
+            tx.verify_and_hash_message()?;
+            for ix in tx.message.instructions() {
+                if keys.get(ix.program_id_index as usize) != Some(&id()) {
+                    continue;
+                }
+                let accounts = ix
+                    .accounts
+                    .iter()
+                    .map(|index| {
+                        let index = *index as usize;
+                        Ok((
+                            *keys.get(index).ok_or("invalid archived account index")?,
+                            tx.message.is_signer(index),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let instruction = HistoryInstruction {
+                    accounts,
+                    data: ix.data.clone(),
+                };
+                if let Some(accepted) = self.replay.apply_verified(&instruction, block.slot)? {
+                    self.scan.payments_verified += 1;
+                    for state in &mut self.secondary {
+                        accepted.apply(state)?;
+                    }
+                }
+                if ix.data.first() == Some(&3) {
+                    self.accepted.insert(tx.signatures[0].to_string());
+                }
+            }
+            retained.push(encoded);
+        }
+        block.transactions = retained;
+        self.slot = block.slot;
+        self.block_hash = Some(block.blockhash.clone());
+        self.block_height = block.block_height;
+        Ok(block)
+    }
+
     fn finish(self) -> Vec<Synced> {
         let mut states = self.secondary;
         states.insert(0, self.replay.state);
@@ -159,6 +251,40 @@ impl Chain {
 
     /// The operation guard serializes cache replacement with wallet submissions.
     pub fn sync_cached(&self, wallet: &WalletKey, operation: &WalletOperation) -> Result<Synced> {
+        self.sync_cached_source(wallet, operation, None)
+    }
+
+    pub fn sync_cached_with_history(
+        &self,
+        wallet: &WalletKey,
+        operation: &WalletOperation,
+        path: &Path,
+    ) -> Result<Synced> {
+        let history = Archive::open(path, &self.network)?;
+        self.sync_cached_source(wallet, operation, Some(&history))
+    }
+
+    /// This public-data collector needs no wallet seed or sponsor key.
+    pub fn export_history(&self, path: &Path) -> Result<serde_json::Value> {
+        let mut writer = Writer::open(path, &self.network)?;
+        let prior = writer.archive.clone();
+        let view = WalletKey::generate(self.network.clone())?;
+        let result = self.scan_source(&[&view], None, Some(&prior), Some(&mut writer))?;
+        let bytes = writer.commit()?;
+        Ok(
+            serde_json::json!({"manifest_committed":true,"from_slot":prior.tip().saturating_add(1),
+            "finalized_slot":result.slot,"new_blocks":result.scan.blocks_fetched,
+            "retained_blocks_verified":result.scan.history_blocks_read,
+            "payments_verified":result.scan.payments_verified,"bytes_written":bytes}),
+        )
+    }
+
+    fn sync_cached_source(
+        &self,
+        wallet: &WalletKey,
+        operation: &WalletOperation,
+        history: Option<&Archive>,
+    ) -> Result<Synced> {
         let (candidate, discarded) = if operation.scan_cache.exists() {
             match cache::read(&operation.scan_cache, wallet) {
                 Ok(checkpoint) => (Some(checkpoint), false),
@@ -167,7 +293,7 @@ impl Chain {
         } else {
             (None, false)
         };
-        let mut result = self.scan(&[wallet], candidate)?;
+        let mut result = self.scan_source(&[wallet], candidate, history, None)?;
         if discarded {
             result.scan.cache_reset = Some("invalid_cache".into());
         }
@@ -190,6 +316,16 @@ impl Chain {
     }
 
     fn scan(&self, wallets: &[&WalletKey], candidate: Option<Checkpoint>) -> Result<ScanResult> {
+        self.scan_source(wallets, candidate, None, None)
+    }
+
+    fn scan_source(
+        &self,
+        wallets: &[&WalletKey],
+        candidate: Option<Checkpoint>,
+        history: Option<&Archive>,
+        mut writer: Option<&mut Writer>,
+    ) -> Result<ScanResult> {
         if wallets.is_empty()
             || wallets.len() > 64
             || wallets.iter().any(|wallet| wallet.network != self.network)
@@ -214,6 +350,9 @@ impl Chain {
             return Err("native pool network or backing mismatch".into());
         }
         let target = response.context.slot;
+        if writer.is_some() && history.is_some_and(|history| history.tip() > target) {
+            return Err("RPC is behind retained history; refusing archive rollback".into());
+        }
         // Batched full scans share one verifier key with the primary replay.
         let shared_key = (wallets.len() > 1).then(|| {
             std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
@@ -259,32 +398,27 @@ impl Chain {
                 stats.cache_reset = Some("checkpoint_unavailable_or_changed".into());
             }
         }
-        let (
-            mut replay,
-            mut previous_slot,
-            mut previous_hash,
-            mut block_height,
-            mut accepted_finalizations,
-        ) = if let Some(cached) = cached {
-            cached
-        } else {
-            (
-                if let Some(key) = &shared_key {
-                    Replay::from_state(WalletState::with_key(
-                        wallets[0],
-                        pool.rent_floor,
-                        key.clone(),
-                    )?)
-                } else {
-                    Replay::new(wallets[0], pool.rent_floor)?
-                },
-                0,
-                None,
-                0,
-                BTreeSet::new(),
-            )
-        };
-        let mut states = if let Some(key) = shared_key {
+        let (replay, previous_slot, previous_hash, block_height, accepted_finalizations) =
+            if let Some(cached) = cached {
+                cached
+            } else {
+                (
+                    if let Some(key) = &shared_key {
+                        Replay::from_state(WalletState::with_key(
+                            wallets[0],
+                            pool.rent_floor,
+                            key.clone(),
+                        )?)
+                    } else {
+                        Replay::new(wallets[0], pool.rent_floor)?
+                    },
+                    0,
+                    None,
+                    0,
+                    BTreeSet::new(),
+                )
+            };
+        let states = if let Some(key) = shared_key {
             wallets
                 .iter()
                 .skip(1)
@@ -293,100 +427,47 @@ impl Chain {
         } else {
             Vec::new()
         };
-        let mut start = if stats.cache_used {
+        let start = if stats.cache_used {
             previous_slot.checked_add(1).ok_or("cached slot overflow")?
         } else {
             0
         };
         stats.from_slot = start;
+        let mut result = ScanResult {
+            replay,
+            secondary: states,
+            slot: previous_slot,
+            block_hash: previous_hash,
+            block_height,
+            accepted: accepted_finalizations,
+            scan: stats,
+        };
+        if let Some(history) = history {
+            for block in history.reader() {
+                let block = block?;
+                if block.slot > target {
+                    break;
+                }
+                if block.slot <= result.slot {
+                    continue;
+                }
+                result.scan.history_blocks_read += 1;
+                result.apply_block(block)?;
+            }
+        }
+        let mut start = result.slot.checked_add(1).ok_or("history slot overflow")?;
         while start <= target {
             let end = start.saturating_add(9999).min(target);
             let blocks = self.rpc.get_blocks(start, Some(end))?;
             for slot in blocks.into_iter().filter(|slot| *slot != 0) {
-                stats.blocks_fetched += 1;
+                result.scan.blocks_fetched += 1;
                 let block = self.rpc.get_block_with_config(slot, RpcBlockConfig {
                     encoding: Some(UiTransactionEncoding::Base64), transaction_details: Some(TransactionDetails::Full),
                     rewards: Some(false), commitment: Some(CommitmentConfig::finalized()), max_supported_transaction_version: Some(0),
-                }).map_err(|error| format!("cannot read finalized block {slot}; complete archive history is required: {error}"))?;
-                if block.parent_slot != previous_slot
-                    || previous_hash
-                        .as_ref()
-                        .is_some_and(|hash| hash != &block.previous_blockhash)
-                {
-                    return Err("finalized block history is incomplete or discontinuous; an archive RPC is required".into());
-                }
-                previous_slot = slot;
-                previous_hash = Some(block.blockhash);
-                block_height = block
-                    .block_height
-                    .ok_or("archived block height is unavailable")?;
-                for encoded in block
-                    .transactions
-                    .ok_or("full transaction history is unavailable")?
-                {
-                    let tx = encoded
-                        .transaction
-                        .decode()
-                        .ok_or("cannot decode archived transaction")?;
-                    let mut keys = tx.message.static_account_keys().to_vec();
-                    if tx
-                        .message
-                        .address_table_lookups()
-                        .is_some_and(|lookups| !lookups.is_empty())
-                    {
-                        let meta = encoded
-                            .meta
-                            .as_ref()
-                            .ok_or("versioned transaction metadata is unavailable")?;
-                        let OptionSerializer::Some(loaded) = &meta.loaded_addresses else {
-                            return Err("loaded account addresses are unavailable".into());
-                        };
-                        for address in loaded.writable.iter().chain(&loaded.readonly) {
-                            keys.push(Pubkey::from_str(address)?);
-                        }
-                    }
-                    let relevant = tx
-                        .message
-                        .instructions()
-                        .iter()
-                        .any(|ix| keys.get(ix.program_id_index as usize) == Some(&id()));
-                    if !relevant {
-                        continue;
-                    }
-                    let meta = encoded
-                        .meta
-                        .ok_or("native payment execution metadata is unavailable")?;
-                    // Failed transactions leave no native or staging effects at all.
-                    if meta.err.is_some() {
-                        continue;
-                    }
-                    tx.verify_and_hash_message()?;
-                    for ix in tx.message.instructions() {
-                        if keys.get(ix.program_id_index as usize) != Some(&id()) {
-                            continue;
-                        }
-                        let mut accounts = Vec::new();
-                        for index in &ix.accounts {
-                            let index = *index as usize;
-                            accounts.push((
-                                *keys.get(index).ok_or("invalid archived account index")?,
-                                tx.message.is_signer(index),
-                            ));
-                        }
-                        let instruction = HistoryInstruction {
-                            accounts,
-                            data: ix.data.clone(),
-                        };
-                        if let Some(accepted) = replay.apply_verified(&instruction, slot)? {
-                            stats.payments_verified += 1;
-                            for state in &mut states {
-                                accepted.apply(state)?;
-                            }
-                        }
-                        if ix.data.first() == Some(&3) {
-                            accepted_finalizations.insert(tx.signatures[0].to_string());
-                        }
-                    }
+                }).map_err(|error| format!("cannot read finalized block {slot}; complete archive history or retained recovery history is required: {error}"))?;
+                let compact = result.apply_block(HistoryBlock::from_rpc(slot, block)?)?;
+                if let Some(writer) = &mut writer {
+                    writer.push(compact)?;
                 }
             }
             if end == target {
@@ -394,25 +475,34 @@ impl Chain {
             }
             start = end + 1;
         }
-        if previous_slot != target {
+        if result.slot != target {
             return Err(
                 "finalized history does not reach the pool checkpoint; archive history is required"
                     .into(),
             );
         }
-        replay.state.reconcile(&pool)?;
-        for state in &states {
+        if history.is_some() && target != 0 {
+            let header = self.rpc.get_block_with_config(target, RpcBlockConfig {
+                transaction_details:Some(TransactionDetails::None), rewards:Some(false),
+                commitment:Some(CommitmentConfig::finalized()), ..Default::default()
+            }).map_err(|error| format!("cannot authenticate retained history against finalized RPC header: {error}"))?;
+            if result.block_hash.as_ref() != Some(&header.blockhash) {
+                return Err("retained history does not match the finalized RPC block hash".into());
+            }
+            result.block_height = header
+                .block_height
+                .ok_or("finalized RPC block height is unavailable")?;
+        }
+        result.replay.state.reconcile(&pool)?;
+        for state in &result.secondary {
             state.reconcile(&pool)?;
         }
-        Ok(ScanResult {
-            replay,
-            secondary: states,
-            slot: target,
-            block_hash: previous_hash,
-            block_height,
-            accepted: accepted_finalizations,
-            scan: stats,
-        })
+        // Retained proof effects reconstruct state, but retained metadata is
+        // never evidence that a particular outer transaction was canonical.
+        if history.is_some() {
+            result.accepted.clear();
+        }
+        Ok(result)
     }
 
     pub fn expiry(&self) -> Result<u64> {
@@ -860,6 +950,99 @@ mod recovery_tests {
         json!({"blockhash":bs58::encode([slot as u8;32]).into_string(),
             "previousBlockhash":bs58::encode([parent as u8;32]).into_string(),
             "parentSlot":parent,"blockHeight":slot,"blockTime":null,"transactions":[],"rewards":[]})
+    }
+
+    #[test]
+    fn retained_prefix_and_rpc_tail_must_reconcile_with_the_live_finalized_header() {
+        for valid in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("history");
+            let (wallet, _, chain) = cached_fixture(
+                6,
+                vec![block(6, 2), block(if valid { 6 } else { 7 }, 2)],
+                vec![6],
+            );
+            let mut writer = Writer::open(&path, &wallet.network).unwrap();
+            writer
+                .push(
+                    HistoryBlock::from_rpc(2, serde_json::from_value(block(2, 0)).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+            writer.commit().unwrap();
+            let history = Archive::open(&path, &wallet.network).unwrap();
+            let result = chain.scan_source(&[&wallet], None, Some(&history), None);
+            if valid {
+                let result = result.unwrap();
+                assert_eq!(result.scan.history_blocks_read, 1);
+                assert_eq!(result.scan.blocks_fetched, 1);
+                assert_eq!(result.replay.state.balance().unwrap(), 0);
+            } else {
+                assert!(result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("finalized RPC block hash"));
+            }
+        }
+        for cached in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("history");
+            let headers = if cached {
+                vec![block(4, 0), block(4, 0)]
+            } else {
+                vec![block(4, 0)]
+            };
+            let (wallet, mut checkpoint, chain) = cached_fixture(4, headers, vec![]);
+            checkpoint
+                .accepted
+                .insert("metadata-is-not-canonical-inclusion".into());
+            let mut writer = Writer::open(&path, &wallet.network).unwrap();
+            let mut archived =
+                HistoryBlock::from_rpc(4, serde_json::from_value(block(4, 0)).unwrap()).unwrap();
+            archived.block_height = u64::MAX;
+            writer.push(archived).unwrap();
+            writer.commit().unwrap();
+            let history = Archive::open(&path, &wallet.network).unwrap();
+            let result = chain
+                .scan_source(
+                    &[&wallet],
+                    cached.then_some(checkpoint),
+                    Some(&history),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                result.block_height, 4,
+                "use finalized RPC height, not retained metadata"
+            );
+            assert!(
+                result.accepted.is_empty(),
+                "never expose retained identities as canonical inclusion"
+            );
+        }
+    }
+
+    #[test]
+    fn public_history_export_extends_immutable_prefix_and_refuses_rpc_rollback() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("history");
+        let (_, _, chain) =
+            cached_fixture(6, vec![block(2, 0), block(6, 2), block(6, 2)], vec![2, 6]);
+        let first = chain.export_history(&path).unwrap();
+        assert_eq!(first["new_blocks"], 2);
+        let (_, _, next) = cached_fixture(8, vec![block(8, 6), block(8, 6)], vec![8]);
+        let second = next.export_history(&path).unwrap();
+        assert_eq!(second["new_blocks"], 1);
+        assert_eq!(second["retained_blocks_verified"], 2);
+        let before = fs::read(path.join("manifest.json")).unwrap();
+        let (_, _, behind) = cached_fixture(7, vec![], vec![]);
+        assert!(behind
+            .export_history(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("refusing archive rollback"));
+        assert_eq!(fs::read(path.join("manifest.json")).unwrap(), before);
     }
 
     #[test]

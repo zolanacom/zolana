@@ -63,3 +63,20 @@ class WalletUiTests(unittest.TestCase):
             with patch.object(app, "cli", return_value={"address": "npriv1fixture"}) as cli:
                 app.action({"action": "unlock", "password": "local-test-password"})
                 self.assertEqual(cli.call_args_list[0].args[0], "restore")
+
+    def test_retained_history_and_peer_are_server_selected_and_never_resolve_from_history(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            app.rpc_index = 1
+            history = app.root / "recovery-history"
+            history.mkdir()
+            (history / "manifest.json").write_text("{}")
+            completed = type("Completed", (), {"returncode": 0, "stdout": "{}"})()
+            with patch("wallet_ui.subprocess.run", return_value=completed) as run:
+                app.cli("balance", "local-test-password")
+                args = run.call_args.args[0]
+                self.assertEqual(args[args.index("--rpc") + 1], "http://127.0.0.1:19899")
+                self.assertEqual(args[args.index("--history") + 1], str(history))
+                for command in ["resolve", "reclaim", "address", "restore"]:
+                    app.cli(command, "local-test-password")
+                    self.assertNotIn("--history", run.call_args.args[0])

@@ -12,6 +12,8 @@ python3 -B tools/wallet_ui.py --root .data/l3 --start-network --duration 1800
 
 Open `http://127.0.0.1:8765/`. The server binds only loopback. Startup uses the guarded coordinated restart, never deletes towers or ledgers, and rejects incompatible fixtures. Stop any existing owned session before starting another. A 30-minute timer bounds disk growth; when it ends, the server stops its own validators. Wallets, encrypted recovery files and journals persist. Restart the same command to resume, then reload the page and unlock the existing wallet.
 
+Phone-sized layouts put the wallet controls first, keep touch targets at least 44 pixels, preserve a draft when editing a reviewed payment and return new views to their heading. Address inputs disable autocorrection/capitalization and amounts request a numeric keyboard. Desktop layout is preserved.
+
 For a new wallet, choose a password of at least 12 characters, save the encrypted recovery file separately from the password and confirm. **Save encrypted text instead** provides a copyable recovery envelope when downloads or file pickers are unavailable: save the complete text as a `.json` file. **Restore a wallet** accepts either that file or **Paste recovery text instead**, with the same password and network checks. Neither recovery option displays a plaintext spending seed. Download initiation alone does not prove the file was saved; confirm only after saving your own copy.
 
 Add 100 test units, share a receiving address, or review and send to another private address on this network. Recovery requires both the encrypted file/text and its password; no reset authority exists. A restored seed is retained if later balance verification is unavailable, and the dashboard offers refresh rather than asking for another restore. The receive screen explicitly distinguishes these addresses from Solana addresses. Do not send Solana funds to this preview.
@@ -24,7 +26,17 @@ python3 -B tools/wallet_ui.py --root .data/l3 --profile second --port 8766 --dur
 
 An unknown finalization blocks new payments. Use **Check previous payment** before **Recover upload rent**. An accepted payment remains a success if rent cleanup or balance refresh fails. Do not make a fresh payment to resolve an unknown result. The existing CLI `resolve` and `reclaim` commands remain available.
 
-Passwords stay in browser/process memory and the CLI's bounded stdin pipe; there is no password storage in browser localStorage, URLs, arguments or named temporary files. Encrypted wallet files are owner-only. The device-local backend decrypts with the password; it is not suitable for deployment as a hosted multi-user service. Requests require the exact host, same origin and a random session header; no CORS or analytics integration is provided. RPC consensus remains trusted. First sync and seed-only recovery require complete finalized archive history; repeat balance/payment scans can use an encrypted verified checkpoint and validate every new block. See the [wallet runbook](local-wallet-runbook.md) for cache trust checks, bounds and missing-history behavior.
+Passwords stay in browser/process memory and the CLI's bounded stdin pipe; there is no password storage in browser localStorage, URLs, arguments or named temporary files. Encrypted wallet files are owner-only. The device-local backend decrypts with the password; it is not suitable for deployment as a hosted multi-user service. Requests require the exact host, same origin and a random session header; no CORS or analytics integration is provided. RPC consensus remains trusted. First sync and seed-only recovery need complete RPC history or separately retained history plus a recent continuous RPC suffix; repeat scans can use an encrypted verified checkpoint. See the [wallet runbook](local-wallet-runbook.md) for cache trust checks and the [recovery-history runbook](recovery-history-runbook.md) for retention.
+
+The backend automatically uses `<root>/recovery-history` when present. `--rpc-index 1` selects the fixture's snapshot-restored peer; API requests cannot redirect the RPC. Unknown-payment resolution still requires canonical full-history RPC/status checks and does not use retained transaction identities.
+
+Repeat real phone-sized download, file restore, review/edit, payment and nullifier acceptance with an already installed Playwright runtime:
+
+```sh
+PLAYWRIGHT_MODULE=/path/to/installed/playwright python3 -B tools/mobile_localnet.py --root .data/mobile-new --evidence /private/tmp/mobile-wallet-evidence
+```
+
+The runner starts/stops its own loopback validators and isolated HTTP servers/browser. It uses a new ignored fixture and leaves existing wallets unchanged. Chromium touch/viewport and reduced-height keyboard emulation do not constitute physical phone/Safari testing.
 
 Repeat concurrent acceptance on a fresh fixture:
 
@@ -32,4 +44,4 @@ Repeat concurrent acceptance on a fresh fixture:
 python3 -B tools/load_localnet.py --root .data/load-new --clients 24
 ```
 
-The runner owns/stops both validators, performs deposit and nonuniform private-send bursts, checks both validators' balances/nullifiers, rejects live duplicates, restarts and audits. `--baseline` is only for the historical 16-root NPOOL002 build; it is expected to reject eight of 24 payments. Never point a new-format binary at an old ledger. See LOCAL-008 validation for concurrency and LOCAL-009 validation for incremental sync, completed copy/paste browser recovery and remaining file-picker/mobile verification limits.
+The runner owns/stops both validators, performs deposit and nonuniform private-send bursts, checks both validators' balances/nullifiers, rejects live duplicates, restarts and audits. `--baseline` is only for the historical 16-root NPOOL002 build; it is expected to reject eight of 24 payments. Never point a new-format binary at an old ledger. See LOCAL-008 for concurrency, LOCAL-009 for incremental sync and LOCAL-010 for completed mobile/file-flow verification and snapshot-peer recovery.
