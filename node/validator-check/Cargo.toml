@@ -18,6 +18,7 @@ solana-instruction = "=3.0.0"
 solana-keypair = "=3.0.0"
 solana-signer = "=3.0.0"
 solana-transaction = "=3.0.0"
+solana-transaction-error = "=3.0.0"
 solana-compute-budget-interface = "=3.0.0"
 solana-genesis-config = "=3.0.0"
 solana-feature-gate-interface = { version = "=3.0.0", features = ["bincode"] }

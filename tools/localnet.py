@@ -72,6 +72,8 @@ def wait_rpc(root, index, timeout=120):
 
 def start(root, index, archive=False):
     config = load(root)
+    if config.get("pool_format") != "NPOOL002":
+        raise RuntimeError("incompatible development pool format; preserve this network and initialize a fresh --root")
     with socket.socket() as probe:
         # Ignore completed TCP connections in TIME_WAIT, while rejecting a live listener.
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

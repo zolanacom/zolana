@@ -1,14 +1,14 @@
-//! Bounded local-devnet state; every byte is persisted in a runtime account.
+//! Compact persisted pool state. The runtime authenticates spent-note accounts separately.
 
 use crate::{verification::VerifiedPayment, Error};
 use incrementalmerkletree::{Hashable, Level};
 use orchard::tree::{Anchor, MerkleHashOrchard};
 use std::collections::BTreeSet;
 
-pub const MAX_NULLIFIERS: usize = 256;
+/// Two-action payments must leave a representable 32-level frontier.
+pub const MAX_COMMITMENTS: u64 = (1u64 << 32) - 2;
 pub const MAX_ROOTS: usize = 16;
-pub const STATE_BYTES: usize =
-    8 + 32 + 8 + 8 + 8 + 4 + 2 + 1 + 32 * 32 + MAX_NULLIFIERS * 32 + MAX_ROOTS * 32;
+pub const STATE_BYTES: usize = 8 + 32 + 8 + 8 + 8 + 1 + 32 * 32 + MAX_ROOTS * 32;
 
 #[derive(Clone)]
 pub struct PoolState {
@@ -17,7 +17,6 @@ pub struct PoolState {
     pub backing: u64,
     count: u64,
     frontier: [Option<MerkleHashOrchard>; 32],
-    nullifiers: BTreeSet<[u8; 32]>,
     roots: Vec<[u8; 32]>,
 }
 
@@ -32,16 +31,12 @@ impl PoolState {
             backing: 0,
             count: 0,
             frontier: [None; 32],
-            nullifiers: BTreeSet::new(),
             roots: vec![Anchor::empty_tree().to_bytes()],
         })
     }
 
     pub fn roots(&self) -> BTreeSet<[u8; 32]> {
         self.roots.iter().copied().collect()
-    }
-    pub fn nullifiers(&self) -> &BTreeSet<[u8; 32]> {
-        &self.nullifiers
     }
     pub fn note_count(&self) -> u64 {
         self.count
@@ -67,16 +62,12 @@ impl PoolState {
         node.to_bytes()
     }
 
+    /// Apply already-verified effects after the runtime checks both durable nullifiers.
     pub fn with_payment(&self, payment: &VerifiedPayment) -> Result<Self, Error> {
-        if self.nullifiers.len() + 2 > MAX_NULLIFIERS {
+        if self.count > MAX_COMMITMENTS - 2 {
             return Err(Error::CapacityExceeded);
         }
         let mut next = self.clone();
-        for nullifier in payment.nullifiers {
-            if !next.nullifiers.insert(nullifier) {
-                return Err(Error::SpentNullifier);
-            }
-        }
         next.backing = if payment.public_value_balance < 0 {
             self.backing
                 .checked_add(payment.public_value_balance.unsigned_abs())
@@ -111,21 +102,15 @@ impl PoolState {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(STATE_BYTES);
-        bytes.extend_from_slice(b"NPOOL001");
+        bytes.extend_from_slice(b"NPOOL002");
         bytes.extend_from_slice(&self.network);
         for number in [self.rent_floor, self.backing, self.count] {
             bytes.extend_from_slice(&number.to_le_bytes());
         }
-        bytes.extend_from_slice(&(self.count as u32).to_le_bytes());
-        bytes.extend_from_slice(&(self.nullifiers.len() as u16).to_le_bytes());
         bytes.push(self.roots.len() as u8);
         for node in self.frontier {
             bytes.extend_from_slice(&node.map(|n| n.to_bytes()).unwrap_or([0; 32]));
         }
-        for n in &self.nullifiers {
-            bytes.extend_from_slice(n);
-        }
-        bytes.resize(8 + 32 + 24 + 4 + 2 + 1 + 1024 + MAX_NULLIFIERS * 32, 0);
         for root in &self.roots {
             bytes.extend_from_slice(root);
         }
@@ -134,7 +119,7 @@ impl PoolState {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != STATE_BYTES || &bytes[..8] != b"NPOOL001" {
+        if bytes.len() != STATE_BYTES || &bytes[..8] != b"NPOOL002" {
             return Err(Error::InvalidEncoding);
         }
         let mut reader = Reader(&bytes[8..]);
@@ -142,40 +127,24 @@ impl PoolState {
         let rent_floor = u64::from_le_bytes(reader.take()?);
         let backing = u64::from_le_bytes(reader.take()?);
         let count = u64::from_le_bytes(reader.take()?);
-        let mask = u32::from_le_bytes(reader.take()?);
-        let nf_count = u16::from_le_bytes(reader.take()?) as usize;
         let root_count = reader.take::<1>()?[0] as usize;
         if network == [0; 32]
             || backing > i64::MAX as u64
-            || count != nf_count as u64
-            || nf_count > MAX_NULLIFIERS
+            || count > MAX_COMMITMENTS
+            || count % 2 != 0
             || root_count == 0
             || root_count > MAX_ROOTS
-            || mask as u64 != count
         {
             return Err(Error::InvalidEncoding);
         }
         let mut frontier = [None; 32];
         for (i, node) in frontier.iter_mut().enumerate() {
             let data = reader.take()?;
-            if mask & (1u32 << i) != 0 {
+            if count & (1u64 << i) != 0 {
                 *node = Some(
                     Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(&data))
                         .ok_or(Error::InvalidEncoding)?,
                 );
-            } else if data != [0; 32] {
-                return Err(Error::InvalidEncoding);
-            }
-        }
-        let mut nullifiers = BTreeSet::new();
-        let mut previous = None;
-        for i in 0..MAX_NULLIFIERS {
-            let data = reader.take()?;
-            if i < nf_count {
-                if previous.is_some_and(|prior| prior >= data) || !nullifiers.insert(data) {
-                    return Err(Error::InvalidEncoding);
-                }
-                previous = Some(data);
             } else if data != [0; 32] {
                 return Err(Error::InvalidEncoding);
             }
@@ -198,7 +167,6 @@ impl PoolState {
             backing,
             count,
             frontier,
-            nullifiers,
             roots,
         };
         if state.roots.last() != Some(&state.root()) {
@@ -222,53 +190,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persisted_pool_conserves_backing_and_stops_at_capacity() {
+    fn compact_pool_exceeds_old_capacity_and_enforces_tree_limit() {
         let mut pool = PoolState::new([1; 32], 1000).unwrap();
-        let commitment = MerkleHashOrchard::empty_leaf().to_bytes();
-        for index in 0..128u16 {
-            let mut first = [0; 32];
-            first[..2].copy_from_slice(&(index * 2).to_be_bytes());
-            let mut second = [0; 32];
-            second[..2].copy_from_slice(&(index * 2 + 1).to_be_bytes());
-            let effects = VerifiedPayment {
-                nullifiers: [first, second],
-                commitments: [commitment; 2],
-                public_value_balance: -10,
-            };
-            pool = pool.with_payment(&effects).unwrap();
-            let encoded = pool.encode();
-            pool = PoolState::decode(&encoded).unwrap();
-            assert_eq!(pool.encode(), encoded);
-            assert_eq!(pool.backing, (index as u64 + 1) * 10);
-            assert_eq!(pool.note_count(), (index as u64 + 1) * 2);
-            assert!(matches!(
-                pool.with_payment(&effects),
-                Err(Error::SpentNullifier | Error::CapacityExceeded)
-            ));
-        }
         let effects = VerifiedPayment {
             nullifiers: [[3; 32], [4; 32]],
-            commitments: [commitment; 2],
-            public_value_balance: 0,
+            commitments: [MerkleHashOrchard::empty_leaf().to_bytes(); 2],
+            public_value_balance: -10,
         };
-        assert!(matches!(
-            pool.with_payment(&effects),
-            Err(Error::CapacityExceeded)
-        ));
+        for index in 0..300u64 {
+            // This layer tracks commitments/backing, never the external spent set.
+            pool = pool.with_payment(&effects).unwrap();
+            let encoded = pool.encode();
+            assert_eq!(encoded.len(), STATE_BYTES);
+            pool = PoolState::decode(&encoded).unwrap();
+            assert_eq!(pool.encode(), encoded);
+            assert_eq!(pool.backing, (index + 1) * 10);
+            assert_eq!(pool.note_count(), (index + 1) * 2);
+        }
         let mut invalid = pool.encode();
-        invalid[0] ^= 1;
+        invalid[..8].copy_from_slice(b"NPOOL001");
         assert!(PoolState::decode(&invalid).is_err());
         let mut invalid = PoolState::new([1; 32], 1000).unwrap().encode();
         *invalid.last_mut().unwrap() = 1;
         assert!(PoolState::decode(&invalid).is_err());
         let empty = PoolState::new([1; 32], 1000).unwrap();
-        let unpaid = VerifiedPayment {
-            public_value_balance: 1,
-            ..effects
-        };
         assert!(matches!(
-            empty.with_payment(&unpaid),
+            empty.with_payment(&VerifiedPayment {
+                public_value_balance: 1,
+                ..effects
+            }),
             Err(Error::InsufficientBacking)
+        ));
+
+        // Construct a valid frontier just below the protocol tree bound without
+        // appending four billion leaves. Every occupied subtree is an empty root.
+        let mut almost_full = empty;
+        almost_full.count = MAX_COMMITMENTS - 2;
+        for (level, node) in almost_full.frontier.iter_mut().enumerate() {
+            if almost_full.count & (1 << level) != 0 {
+                *node = Some(MerkleHashOrchard::empty_root(Level::from(level as u8)));
+            }
+        }
+        almost_full.roots = vec![almost_full.root()];
+        let full = PoolState::decode(&almost_full.encode())
+            .unwrap()
+            .with_payment(&effects)
+            .unwrap();
+        assert_eq!(full.note_count(), MAX_COMMITMENTS);
+        assert!(PoolState::decode(&full.encode()).is_ok());
+        assert!(matches!(
+            full.with_payment(&effects),
+            Err(Error::CapacityExceeded)
         ));
     }
 }

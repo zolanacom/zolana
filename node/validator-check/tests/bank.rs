@@ -1,12 +1,14 @@
 use native_payment_program::{
-    id, instructions, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
+    id, instructions, nullifiers, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
 };
 use native_payments::{
     staging::{payload_digest, MAX_CHUNK_BYTES},
     state::{PoolState, STATE_BYTES},
     wire,
 };
-use payment_lab::proof_smoke::{build_fixture_for, withdrawal_fixture, FIXTURE_GENESIS};
+use payment_lab::proof_smoke::{
+    build_fixture_for, withdrawal_fixture, DepositProver, FIXTURE_GENESIS,
+};
 use solana_account::{AccountSharedData, ReadableAccount};
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_feature_gate_interface::{create_account, Feature};
@@ -105,13 +107,32 @@ fn stage_transactions(bank: &Bank, sponsor: &Keypair, bytes: &[u8]) -> (Pubkey, 
     (buffer.pubkey(), txs)
 }
 
+fn finalize_instruction(bank: &Bank, sponsor: &Keypair, buffer: Pubkey) -> Instruction {
+    let account = bank.get_account(&buffer).unwrap();
+    let staged = native_payment_program::staging::Buffer::decode(account.data()).unwrap();
+    let payment = wire::decode(FIXTURE_GENESIS, staged.payload().unwrap()).unwrap();
+    instructions::finalize(
+        buffer,
+        sponsor.pubkey(),
+        std::array::from_fn(|index| {
+            payment
+                .bundle
+                .actions()
+                .get(index)
+                .unwrap()
+                .nullifier()
+                .to_bytes()
+        }),
+    )
+}
+
 fn finalize(bank: &Bank, sponsor: &Keypair, buffer: Pubkey) -> Transaction {
     transaction(
         bank,
         sponsor,
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-            instructions::finalize(buffer, sponsor.pubkey()),
+            finalize_instruction(bank, sponsor, buffer),
         ],
         &[],
     )
@@ -138,7 +159,61 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
         transcript.push(tx);
     }
     let before_deposit = bank.get_account(&pool_address()).unwrap();
-    let mut readonly = instructions::finalize(buffer, sponsor.pubkey());
+    let deposit_ix = finalize_instruction(&bank, &sponsor, buffer);
+    // Derive both addresses from the staged proof, never from caller assertions.
+    for mutation in 0..4 {
+        let mut invalid = deposit_ix.clone();
+        match mutation {
+            0 => {
+                invalid.accounts.pop();
+            }
+            1 => {
+                invalid.accounts[4].pubkey = Pubkey::new_unique();
+            }
+            2 => {
+                invalid.accounts[5].pubkey = invalid.accounts[4].pubkey;
+            }
+            _ => {
+                invalid.accounts[4].is_writable = false;
+            }
+        }
+        let tx = transaction(
+            &bank,
+            &sponsor,
+            &[
+                ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+                invalid,
+            ],
+            &[],
+        );
+        let expected = if mutation == 0 {
+            solana_instruction::error::InstructionError::MissingRequiredSignature
+        } else {
+            solana_instruction::error::InstructionError::InvalidArgument
+        };
+        assert_eq!(
+            bank.process_transaction(&tx),
+            Err(solana_transaction_error::TransactionError::InstructionError(1, expected))
+        );
+        assert_eq!(bank.get_account(&pool_address()).unwrap(), before_deposit);
+        transcript.push(tx);
+    }
+    // An attacker can donate to a PDA but cannot reserve its ownership or block allocation.
+    let marker = deposit_ix.accounts[4].pubkey;
+    let marker_rent = bank.get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES);
+    let prefund = transaction(
+        &bank,
+        &sponsor,
+        &[system::transfer(
+            &sponsor.pubkey(),
+            &marker,
+            marker_rent + 7,
+        )],
+        &[],
+    );
+    bank.process_transaction(&prefund).unwrap();
+    transcript.push(prefund);
+    let mut readonly = finalize_instruction(&bank, &sponsor, buffer);
     readonly.accounts[1].is_writable = false;
     let failed_deposit = transaction(
         &bank,
@@ -151,6 +226,12 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
     );
     assert!(bank.process_transaction(&failed_deposit).is_err());
     assert_eq!(bank.get_account(&pool_address()).unwrap(), before_deposit);
+    assert_eq!(
+        bank.get_account(&marker).unwrap().owner(),
+        &solana_sdk_ids::system_program::id()
+    );
+    assert_eq!(bank.get_balance(&marker), marker_rent + 7);
+    assert!(bank.get_account(&deposit_ix.accounts[5].pubkey).is_none());
     transcript.push(failed_deposit);
     let funded = finalize(&bank, &sponsor, buffer);
     bank.process_transaction(&funded).unwrap();
@@ -158,6 +239,8 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
     let state = PoolState::decode(bank.get_account(&pool_address()).unwrap().data()).unwrap();
     assert_eq!(state.backing, 100);
     assert_eq!(bank.get_balance(&pool_address()), state.rent_floor + 100);
+    assert_eq!(bank.get_balance(&marker), marker_rent + 7);
+    assert_eq!(bank.get_account(&marker).unwrap().owner(), &id());
 
     let bytes = wire::encode(FIXTURE_GENESIS, &fixture.context, &fixture.bundle).unwrap();
     let (buffer, txs) = stage_transactions(&bank, &sponsor, &bytes);
@@ -168,21 +251,33 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
     let before = bank.get_account(&pool_address()).unwrap();
     let before_buffer = bank.get_account(&buffer).unwrap();
     // The payment succeeds, then the following instruction fails: Bank must roll back both.
-    let mut fail = instructions::finalize(buffer, sponsor.pubkey());
+    let mut fail = instructions::seal(buffer, sponsor.pubkey());
     fail.data = vec![255];
     let failed = transaction(
         &bank,
         &sponsor,
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-            instructions::finalize(buffer, sponsor.pubkey()),
+            finalize_instruction(&bank, &sponsor, buffer),
             fail,
         ],
         &[],
     );
-    assert!(bank.process_transaction(&failed).is_err());
+    assert_eq!(
+        bank.process_transaction(&failed),
+        Err(
+            solana_transaction_error::TransactionError::InstructionError(
+                2,
+                solana_instruction::error::InstructionError::InvalidInstructionData
+            )
+        )
+    );
     assert_eq!(bank.get_account(&pool_address()).unwrap(), before);
     assert_eq!(bank.get_account(&buffer).unwrap(), before_buffer);
+    let private_ix = finalize_instruction(&bank, &sponsor, buffer);
+    for account in &private_ix.accounts[4..] {
+        assert!(bank.get_account(&account.pubkey).is_none());
+    }
     transcript.push(failed);
     let paid = finalize(&bank, &sponsor, buffer);
     bank.process_transaction(&paid).unwrap();
@@ -212,6 +307,59 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
     let state = PoolState::decode(bank.get_account(&pool_address()).unwrap().data()).unwrap();
     assert_eq!(state.backing, 60);
     assert_eq!(bank.get_balance(&pool_address()), state.rent_floor + 60);
+    // Exercise 129 genuinely distinct, proven payments, not a raised array limit
+    // or a seeded counter. All replay records survive eviction of old anchors.
+    let prover = DepositProver::default();
+    let mut marker_keys: Vec<_> = deposit_ix.accounts[4..]
+        .iter()
+        .chain(private_ix.accounts[4..].iter())
+        .map(|meta| meta.pubkey)
+        .collect();
+    marker_keys.extend(
+        withdrawal
+            .actions()
+            .iter()
+            .map(|action| nullifiers::address(&action.nullifier().to_bytes())),
+    );
+    for index in 0..126 {
+        let state = PoolState::decode(bank.get_account(&pool_address()).unwrap().data()).unwrap();
+        let (bundle, context) = prover
+            .build(
+                sponsor.pubkey().to_bytes(),
+                FIXTURE_GENESIS,
+                100,
+                state.root(),
+                1,
+            )
+            .unwrap();
+        let bytes = wire::encode(FIXTURE_GENESIS, &context, &bundle).unwrap();
+        let (buffer, txs) = stage_transactions(&bank, &sponsor, &bytes);
+        for tx in txs {
+            bank.process_transaction(&tx).unwrap();
+            transcript.push(tx);
+        }
+        let ix = finalize_instruction(&bank, &sponsor, buffer);
+        marker_keys.extend(ix.accounts[4..].iter().map(|meta| meta.pubkey));
+        let tx = finalize(&bank, &sponsor, buffer);
+        bank.process_transaction(&tx).unwrap();
+        transcript.push(tx);
+        let close = transaction(
+            &bank,
+            &sponsor,
+            &[instructions::close(buffer, sponsor.pubkey())],
+            &[],
+        );
+        bank.process_transaction(&close).unwrap();
+        transcript.push(close);
+        if index % 32 == 0 {
+            println!("accepted {} distinct native payments", index + 4);
+        }
+    }
+    let state = PoolState::decode(bank.get_account(&pool_address()).unwrap().data()).unwrap();
+    assert_eq!(state.note_count(), 258);
+    assert_eq!(state.backing, 186);
+    assert_eq!(bank.get_balance(&pool_address()), state.rent_floor + 186);
+    assert_eq!(marker_keys.len(), 258);
     for tx in &transcript {
         let _ = independent.process_transaction(tx);
     }
@@ -223,6 +371,13 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
         bank.get_account(&sponsor.pubkey()),
         independent.get_account(&sponsor.pubkey())
     );
+    for key in marker_keys {
+        assert_eq!(bank.get_account(&key), independent.get_account(&key));
+        let marker = bank.get_account(&key).unwrap();
+        assert_eq!(marker.owner(), &id());
+        assert_eq!(marker.data().len(), nullifiers::MARKER_BYTES);
+        assert_eq!(&marker.data()[..8], b"NSPENT01");
+    }
     bank.freeze();
     independent.freeze();
     assert_eq!(bank.hash(), independent.hash());

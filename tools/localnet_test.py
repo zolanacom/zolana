@@ -31,10 +31,20 @@ class SnapshotSelectionTests(unittest.TestCase):
 
 
 class ConsensusStorageTests(unittest.TestCase):
+    def test_old_development_state_cannot_start_with_the_new_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL001"}))
+            with patch("localnet.subprocess.Popen") as launch:
+                with self.assertRaisesRegex(RuntimeError, "incompatible development pool format"):
+                    start(root, 0)
+                launch.assert_not_called()
+            self.assertFalse((root / "consensus-0").exists())
+
     def test_replacing_snapshot_ledger_preserves_tower_and_requires_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "genesis_hash": "fixture"}))
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "genesis_hash": "fixture", "pool_format": "NPOOL002"}))
             (root / "ledger-1").mkdir()
             with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch:
                 launch.return_value.pid = 1234

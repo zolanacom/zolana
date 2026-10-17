@@ -45,7 +45,7 @@ pub fn seal(buffer: Pubkey, sponsor: Pubkey) -> Instruction {
         data: vec![2],
     }
 }
-pub fn finalize(buffer: Pubkey, sponsor: Pubkey) -> Instruction {
+pub fn finalize(buffer: Pubkey, sponsor: Pubkey, nullifiers: [[u8; 32]; 2]) -> Instruction {
     Instruction {
         program_id: id(),
         accounts: vec![
@@ -53,6 +53,8 @@ pub fn finalize(buffer: Pubkey, sponsor: Pubkey) -> Instruction {
             AccountMeta::new(buffer, false),
             AccountMeta::new(sponsor, true),
             AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
+            AccountMeta::new(crate::nullifiers::address(&nullifiers[0]), false),
+            AccountMeta::new(crate::nullifiers::address(&nullifiers[1]), false),
         ],
         data: vec![3],
     }

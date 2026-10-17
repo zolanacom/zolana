@@ -22,6 +22,57 @@ use orchard::{
 
 pub const FIXTURE_GENESIS: [u8; 32] = [0x42; 32];
 
+/// Reuses circuit parameters for real-proof storage stress tests. Public test key!
+pub struct DepositProver(ProvingKey);
+
+impl Default for DepositProver {
+    fn default() -> Self {
+        Self(ProvingKey::build(bundle_version().circuit_version()))
+    }
+}
+
+impl DepositProver {
+    pub fn build(
+        &self,
+        sponsor: [u8; 32],
+        network: [u8; 32],
+        expires_at: u64,
+        anchor: [u8; 32],
+        amount: u64,
+    ) -> Result<(Bundle<Authorized, i64>, AuthorizationContext), Box<dyn std::error::Error>> {
+        let version = bundle_version();
+        let anchor = Option::<Anchor>::from(Anchor::from_bytes(anchor)).ok_or("invalid anchor")?;
+        let key =
+            Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32])).ok_or("fixture key")?;
+        let mut builder = Builder::new(
+            BundleType::DEFAULT,
+            version,
+            version.default_flags(),
+            anchor,
+        )?;
+        builder.add_output(
+            None,
+            FullViewingKey::from(&key).address_at(0u32, Scope::External),
+            NoteValue::from_raw(amount),
+            [0; 512],
+        )?;
+        let mut rng = rand::rng();
+        let (bundle, _) = builder.build::<i64>(&mut rng)?.ok_or("missing deposit")?;
+        let context = AuthorizationContext {
+            expires_at,
+            public_value_balance: -i64::try_from(amount)?,
+            sponsor,
+        };
+        let digest = authorization_digest(network, &bundle, &context)?;
+        Ok((
+            bundle
+                .create_proof(&self.0, &mut rng)?
+                .apply_signatures(&mut rng, digest, &[])?,
+            context,
+        ))
+    }
+}
+
 pub struct Fixture {
     pub network: [u8; 32],
     pub current_slot: u64,

@@ -1,5 +1,5 @@
 use native_payment_program::{
-    id, instructions, pool_address,
+    id, instructions, nullifiers, pool_address,
     staging::{Buffer, ACCOUNT_BYTES},
     Entrypoint,
 };
@@ -67,6 +67,10 @@ fn setup(sponsor: Pubkey) -> Accounts {
     let mut system = AccountSharedData::new(1, 0, &native_loader::id());
     system.set_executable(true);
     vec![
+        (
+            sysvar::rent::id(),
+            create_account_shared_data_for_test(&rent),
+        ),
         (pool_address(), pool),
         (
             sponsor,
@@ -84,6 +88,13 @@ fn setup(sponsor: Pubkey) -> Accounts {
 }
 
 fn stage(accounts: &mut Accounts, sponsor: Pubkey, bytes: &[u8], seed: u8) -> Pubkey {
+    let payment = wire::decode(FIXTURE_GENESIS, bytes).unwrap();
+    for action in payment.bundle.actions().iter() {
+        let address = nullifiers::address(&action.nullifier().to_bytes());
+        if !accounts.iter().any(|(key, _)| *key == address) {
+            accounts.push((address, AccountSharedData::default()));
+        }
+    }
     let key = Pubkey::new_from_array([seed; 32]);
     accounts.push((
         key,
@@ -116,6 +127,23 @@ fn stage(accounts: &mut Accounts, sponsor: Pubkey, bytes: &[u8], seed: u8) -> Pu
     key
 }
 
+fn finalize(buffer: Pubkey, sponsor: Pubkey, bytes: &[u8]) -> Instruction {
+    let payment = wire::decode(FIXTURE_GENESIS, bytes).unwrap();
+    instructions::finalize(
+        buffer,
+        sponsor,
+        std::array::from_fn(|index| {
+            payment
+                .bundle
+                .actions()
+                .get(index)
+                .unwrap()
+                .nullifier()
+                .to_bytes()
+        }),
+    )
+}
+
 fn account(accounts: &Accounts, key: Pubkey) -> &AccountSharedData {
     &accounts.iter().find(|(k, _)| *k == key).unwrap().1
 }
@@ -129,6 +157,7 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let fixture = build_fixture_for(sponsor.to_bytes()).unwrap();
     let mut accounts = setup(sponsor);
     let initial = account(&accounts, sponsor).lamports();
+    let marker_rent = Rent::default().minimum_balance(nullifiers::MARKER_BYTES);
     let funding =
         wire::encode(FIXTURE_GENESIS, &fixture.funding_context, &fixture.funding).unwrap();
     let mut unfunded = accounts.clone();
@@ -141,7 +170,7 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let unpaid = stage(&mut unfunded, sponsor, &funding, 89);
     execute(
         &mut unfunded,
-        instructions::finalize(unpaid, sponsor),
+        finalize(unpaid, sponsor, &funding),
         Err(InstructionError::Custom(1)),
         1_400_000,
     );
@@ -152,15 +181,34 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
         state(&unfunded).rent_floor
     );
     let buffer = stage(&mut accounts, sponsor, &funding, 91);
+    let marker_key = finalize(buffer, sponsor, &funding).accounts[4].pubkey;
+    let mut malformed = accounts.clone();
+    let bad_marker = &mut malformed
+        .iter_mut()
+        .find(|(key, _)| *key == marker_key)
+        .unwrap()
+        .1;
+    bad_marker.set_owner(id());
+    bad_marker.set_data_from_slice(b"corrupted marker");
+    execute(
+        &mut malformed,
+        finalize(buffer, sponsor, &funding),
+        Err(InstructionError::InvalidInstructionData),
+        1_400_000,
+    );
+    assert_eq!(state(&malformed).note_count(), 0);
     execute(
         &mut accounts,
-        instructions::finalize(buffer, sponsor),
+        finalize(buffer, sponsor, &funding),
         Ok(()),
         1_400_000,
     );
     assert_eq!(state(&accounts).backing, 100);
     assert_eq!(state(&accounts).note_count(), 2);
-    assert_eq!(account(&accounts, sponsor).lamports(), initial - 100);
+    assert_eq!(
+        account(&accounts, sponsor).lamports(),
+        initial - 100 - 2 * marker_rent
+    );
     assert_eq!(
         account(&accounts, pool_address()).lamports(),
         state(&accounts).rent_floor + 100
@@ -179,7 +227,7 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let before_invalid = account(&accounts, pool_address()).clone();
     execute(
         &mut accounts,
-        instructions::finalize(invalid_buffer, sponsor),
+        finalize(invalid_buffer, sponsor, &corrupt_payment),
         Err(InstructionError::InvalidInstructionData),
         1_400_000,
     );
@@ -187,21 +235,21 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let buffer = stage(&mut accounts, sponsor, &payment, 92);
     execute(
         &mut accounts,
-        instructions::finalize(buffer, sponsor),
+        finalize(buffer, sponsor, &payment),
         Err(InstructionError::ComputationalBudgetExceeded),
         10_000,
     );
     assert_eq!(state(&accounts).note_count(), 2);
     execute(
         &mut accounts,
-        instructions::finalize(buffer, sponsor),
+        finalize(buffer, sponsor, &payment),
         Ok(()),
         1_400_000,
     );
     let second = stage(&mut replay, sponsor, &payment, 92);
     execute(
         &mut replay,
-        instructions::finalize(second, sponsor),
+        finalize(second, sponsor, &payment),
         Ok(()),
         1_400_000,
     );
@@ -211,7 +259,10 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     );
     assert_eq!(state(&accounts).backing, 100);
     assert_eq!(state(&accounts).note_count(), 4);
-    assert_eq!(account(&accounts, sponsor).lamports(), initial - 100);
+    assert_eq!(
+        account(&accounts, sponsor).lamports(),
+        initial - 100 - 4 * marker_rent
+    );
     assert!(Buffer::decode(account(&accounts, buffer).data())
         .unwrap()
         .payload()
@@ -220,14 +271,14 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let before = account(&accounts, pool_address()).clone();
     execute(
         &mut accounts,
-        instructions::finalize(buffer, sponsor),
+        finalize(buffer, sponsor, &payment),
         Err(InstructionError::InvalidAccountData),
         1_400_000,
     );
     let replay_buffer = stage(&mut accounts, sponsor, &payment, 93);
     execute(
         &mut accounts,
-        instructions::finalize(replay_buffer, sponsor),
+        finalize(replay_buffer, sponsor, &payment),
         Err(InstructionError::InvalidInstructionData),
         1_400_000,
     );
@@ -240,7 +291,7 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let balance = account(&accounts, sponsor).lamports();
     execute(
         &mut accounts,
-        instructions::finalize(bad, sponsor),
+        finalize(bad, sponsor, &corrupt),
         Err(InstructionError::InvalidInstructionData),
         1_400_000,
     );
@@ -266,13 +317,16 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
     let balance = account(&accounts, sponsor).lamports();
     execute(
         &mut accounts,
-        instructions::finalize(exit, sponsor),
+        finalize(exit, sponsor, &bytes),
         Ok(()),
         1_400_000,
     );
     assert_eq!(state(&accounts).backing, 60);
     assert_eq!(state(&accounts).note_count(), 6);
-    assert_eq!(account(&accounts, sponsor).lamports(), balance + 40);
+    assert_eq!(
+        account(&accounts, sponsor).lamports(),
+        balance + 40 - 2 * marker_rent
+    );
     assert_eq!(
         account(&accounts, pool_address()).lamports(),
         state(&accounts).rent_floor + 60
@@ -287,6 +341,14 @@ fn real_funded_deposit_and_private_spend_execute_in_native_runtime() {
         1_400_000,
     );
     assert_eq!(account(&accounts, pool_address()), &protected);
+    let permanent = account(&accounts, marker_key).clone();
+    execute(
+        &mut accounts,
+        instructions::close(marker_key, sponsor),
+        Err(InstructionError::InvalidAccountData),
+        1_400_000,
+    );
+    assert_eq!(account(&accounts, marker_key), &permanent);
     let other = Pubkey::new_from_array([88; 32]);
     accounts.push((
         other,

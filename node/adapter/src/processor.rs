@@ -1,4 +1,4 @@
-use crate::{id, pool_address, staging::Buffer, FINALIZE_COMPUTE_UNITS};
+use crate::{id, nullifiers, pool_address, staging::Buffer, FINALIZE_COMPUTE_UNITS};
 use native_payments::{
     state::PoolState,
     verification::{bundle_version, PaymentVerifier, ValidationView, MAX_EXPIRY_WINDOW},
@@ -8,7 +8,10 @@ use orchard::circuit::VerifyingKey;
 use solana_instruction::error::InstructionError as Error;
 use solana_program_runtime::invoke_context::InvokeContext;
 use solana_sdk_ids::system_program;
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, LazyLock},
+};
 
 static KEY: LazyLock<Arc<VerifyingKey>> =
     LazyLock::new(|| Arc::new(VerifyingKey::build(bundle_version().circuit_version())));
@@ -120,7 +123,7 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
         let instruction = context
             .transaction_context
             .get_current_instruction_context()?;
-        if instruction.get_number_of_instruction_accounts() != 4
+        if instruction.get_number_of_instruction_accounts() != 6
             || !instruction.is_instruction_account_signer(2)?
         {
             return Err(Error::MissingRequiredSignature);
@@ -165,6 +168,43 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
     if payment.context.sponsor != sponsor.to_bytes() {
         return Err(Error::MissingRequiredSignature);
     }
+    let nullifiers: [[u8; 32]; 2] = std::array::from_fn(|index| {
+        payment
+            .bundle
+            .actions()
+            .get(index)
+            .unwrap()
+            .nullifier()
+            .to_bytes()
+    });
+    if nullifiers[0] == nullifiers[1] {
+        return Err(Error::InvalidInstructionData);
+    }
+    {
+        let instruction = context
+            .transaction_context
+            .get_current_instruction_context()?;
+        for (index, nullifier) in nullifiers.iter().enumerate() {
+            let account_index = (4 + index) as u16;
+            if instruction.get_key_of_instruction_account(account_index)?
+                != &nullifiers::address(nullifier)
+            {
+                return Err(Error::InvalidArgument);
+            }
+            if !instruction.is_instruction_account_writable(account_index)? {
+                return Err(Error::InvalidArgument);
+            }
+            let marker = instruction.try_borrow_instruction_account(account_index)?;
+            // Any native-owned account at this address fails closed, including
+            // malformed markers. Only this finalizer can sign for the PDA.
+            if marker.get_owner() == &id() {
+                return Err(Error::InvalidInstructionData);
+            }
+            if marker.get_owner() != &system_program::id() || !marker.get_data().is_empty() {
+                return Err(Error::InvalidAccountData);
+            }
+        }
+    }
     let roots = state.roots();
     // Public movement is executed below, atomically with these verified effects.
     let effects = PaymentVerifier::with_shared_key(state.network, Arc::clone(&KEY))
@@ -175,7 +215,9 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
             &ValidationView {
                 current_slot: slot,
                 accepted_anchors: &roots,
-                spent_nullifiers: state.nullifiers(),
+                // Both proof-derived accounts were authenticated above. Neither
+                // exists in the native spent set. No RPC-supplied state is used.
+                spent_nullifiers: &BTreeSet::new(),
                 authorized_public_value_balance: payment.context.public_value_balance,
             },
         )
@@ -203,6 +245,42 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
         instruction
             .try_borrow_instruction_account(2)?
             .checked_add_lamports(effects.public_value_balance as u64)?;
+    }
+    for (index, nullifier) in effects.nullifiers.iter().enumerate() {
+        let address = nullifiers::address(nullifier);
+        let existing = context
+            .transaction_context
+            .get_current_instruction_context()?
+            .try_borrow_instruction_account((4 + index) as u16)?
+            .get_lamports();
+        let rent = context
+            .get_sysvar_cache()
+            .get_rent()?
+            .minimum_balance(nullifiers::MARKER_BYTES);
+        // Allocate/assign rather than create_account: an unsolicited transfer to
+        // an unused PDA must not make an otherwise valid note unspendable.
+        if existing < rent {
+            context.native_invoke(
+                solana_system_interface::instruction::transfer(&sponsor, &address, rent - existing),
+                &[],
+            )?;
+        }
+        context.native_invoke(
+            solana_system_interface::instruction::allocate(
+                &address,
+                nullifiers::MARKER_BYTES as u64,
+            ),
+            &[address],
+        )?;
+        context.native_invoke(
+            solana_system_interface::instruction::assign(&address, &id()),
+            &[address],
+        )?;
+        context
+            .transaction_context
+            .get_current_instruction_context()?
+            .try_borrow_instruction_account((4 + index) as u16)?
+            .set_data_from_slice(&nullifiers::encode(nullifier))?;
     }
     let instruction = context
         .transaction_context

@@ -1,6 +1,6 @@
 //! Disposable local-network tooling. Fixture spending keys are intentionally public.
 use native_payment_program::{
-    id, instructions, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
+    id, instructions, nullifiers, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
 };
 use native_payments::{
     staging::{payload_digest, MAX_CHUNK_BYTES},
@@ -140,6 +140,7 @@ fn initialize(root: &Path) -> Result<()> {
         serde_json::to_vec_pretty(&json!({
             "network": network, "genesis_hash": genesis.hash().to_string(), "identities": identities,
             "pool": pool_address().to_string(), "program": id().to_string(),
+            "pool_format": "NPOOL002",
             "fixture_keys_are_public": true
         }))?,
     )?;
@@ -263,9 +264,22 @@ fn finalize(
     buffer: Pubkey,
     fail_after: bool,
 ) -> Result<()> {
+    let network = pool(rpc)?.1.network;
+    let account = rpc.get_account(&buffer)?;
+    let staged = native_payment_program::staging::Buffer::decode(&account.data)?;
+    let payment = wire::decode(network, staged.payload()?)?;
+    let nullifiers = std::array::from_fn(|index| {
+        payment
+            .bundle
+            .actions()
+            .get(index)
+            .unwrap()
+            .nullifier()
+            .to_bytes()
+    });
     let mut ixs = vec![
         ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-        instructions::finalize(buffer, sponsor.pubkey()),
+        instructions::finalize(buffer, sponsor.pubkey(), nullifiers),
     ];
     if fail_after {
         let mut fail = instructions::seal(buffer, sponsor.pubkey());
@@ -314,6 +328,58 @@ fn equal_pool(rpc: &RpcClient, peer: &RpcClient) -> Result<()> {
     Err("peer did not converge to the exact pool account".into())
 }
 
+fn marker_keys(network: [u8; 32], bytes: &[u8]) -> Result<Vec<Pubkey>> {
+    Ok(wire::decode(network, bytes)?
+        .bundle
+        .actions()
+        .iter()
+        .map(|action| nullifiers::address(&action.nullifier().to_bytes()))
+        .collect())
+}
+
+fn marker_receipt(rpc: &RpcClient, network: [u8; 32], payloads: &[&[u8]]) -> Result<Value> {
+    let mut markers = Vec::new();
+    for bytes in payloads {
+        for action in wire::decode(network, bytes)?.bundle.actions().iter() {
+            let nf = action.nullifier().to_bytes();
+            let key = nullifiers::address(&nf);
+            let account = rpc.get_account(&key)?;
+            if account.owner != id()
+                || account.data != nullifiers::encode(&nf)
+                || account.lamports
+                    < rpc.get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES)?
+            {
+                return Err("incorrect permanent nullifier marker".into());
+            }
+            markers.push(json!({"nullifier":nf,"lamports":account.lamports}));
+        }
+    }
+    Ok(Value::Array(markers))
+}
+
+fn check_markers(rpc: &RpcClient, expected: &Value) -> Result<()> {
+    let deadline = Instant::now();
+    loop {
+        let result = (|| -> Result<()> {
+            for marker in expected.as_array().ok_or("invalid marker receipt")? {
+                let nf: [u8; 32] = serde_json::from_value(marker["nullifier"].clone())?;
+                let account = rpc.get_account(&nullifiers::address(&nf))?;
+                if account.owner != id()
+                    || account.data != nullifiers::encode(&nf)
+                    || Some(account.lamports) != marker["lamports"].as_u64()
+                {
+                    return Err("permanent nullifier account mismatch".into());
+                }
+            }
+            Ok(())
+        })();
+        if result.is_ok() || deadline.elapsed() > Duration::from_secs(45) {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> Result<()> {
     let payer = read_keypair_file(root.join("sponsor.keypair.json"))?;
     let poor = read_keypair_file(root.join("unfunded.keypair.json"))?;
@@ -343,6 +409,19 @@ fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> R
     let expiry = fixture.context.expires_at;
     let funding = wire::encode(network, &fixture.funding_context, &fixture.funding)?;
     let buffer = stage(rpc, &payer, &payer, &funding, expiry)?;
+    let funding_markers = marker_keys(network, &funding)?;
+    let rent = rpc.get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES)?;
+    send(
+        rpc,
+        &payer,
+        &[system::transfer(
+            &payer.pubkey(),
+            &funding_markers[0],
+            rent + 7,
+        )],
+        &[],
+    )?;
+    let markers_before = rpc.get_multiple_accounts(&funding_markers)?;
     let before_deposit = pool(rpc)?.0;
     let staged_before = rpc.get_account(&buffer)?;
     rejected(
@@ -351,12 +430,18 @@ fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> R
         2,
         InstructionError::InvalidInstructionData,
     )?;
-    if pool(rpc)?.0 != before_deposit || rpc.get_account(&buffer)? != staged_before {
-        return Err("failed deposit did not roll back backing and staging".into());
+    if pool(rpc)?.0 != before_deposit
+        || rpc.get_account(&buffer)? != staged_before
+        || rpc.get_multiple_accounts(&funding_markers)? != markers_before
+    {
+        return Err("failed deposit did not roll back backing, staging and markers".into());
     }
     finalize(rpc, &payer, &payer, buffer, false)?;
     if pool(rpc)?.1.backing != 100 {
         return Err("deposit not backed".into());
+    }
+    if rpc.get_account(&funding_markers[0])?.lamports != rent + 7 {
+        return Err("pre-funded marker allocation lost its donation".into());
     }
     let payment = wire::encode(network, &fixture.context, &fixture.bundle)?;
     fs::write(root.join("spent-payment.bin"), &payment)?;
@@ -377,14 +462,19 @@ fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> R
     }
     let buffer = stage(rpc, &payer, &payer, &payment, expiry)?;
     let staged_before = rpc.get_account(&buffer)?;
+    let private_markers = marker_keys(network, &payment)?;
+    let markers_before = rpc.get_multiple_accounts(&private_markers)?;
     rejected(
         finalize(rpc, &payer, &payer, buffer, true),
         "post-finalization failure",
         2,
         InstructionError::InvalidInstructionData,
     )?;
-    if pool(rpc)?.0 != before || rpc.get_account(&buffer)? != staged_before {
-        return Err("failed transaction was not atomic".into());
+    if pool(rpc)?.0 != before
+        || rpc.get_account(&buffer)? != staged_before
+        || rpc.get_multiple_accounts(&private_markers)? != markers_before
+    {
+        return Err("failed transaction did not roll back permanent markers".into());
     }
     finalize(rpc, &payer, &payer, buffer, false)?;
     let (withdrawal, context) = withdrawal_fixture(&fixture)?;
@@ -396,13 +486,20 @@ fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> R
         return Err("incorrect final payment state".into());
     }
     equal_pool(rpc, peer)?;
+    let markers = marker_receipt(rpc, network, &[&funding, &payment, &bytes])?;
+    check_markers(peer, &markers)?;
+    fs::write(
+        root.join("expected-markers.json"),
+        serde_json::to_vec_pretty(&markers)?,
+    )?;
     fs::write(root.join("expected-pool.bin"), &account.data)?;
     fs::write(
         root.join("payment-result.json"),
         serde_json::to_vec_pretty(&json!({
             "slot":rpc.get_slot()?,"backing":state.backing,"note_count":state.note_count(),
             "actual_pool_lamports":account.lamports,"expiry":expiry,
-            "checks":["funded_deposit","private_transfer","withdrawal","unfunded_rejected","invalid_proof_rejected","failed_transaction_atomic","peer_account_equal"]
+            "marker_count":markers.as_array().unwrap().len(),"marker_bytes":nullifiers::MARKER_BYTES,"marker_rent":rent,
+            "checks":["funded_deposit","private_transfer","withdrawal","unfunded_rejected","invalid_proof_rejected","failed_transaction_atomic","peer_account_equal","prefunded_marker_allocation","permanent_markers_rollback","peer_markers_equal"]
         }))?,
     )?;
     recovery_check(root, rpc, peer)?;
@@ -426,6 +523,9 @@ fn recovery_check(root: &Path, rpc: &RpcClient, peer: &RpcClient) -> Result<()> 
         thread::sleep(Duration::from_millis(250));
     }
     equal_pool(rpc, peer)?;
+    let markers: Value = serde_json::from_slice(&fs::read(root.join("expected-markers.json"))?)?;
+    check_markers(rpc, &markers)?;
+    check_markers(peer, &markers)?;
     let bytes = fs::read(root.join("spent-payment.bin"))?;
     let expiry: u64 = fs::read_to_string(root.join("payment-expiry.json"))?.parse()?;
     let slot = rpc.get_slot()?;
@@ -447,7 +547,7 @@ fn recovery_check(root: &Path, rpc: &RpcClient, peer: &RpcClient) -> Result<()> 
         return Err("replayed spend changed pool".into());
     }
     println!(
-        "Recovery check passed; exact pool bytes and spent-note rejection retained at slot {slot}"
+        "Recovery check passed; exact pool, permanent markers and spent-note rejection retained at slot {slot}"
     );
     Ok(())
 }

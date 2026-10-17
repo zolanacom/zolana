@@ -4508,6 +4508,7 @@ dependencies = [
  "solana-signer",
  "solana-system-interface",
  "solana-transaction",
+ "solana-transaction-error",
 ]
 
 [[package]]
