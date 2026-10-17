@@ -1,0 +1,40 @@
+# Local validator and recovery runbook
+
+This tooling creates disposable local funds and public-key payment fixtures. It is not a wallet for external funds. Every RPC URL is loopback; both endpoints must match the saved genesis hash before the payment harness sends transactions. Generated identities, signing files, proofs, ledgers, snapshots, logs and result JSON stay under ignored `.data/`. Network directories are private to the local OS account, and signing files have mode 0600.
+
+## Build and start
+
+Run from the repository root:
+
+```
+sh tools/dev.sh fetch --locked
+sh tools/build_localnet.sh
+python3 -B tools/localnet.py init
+python3 -B tools/localnet.py start
+python3 -B tools/localnet.py status
+python3 -B tools/localnet.py verify
+```
+
+The build uses the fork's actual Agave validator source and the root lockfile, including the upstream-pinned networking patches and compatible SDK versions. It does not use the separately installed validator binary. Native libraries compile locally with debug symbols disabled. The local executable uses the platform allocator because jemalloc’s configure step rejects spaces in this workspace path; the imported validator’s default jemalloc feature remains available for other builds. Keep space for the native build and two ledgers; the tooling does not delete unrelated files.
+
+The default RPC endpoints are `http://127.0.0.1:18899` and `http://127.0.0.1:19899`. Validator identities and genesis fingerprints are in `.data/localnet/network.json`. No public entrypoints, faucet, production assets or hosted services are used. Validator gossip and RPC bind to loopback. The two processes have distinct keys and ledgers and genesis stake weights of 80% and 20%.
+
+Initialization refuses an existing network directory. To repeat the complete fresh-pool experiment, stop the current network and choose a new directory using `--root .data/<new-directory>` on every command. No reset/delete command is provided.
+
+## Verification contract
+
+The test stages real two-action Orchard v2 proofs in signed transactions and checks the serialized signed packet bound. Deposits debit a real sponsor account; a private payment sends 40 with 60 change; withdrawal returns 40, leaving 60 units of backing and six commitments. Negative tests require confirmed on-chain instruction errors at the expected instruction index. RPC errors, timeouts and preflight failures do not count as successful rejection tests.
+
+Failure after a funded deposit must roll back both its System Program debit and note/staging effects. Failure after a private finalization must also roll back pool and staging bytes. An invalid proof and a sponsor unable to fund its deposit must not change the pool. The second validator must converge to exactly the same complete pool account.
+
+The recovery sequence stops the follower and waits for a finalized full snapshot beyond the leader tip observed at shutdown. It creates a separate genesis-only ledger, checks the archive's SHA-256 copy digest and forces archive extraction at startup. No old account files or post-genesis transaction ledger are copied. It checks startup log evidence for archive loading, Bank reconstruction and successful Bank verification, waits for the follower to catch up, and repeats the state and spent-payment tests over RPC. It then restarts that same recovered ledger and repeats the checks again while the original proof authorization remains valid.
+
+Consensus tower files stay in per-identity `consensus-*` directories outside the replaceable ledger. Subsequent starts require the saved tower. Only the initial bootstrap leader can start producing before voting; the follower retains the normal vote-before-leader gate. Recovery directory names are short enough for macOS admin sockets. The harness uses admin RPC shutdown and explicitly reaps or waits for the managed process.
+
+Results are written to `.data/localnet/payment-result.json` and, only after both restore and restart succeed, `.data/localnet/recovery-result.json`. Test completion leaves both local processes running and reduces their background logs to warnings/errors. Startup retains the snapshot and Bank verification messages needed by the recovery checks. To stop them through their local admin sockets:
+
+```
+python3 -B tools/localnet.py stop
+```
+
+Both programs and their local data are experimental. The pool still has a 128-payment lifetime capacity and 16 recent roots. Shared-pool throughput, scalable storage, wallet recovery and independent cryptographic review are separate milestones. This runbook describes the test contract; completed evidence is recorded in the LOCAL-004 validation record.

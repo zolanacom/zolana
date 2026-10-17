@@ -1,4 +1,4 @@
-//! Synthetic test funding is never submitted to a chain. Keys are public fixtures.
+//! Public synthetic fixture keys; use only on isolated, disposable local networks.
 
 use std::{collections::BTreeSet, time::Instant};
 
@@ -23,6 +23,8 @@ use orchard::{
 pub const FIXTURE_GENESIS: [u8; 32] = [0x42; 32];
 
 pub struct Fixture {
+    pub network: [u8; 32],
+    pub current_slot: u64,
     pub funding: Bundle<Authorized, i64>,
     pub funding_context: AuthorizationContext,
     pub verifier: PaymentVerifier,
@@ -42,7 +44,7 @@ pub struct Report {
 impl Fixture {
     pub fn view<'a>(&'a self, spent: &'a BTreeSet<[u8; 32]>) -> ValidationView<'a> {
         ValidationView {
-            current_slot: 1,
+            current_slot: self.current_slot,
             accepted_anchors: &self.anchors,
             spent_nullifiers: spent,
             authorized_public_value_balance: 0,
@@ -50,14 +52,14 @@ impl Fixture {
     }
 
     pub fn check(&self) -> Result<Report, Error> {
-        let bytes = wire::encode(FIXTURE_GENESIS, &self.context, &self.bundle)?;
+        let bytes = wire::encode(self.network, &self.context, &self.bundle)?;
         let size = bytes.len();
         let mut staged = StagedPayload::new(size, payload_digest(&bytes))?;
         for (i, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
             staged.append(i * MAX_CHUNK_BYTES, chunk)?;
         }
         staged.seal()?;
-        let decoded = wire::decode(FIXTURE_GENESIS, &staged.into_payload()?)?;
+        let decoded = wire::decode(self.network, &staged.into_payload()?)?;
         let empty = BTreeSet::new();
         let started = Instant::now();
         self.verifier
@@ -76,10 +78,20 @@ pub fn build_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
 }
 
 pub fn build_fixture_for(sponsor: [u8; 32]) -> Result<Fixture, Box<dyn std::error::Error>> {
+    build_fixture_for_network(sponsor, FIXTURE_GENESIS, 1, 100)
+}
+
+/// Constructs real proofs using public test keys for a particular local genesis.
+pub fn build_fixture_for_network(
+    sponsor: [u8; 32],
+    network: [u8; 32],
+    current_slot: u64,
+    expires_at: u64,
+) -> Result<Fixture, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let version = bundle_version();
     let key = ProvingKey::build(version.circuit_version());
-    let verifier = PaymentVerifier::new(FIXTURE_GENESIS, key.verifying_key())?;
+    let verifier = PaymentVerifier::new(network, key.verifying_key())?;
     let alice =
         Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32])).ok_or("fixture key")?;
     let bob = Option::<SpendingKey>::from(SpendingKey::from_bytes([8; 32])).ok_or("fixture key")?;
@@ -99,11 +111,11 @@ pub fn build_fixture_for(sponsor: [u8; 32]) -> Result<Fixture, Box<dyn std::erro
         .build::<i64>(&mut rng)?
         .ok_or("missing funding fixture")?;
     let funding_context = AuthorizationContext {
-        expires_at: 100,
+        expires_at,
         public_value_balance: -100,
         sponsor,
     };
-    let digest = authorization_digest(FIXTURE_GENESIS, &funding, &funding_context)?;
+    let digest = authorization_digest(network, &funding, &funding_context)?;
     let funding = funding
         .create_proof(&key, &mut rng)?
         .apply_signatures(&mut rng, digest, &[])?;
@@ -113,7 +125,7 @@ pub fn build_fixture_for(sponsor: [u8; 32]) -> Result<Fixture, Box<dyn std::erro
         &funding,
         &funding_context,
         &ValidationView {
-            current_slot: 1,
+            current_slot,
             accepted_anchors: &initial_roots,
             spent_nullifiers: &empty,
             authorized_public_value_balance: -100,
@@ -149,7 +161,7 @@ pub fn build_fixture_for(sponsor: [u8; 32]) -> Result<Fixture, Box<dyn std::erro
         public_value_balance: 0,
         ..funding_context
     };
-    let digest = authorization_digest(FIXTURE_GENESIS, &payment, &context)?;
+    let digest = authorization_digest(network, &payment, &context)?;
     let bundle = payment.create_proof(&key, &mut rng)?.apply_signatures(
         &mut rng,
         digest,
@@ -167,6 +179,8 @@ pub fn build_fixture_for(sponsor: [u8; 32]) -> Result<Fixture, Box<dyn std::erro
         return Err("payment or change could not be decrypted".into());
     }
     Ok(Fixture {
+        network,
+        current_slot,
         funding,
         funding_context,
         verifier,
@@ -221,7 +235,7 @@ pub fn withdrawal_fixture(
         public_value_balance: 40,
         ..fixture.context
     };
-    let digest = authorization_digest(FIXTURE_GENESIS, &bundle, &context)?;
+    let digest = authorization_digest(fixture.network, &bundle, &context)?;
     let key = ProvingKey::build(version.circuit_version());
     Ok((
         bundle.create_proof(&key, &mut rng)?.apply_signatures(

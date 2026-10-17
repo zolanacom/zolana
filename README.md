@@ -11,6 +11,7 @@ This repository starts from upstream Agave source and a new development history.
 - `node/agave/`: upstream validator source with gated native-payment registration.
 - `node/adapter/`: metered native execution, staging and real coin accounting.
 - `node/validator-check/`: signed-transaction integration tests using Agave Bank.
+- `node/localnet/` and `tools/localnet.py`: real local validators, RPC fixtures and snapshot/restart checks.
 - `docs/decisions/`: architecture and scope decisions.
 
 See LOCAL-001 for the first implementation milestone and its validation record. The standalone verifier and real-proof offline fixture are implemented. Native runtime integration and coin accounting are implemented locally; see LOCAL-002 and [the integration design](docs/decisions/0003-native-validator-integration.md). Nothing in this repository has been deployed or connected to a production network.
@@ -25,7 +26,7 @@ CARGO_BUILD_JOBS=2 sh tools/dev.sh test --offline --locked -p native-validator-c
 sh tools/check.sh
 ```
 
-This uses a project-local dependency cache and the installed Rust 1.92 toolchain. The fixture uses public synthetic test keys and creates no real funds. It verifies real proofs and authorization, stages/decodes the payment and confirms local decryption of payment and change. The proof-smoke command is not a wallet or an on-chain transfer. The separate runtime and Bank tests execute synthetic native payments. A live RPC validator network has not been launched; the pool is limited to 128 payments pending scalable storage.
+This uses a project-local dependency cache and the installed Rust 1.92 toolchain. The fixture uses public synthetic test keys and creates no real funds. It verifies real proofs and authorization, stages/decodes the payment and confirms local decryption of payment and change. The proof-smoke command is not a wallet or an on-chain transfer. The separate runtime and Bank tests execute synthetic native payments. Two local validator processes have executed payments over RPC, restored a fresh ledger from a full snapshot and restarted the recovered ledger. See [the local runbook](docs/local-validator-runbook.md) and LOCAL-004 validation. The pool remains limited to 128 payments pending scalable storage.
 
 ## Attribution
 

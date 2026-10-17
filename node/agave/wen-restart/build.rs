@@ -3,8 +3,10 @@ use std::io::Result;
 fn main() -> Result<()> {
     const PROTOC_ENVAR: &str = "PROTOC";
     if std::env::var(PROTOC_ENVAR).is_err() {
-        #[cfg(not(windows))]
-        std::env::set_var(PROTOC_ENVAR, protobuf_src::protoc());
+        std::env::set_var(
+            PROTOC_ENVAR,
+            protoc_bin_vendored::protoc_bin_path().expect("bundled protoc for this host"),
+        );
     }
 
     let proto_base_path = std::path::PathBuf::from("proto");

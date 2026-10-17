@@ -1,0 +1,495 @@
+//! Disposable local-network tooling. Fixture spending keys are intentionally public.
+use native_payment_program::{
+    id, instructions, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
+};
+use native_payments::{
+    staging::{payload_digest, MAX_CHUNK_BYTES},
+    state::{PoolState, STATE_BYTES},
+    wire,
+};
+use payment_lab::proof_smoke::{build_fixture_for_network, withdrawal_fixture};
+use serde_json::{json, Value};
+use solana_account::AccountSharedData;
+use solana_cluster_type::ClusterType;
+use solana_commitment_config::CommitmentConfig;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
+use solana_epoch_schedule::EpochSchedule;
+use solana_fee_calculator::FeeRateGovernor;
+use solana_instruction::{error::InstructionError, Instruction};
+use solana_keypair::{read_keypair_file, write_keypair_file, Keypair};
+use solana_ledger::{blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions};
+use solana_pubkey::Pubkey;
+use solana_rent::Rent;
+use solana_rpc_client::rpc_client::RpcClient;
+use solana_rpc_client_api::config::RpcSendTransactionConfig;
+use solana_runtime::genesis_utils::{
+    activate_feature, create_genesis_config_with_leader_ex_no_features, ValidatorVoteKeypairs,
+};
+use solana_signer::Signer;
+use solana_system_interface::instruction as system;
+use solana_transaction::Transaction;
+use solana_transaction_error::TransactionError;
+use std::{
+    error::Error,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+fn save_key(root: &Path, name: &str, key: &Keypair) -> Result<()> {
+    let path = root.join(name);
+    write_keypair_file(key, &path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn initialize(root: &Path) -> Result<()> {
+    if root.exists() {
+        return Err("refusing to replace an existing local network".into());
+    }
+    fs::create_dir_all(root)?;
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    let sponsor = Keypair::new();
+    let poor = Keypair::new();
+    save_key(root, "sponsor.keypair.json", &sponsor)?;
+    save_key(root, "unfunded.keypair.json", &poor)?;
+    let nodes = [
+        ValidatorVoteKeypairs::new_rand(),
+        ValidatorVoteKeypairs::new_rand(),
+    ];
+    let network = Keypair::new().pubkey().to_bytes();
+    let rent = Rent::default();
+    let floor = rent.minimum_balance(STATE_BYTES);
+    let mut pool = AccountSharedData::new(floor, STATE_BYTES, &id());
+    pool.set_data_from_slice(&PoolState::new(network, floor)?.encode());
+    let mut genesis = create_genesis_config_with_leader_ex_no_features(
+        10_000_000_000,
+        &sponsor.pubkey(),
+        &nodes[0].node_keypair.pubkey(),
+        &nodes[0].vote_keypair.pubkey(),
+        &nodes[0].stake_keypair.pubkey(),
+        80_000_000_000,
+        10_000_000_000,
+        FeeRateGovernor::new(5000, 10000),
+        rent.clone(),
+        ClusterType::Development,
+        vec![
+            (pool_address(), pool),
+            (
+                poor.pubkey(),
+                AccountSharedData::new(50, 0, &solana_sdk_ids::system_program::id()),
+            ),
+        ],
+    );
+    let second = create_genesis_config_with_leader_ex_no_features(
+        10_000_000_000,
+        &sponsor.pubkey(),
+        &nodes[1].node_keypair.pubkey(),
+        &nodes[1].vote_keypair.pubkey(),
+        &nodes[1].stake_keypair.pubkey(),
+        20_000_000_000,
+        10_000_000_000,
+        FeeRateGovernor::new(5000, 10000),
+        rent,
+        ClusterType::Development,
+        vec![],
+    );
+    for address in [
+        nodes[1].node_keypair.pubkey(),
+        nodes[1].vote_keypair.pubkey(),
+        nodes[1].stake_keypair.pubkey(),
+    ] {
+        genesis
+            .accounts
+            .insert(address, second.accounts[&address].clone());
+    }
+    activate_feature(&mut genesis, ACTIVATION_ID);
+    genesis.poh_config.hashes_per_tick = None;
+    genesis.epoch_schedule = EpochSchedule::custom(128, 128, false);
+    let mut identities = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        save_key(
+            root,
+            &format!("identity-{index}.keypair.json"),
+            &node.node_keypair,
+        )?;
+        save_key(
+            root,
+            &format!("vote-{index}.keypair.json"),
+            &node.vote_keypair,
+        )?;
+        save_key(
+            root,
+            &format!("stake-{index}.keypair.json"),
+            &node.stake_keypair,
+        )?;
+        create_new_ledger(
+            &root.join(format!("ledger-{index}")),
+            &genesis,
+            64 * 1024 * 1024,
+            LedgerColumnOptions::default(),
+        )?;
+        identities.push(node.node_keypair.pubkey().to_string());
+    }
+    fs::write(
+        root.join("network.json"),
+        serde_json::to_vec_pretty(&json!({
+            "network": network, "genesis_hash": genesis.hash().to_string(), "identities": identities,
+            "pool": pool_address().to_string(), "program": id().to_string(),
+            "fixture_keys_are_public": true
+        }))?,
+    )?;
+    println!(
+        "{}",
+        json!({"genesis_hash":genesis.hash().to_string(),"pool":pool_address().to_string()})
+    );
+    Ok(())
+}
+
+fn client(url: &str, config: &Value) -> Result<RpcClient> {
+    let parsed = url
+        .strip_prefix("http://127.0.0.1:")
+        .ok_or("RPC must use loopback HTTP")?;
+    parsed.parse::<u16>()?;
+    let rpc = RpcClient::new_with_timeout_and_commitment(
+        url.to_owned(),
+        Duration::from_secs(10),
+        CommitmentConfig::confirmed(),
+    );
+    if rpc.get_genesis_hash()?.to_string()
+        != config["genesis_hash"].as_str().ok_or("missing genesis")?
+    {
+        return Err("RPC genesis does not match this disposable network".into());
+    }
+    Ok(rpc)
+}
+
+fn send(rpc: &RpcClient, payer: &Keypair, ixs: &[Instruction], extra: &[&Keypair]) -> Result<()> {
+    let mut signers = vec![payer];
+    for key in extra {
+        if key.pubkey() != payer.pubkey() {
+            signers.push(key);
+        }
+    }
+    let tx = Transaction::new_signed_with_payer(
+        ixs,
+        Some(&payer.pubkey()),
+        &signers,
+        rpc.get_latest_blockhash()?,
+    );
+    // This fixture has fewer than 128 signatures, so the compact length uses one byte.
+    if 1 + tx.signatures.len() * 64 + tx.message_data().len() > 1232 {
+        return Err("signed transaction exceeds the network packet limit".into());
+    }
+    let signature = rpc.send_transaction_with_config(
+        &tx,
+        RpcSendTransactionConfig {
+            skip_preflight: true,
+            max_retries: Some(3),
+            ..RpcSendTransactionConfig::default()
+        },
+    )?;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(45) {
+        if let Some(status) =
+            rpc.get_signature_status_with_commitment(&signature, CommitmentConfig::confirmed())?
+        {
+            return status.map_err(|error| Box::new(error) as Box<dyn Error>);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    Err("transaction did not acquire a confirmed execution status".into())
+}
+
+fn stage(
+    rpc: &RpcClient,
+    payer: &Keypair,
+    sponsor: &Keypair,
+    bytes: &[u8],
+    expiry: u64,
+) -> Result<Pubkey> {
+    let buffer = Keypair::new();
+    send(
+        rpc,
+        payer,
+        &[
+            system::create_account(
+                &payer.pubkey(),
+                &buffer.pubkey(),
+                rpc.get_minimum_balance_for_rent_exemption(ACCOUNT_BYTES)?,
+                ACCOUNT_BYTES as u64,
+                &id(),
+            ),
+            instructions::initialize(
+                buffer.pubkey(),
+                sponsor.pubkey(),
+                bytes.len() as u32,
+                payload_digest(bytes),
+                expiry,
+            ),
+        ],
+        &[&buffer, sponsor],
+    )?;
+    for (index, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
+        send(
+            rpc,
+            payer,
+            &[instructions::write(
+                buffer.pubkey(),
+                sponsor.pubkey(),
+                (index * MAX_CHUNK_BYTES) as u32,
+                chunk,
+            )],
+            &[sponsor],
+        )?;
+    }
+    send(
+        rpc,
+        payer,
+        &[instructions::seal(buffer.pubkey(), sponsor.pubkey())],
+        &[sponsor],
+    )?;
+    Ok(buffer.pubkey())
+}
+
+fn finalize(
+    rpc: &RpcClient,
+    payer: &Keypair,
+    sponsor: &Keypair,
+    buffer: Pubkey,
+    fail_after: bool,
+) -> Result<()> {
+    let mut ixs = vec![
+        ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+        instructions::finalize(buffer, sponsor.pubkey()),
+    ];
+    if fail_after {
+        let mut fail = instructions::seal(buffer, sponsor.pubkey());
+        fail.data = vec![255];
+        ixs.push(fail);
+    }
+    send(rpc, payer, &ixs, &[sponsor])
+}
+
+fn rejected(result: Result<()>, label: &str, index: u8, expected: InstructionError) -> Result<()> {
+    match result {
+        Ok(()) => Err(format!("{label} was accepted").into()),
+        Err(error)
+            if error.downcast_ref::<TransactionError>()
+                == Some(&TransactionError::InstructionError(index, expected)) =>
+        {
+            Ok(())
+        }
+        Err(error) => {
+            Err(format!("{label} did not reach a conclusive instruction failure: {error}").into())
+        }
+    }
+}
+
+fn pool(rpc: &RpcClient) -> Result<(solana_account::Account, PoolState)> {
+    let account = rpc.get_account(&pool_address())?;
+    if account.owner != id() {
+        return Err("pool owner mismatch".into());
+    }
+    let state = PoolState::decode(&account.data)?;
+    if account.lamports != state.rent_floor + state.backing {
+        return Err("backing differs from actual native balance".into());
+    }
+    Ok((account, state))
+}
+
+fn equal_pool(rpc: &RpcClient, peer: &RpcClient) -> Result<()> {
+    let expected = pool(rpc)?.0;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(45) {
+        if pool(peer).is_ok_and(|(actual, _)| actual == expected) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+    Err("peer did not converge to the exact pool account".into())
+}
+
+fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> Result<()> {
+    let payer = read_keypair_file(root.join("sponsor.keypair.json"))?;
+    let poor = read_keypair_file(root.join("unfunded.keypair.json"))?;
+    let network: [u8; 32] = serde_json::from_value::<Vec<u8>>(config["network"].clone())?
+        .try_into()
+        .map_err(|_| "network length")?;
+    if pool(rpc)?.1.note_count() != 0 {
+        return Err("exercise requires a fresh disposable pool".into());
+    }
+    let slot = rpc.get_slot()?;
+    let expiry = slot + 1000;
+    let unpaid = build_fixture_for_network(poor.pubkey().to_bytes(), network, slot, expiry)?;
+    let bytes = wire::encode(network, &unpaid.funding_context, &unpaid.funding)?;
+    let buffer = stage(rpc, &payer, &poor, &bytes, expiry)?;
+    let before = pool(rpc)?.0;
+    rejected(
+        finalize(rpc, &payer, &poor, buffer, false),
+        "unfunded deposit",
+        1,
+        InstructionError::Custom(1),
+    )?;
+    if pool(rpc)?.0 != before {
+        return Err("unfunded deposit changed pool".into());
+    }
+    let slot = rpc.get_slot()?;
+    let fixture = build_fixture_for_network(payer.pubkey().to_bytes(), network, slot, slot + 1000)?;
+    let expiry = fixture.context.expires_at;
+    let funding = wire::encode(network, &fixture.funding_context, &fixture.funding)?;
+    let buffer = stage(rpc, &payer, &payer, &funding, expiry)?;
+    let before_deposit = pool(rpc)?.0;
+    let staged_before = rpc.get_account(&buffer)?;
+    rejected(
+        finalize(rpc, &payer, &payer, buffer, true),
+        "rolled-back funded deposit",
+        2,
+        InstructionError::InvalidInstructionData,
+    )?;
+    if pool(rpc)?.0 != before_deposit || rpc.get_account(&buffer)? != staged_before {
+        return Err("failed deposit did not roll back backing and staging".into());
+    }
+    finalize(rpc, &payer, &payer, buffer, false)?;
+    if pool(rpc)?.1.backing != 100 {
+        return Err("deposit not backed".into());
+    }
+    let payment = wire::encode(network, &fixture.context, &fixture.bundle)?;
+    fs::write(root.join("spent-payment.bin"), &payment)?;
+    fs::write(root.join("payment-expiry.json"), expiry.to_string())?;
+    let mut corrupt = payment.clone();
+    let index = corrupt.len() - 65;
+    corrupt[index] ^= 1;
+    let bad = stage(rpc, &payer, &payer, &corrupt, expiry)?;
+    let before = pool(rpc)?.0;
+    rejected(
+        finalize(rpc, &payer, &payer, bad, false),
+        "invalid proof",
+        1,
+        InstructionError::InvalidInstructionData,
+    )?;
+    if pool(rpc)?.0 != before {
+        return Err("invalid proof changed pool".into());
+    }
+    let buffer = stage(rpc, &payer, &payer, &payment, expiry)?;
+    let staged_before = rpc.get_account(&buffer)?;
+    rejected(
+        finalize(rpc, &payer, &payer, buffer, true),
+        "post-finalization failure",
+        2,
+        InstructionError::InvalidInstructionData,
+    )?;
+    if pool(rpc)?.0 != before || rpc.get_account(&buffer)? != staged_before {
+        return Err("failed transaction was not atomic".into());
+    }
+    finalize(rpc, &payer, &payer, buffer, false)?;
+    let (withdrawal, context) = withdrawal_fixture(&fixture)?;
+    let bytes = wire::encode(network, &context, &withdrawal)?;
+    let buffer = stage(rpc, &payer, &payer, &bytes, expiry)?;
+    finalize(rpc, &payer, &payer, buffer, false)?;
+    let (account, state) = pool(rpc)?;
+    if state.backing != 60 || state.note_count() != 6 {
+        return Err("incorrect final payment state".into());
+    }
+    equal_pool(rpc, peer)?;
+    fs::write(root.join("expected-pool.bin"), &account.data)?;
+    fs::write(
+        root.join("payment-result.json"),
+        serde_json::to_vec_pretty(&json!({
+            "slot":rpc.get_slot()?,"backing":state.backing,"note_count":state.note_count(),
+            "actual_pool_lamports":account.lamports,"expiry":expiry,
+            "checks":["funded_deposit","private_transfer","withdrawal","unfunded_rejected","invalid_proof_rejected","failed_transaction_atomic","peer_account_equal"]
+        }))?,
+    )?;
+    recovery_check(root, rpc, peer)?;
+    println!("RPC payment checks passed; backing=60, notes=6");
+    Ok(())
+}
+
+fn recovery_check(root: &Path, rpc: &RpcClient, peer: &RpcClient) -> Result<()> {
+    let expected = fs::read(root.join("expected-pool.bin"))?;
+    let readiness = Instant::now();
+    while pool(rpc)?.0.data != expected {
+        if readiness.elapsed() > Duration::from_secs(45) {
+            return Err("recovery did not converge to the persisted pool".into());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    while rpc.get_slot()?.saturating_add(12) < peer.get_slot()? {
+        if readiness.elapsed() > Duration::from_secs(45) {
+            return Err("recovered validator did not catch up to its peer".into());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    equal_pool(rpc, peer)?;
+    let bytes = fs::read(root.join("spent-payment.bin"))?;
+    let expiry: u64 = fs::read_to_string(root.join("payment-expiry.json"))?.parse()?;
+    let slot = rpc.get_slot()?;
+    if expiry <= slot || expiry - slot > 1024 {
+        return Err(
+            "spent-proof expiry prevents a meaningful replay check; run a fresh experiment".into(),
+        );
+    }
+    let payer = read_keypair_file(root.join("sponsor.keypair.json"))?;
+    let buffer = stage(rpc, &payer, &payer, &bytes, expiry)?;
+    let before = pool(rpc)?.0;
+    rejected(
+        finalize(rpc, &payer, &payer, buffer, false),
+        "spent payment after recovery",
+        1,
+        InstructionError::InvalidInstructionData,
+    )?;
+    if pool(rpc)?.0 != before {
+        return Err("replayed spend changed pool".into());
+    }
+    println!(
+        "Recovery check passed; exact pool bytes and spent-note rejection retained at slot {slot}"
+    );
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    let command = args
+        .next()
+        .ok_or("expected init, exercise or recovery-check")?;
+    let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if command == "init" {
+        return initialize(&root);
+    }
+    if command == "prepare-recovery" {
+        let name = args.next().unwrap_or_else(|| "ledger-recovered".to_owned());
+        if !name.starts_with("ledger-recovered")
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err("invalid recovery ledger name".into());
+        }
+        let destination = root.join(name);
+        if destination.exists() {
+            return Err("recovery ledger already exists".into());
+        }
+        let genesis = solana_genesis_config::GenesisConfig::load(&root.join("ledger-0"))?;
+        create_new_ledger(
+            &destination,
+            &genesis,
+            64 * 1024 * 1024,
+            LedgerColumnOptions::default(),
+        )?;
+        return Ok(());
+    }
+    let config: Value = serde_json::from_slice(&fs::read(root.join("network.json"))?)?;
+    let rpc = client(&args.next().ok_or("expected loopback RPC URL")?, &config)?;
+    let peer = client(
+        &args.next().ok_or("expected peer loopback RPC URL")?,
+        &config,
+    )?;
+    match command.as_str() {
+        "exercise" => exercise(&root, &rpc, &peer, &config),
+        "recovery-check" => recovery_check(&root, &rpc, &peer),
+        _ => Err("unknown localnet command".into()),
+    }
+}

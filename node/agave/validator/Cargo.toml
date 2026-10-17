@@ -10,6 +10,10 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:jemallocator"]
+
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
 
@@ -88,7 +92,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
-jemallocator = { workspace = true }
+jemallocator = { workspace = true, optional = true }
 
 [target."cfg(unix)".dependencies]
 libc = { workspace = true }

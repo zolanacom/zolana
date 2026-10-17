@@ -58,7 +58,7 @@ pub struct ImmutableDeserializedPacket {
 }
 
 impl ImmutableDeserializedPacket {
-    pub fn new(packet: PacketRef) -> Result<Self, DeserializedPacketError> {
+    pub fn new(packet: PacketRef<'_>) -> Result<Self, DeserializedPacketError> {
         let versioned_transaction: VersionedTransaction = packet.deserialize_slice(..)?;
         let sanitized_transaction = SanitizedVersionedTransaction::try_from(versioned_transaction)?;
         let message_bytes = packet_message(packet)?;
@@ -190,7 +190,7 @@ impl Ord for ImmutableDeserializedPacket {
 }
 
 /// Read the transaction message from packet data
-fn packet_message(packet: PacketRef) -> Result<&[u8], DeserializedPacketError> {
+fn packet_message(packet: PacketRef<'_>) -> Result<&[u8], DeserializedPacketError> {
     let (sig_len, sig_size) = packet
         .data(..)
         .and_then(|bytes| decode_shortu16_len(bytes).ok())

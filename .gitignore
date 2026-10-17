@@ -7,3 +7,6 @@
 *.key
 *.keypair.json
 node/agave/target/
+
+__pycache__/
+*.pyc

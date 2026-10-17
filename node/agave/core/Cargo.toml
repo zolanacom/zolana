@@ -177,7 +177,8 @@ tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 trees = { workspace = true }
 
-[target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
+# Only the scheduler benchmark selects jemalloc; validator binaries select their allocator.
+[target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dev-dependencies]
 jemallocator = { workspace = true }
 
 [target."cfg(unix)".dependencies]
