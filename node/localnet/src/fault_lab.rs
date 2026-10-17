@@ -9,7 +9,7 @@ use std::net::UdpSocket;
 
 pub(super) fn run(command: &str, root: &Path, args: &[String]) -> Result<()> {
     let config: Value = serde_json::from_slice(&fs::read(root.join("network.json"))?)?;
-    if config["fixture_keys_are_public"] != true || config["pool_format"] != "NPOOL002" {
+    if config["fixture_keys_are_public"] != true || config["pool_format"] != "NPOOL003" {
         return Err("fault lab requires a disposable native fixture".into());
     }
     let label = args.first().ok_or("expected candidate label")?;

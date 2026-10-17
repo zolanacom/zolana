@@ -91,7 +91,7 @@ def restart_state(root, index):
 
 def start(root, index, archive=False, coordinated=False, faults=False):
     config = load(root)
-    if config.get("pool_format") != "NPOOL002":
+    if config.get("pool_format") != "NPOOL003":
         raise RuntimeError("incompatible development pool format; preserve this network and initialize a fresh --root")
     with socket.socket() as probe:
         # Ignore completed TCP connections in TIME_WAIT, while rejecting a live listener.

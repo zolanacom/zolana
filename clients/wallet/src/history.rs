@@ -8,7 +8,8 @@ use native_payment_program::{
 use native_payments::{
     state::PoolState,
     verification::{
-        bundle_version, AuthorizationContext, PaymentVerifier, ValidationView, MAX_EXPIRY_WINDOW,
+        bundle_version, AuthorizationContext, PaymentVerifier, ValidationView, VerifiedPayment,
+        MAX_EXPIRY_WINDOW,
     },
     wire,
 };
@@ -20,7 +21,10 @@ use orchard::{
     Bundle, Note,
 };
 use solana_pubkey::Pubkey;
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 pub struct OwnedNote {
     pub note: Note,
@@ -38,16 +42,25 @@ pub struct WalletState {
 
 impl WalletState {
     pub fn new(wallet: &WalletKey, rent_floor: u64) -> Result<Self> {
+        Self::with_key(
+            wallet,
+            rent_floor,
+            Arc::new(VerifyingKey::build(bundle_version().circuit_version())),
+        )
+    }
+
+    pub(crate) fn with_key(
+        wallet: &WalletKey,
+        rent_floor: u64,
+        key: Arc<VerifyingKey>,
+    ) -> Result<Self> {
         Ok(Self {
             pool: PoolState::new(wallet.network.network, rent_floor)?,
             leaves: Vec::new(),
             notes: Vec::new(),
             spent: BTreeSet::new(),
             view: wallet.viewing_key(),
-            verifier: PaymentVerifier::new(
-                wallet.network.network,
-                VerifyingKey::build(bundle_version().circuit_version()),
-            )?,
+            verifier: PaymentVerifier::with_shared_key(wallet.network.network, key)?,
         })
     }
 
@@ -67,7 +80,18 @@ impl WalletState {
                 authorized_public_value_balance: authorization.public_value_balance,
             },
         )?;
-        let next = self.pool.with_payment(&effects)?;
+        self.apply_effects(bundle, &effects)
+    }
+
+    fn apply_effects(
+        &mut self,
+        bundle: &Bundle<Authorized, i64>,
+        effects: &VerifiedPayment,
+    ) -> Result<()> {
+        if effects.nullifiers.iter().any(|nf| self.spent.contains(nf)) {
+            return Err("verified history payment was already applied".into());
+        }
+        let next = self.pool.with_payment(effects)?;
         let position = self.pool.note_count();
         let keys = [
             self.view.to_ivk(Scope::External),
@@ -166,6 +190,22 @@ pub struct HistoryInstruction {
     pub data: Vec<u8>,
 }
 
+/// Constructed only after complete proof and history verification. Reusable only
+/// for other local views at the exact same authenticated pre-payment checkpoint.
+pub(crate) struct AcceptedHistoryPayment {
+    before: Vec<u8>,
+    payment: wire::DecodedPayment,
+    effects: VerifiedPayment,
+}
+impl AcceptedHistoryPayment {
+    pub(crate) fn apply(&self, state: &mut WalletState) -> Result<()> {
+        if state.pool.encode() != self.before {
+            return Err("shared history checkpoint mismatch".into());
+        }
+        state.apply_effects(&self.payment.bundle, &self.effects)
+    }
+}
+
 pub struct Replay {
     pub state: WalletState,
     buffers: HashMap<Pubkey, Buffer>,
@@ -180,6 +220,21 @@ impl Replay {
     }
 
     pub fn apply(&mut self, ix: &HistoryInstruction, slot: u64) -> Result<()> {
+        self.apply_verified(ix, slot).map(|_| ())
+    }
+
+    pub(crate) fn from_state(state: WalletState) -> Self {
+        Self {
+            state,
+            buffers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn apply_verified(
+        &mut self,
+        ix: &HistoryInstruction,
+        slot: u64,
+    ) -> Result<Option<AcceptedHistoryPayment>> {
         let (&opcode, rest) = ix
             .data
             .split_first()
@@ -210,9 +265,24 @@ impl Replay {
                     return Err("history nullifier address mismatch".into());
                 }
             }
-            self.state.accept(&payment.bundle, &payment.context, slot)?;
+            let before = self.state.pool.encode();
+            let effects = self.state.verifier.verify(
+                &payment.bundle,
+                &payment.context,
+                &ValidationView {
+                    current_slot: slot,
+                    accepted_anchors: &self.state.pool.roots(),
+                    spent_nullifiers: &self.state.spent,
+                    authorized_public_value_balance: payment.context.public_value_balance,
+                },
+            )?;
+            self.state.apply_effects(&payment.bundle, &effects)?;
             buffer.consume()?;
-            return Ok(());
+            return Ok(Some(AcceptedHistoryPayment {
+                before,
+                payment,
+                effects,
+            }));
         }
         if accounts.len() != 2
             || !accounts[1].1
@@ -238,7 +308,7 @@ impl Replay {
                 expiry,
             )?;
             self.buffers.insert(key, buffer);
-            return Ok(());
+            return Ok(None);
         }
         let buffer = self
             .buffers
@@ -257,6 +327,92 @@ impl Replay {
             }
             _ => return Err("unknown native instruction in history".into()),
         }
-        Ok(())
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod shared_scan_tests {
+    use super::*;
+    use crate::{
+        keys::Network,
+        payments::{self, Payment},
+    };
+    use native_payment_program::instructions;
+    use native_payments::staging::{payload_digest, MAX_CHUNK_BYTES};
+
+    #[test]
+    fn verified_history_fans_out_only_at_the_identical_checkpoint() {
+        let network = Network {
+            network: [9; 32],
+            genesis_hash: bs58::encode([8; 32]).into_string(),
+        };
+        let alice = WalletKey::generate(network.clone()).unwrap();
+        let bob = WalletKey::generate(network).unwrap();
+        let mut primary = Replay::new(&alice, 1000).unwrap();
+        let mut same_view = WalletState::new(&alice, 1000).unwrap();
+        let mut other_view = WalletState::new(&bob, 1000).unwrap();
+        let sponsor = Pubkey::new_unique();
+        let buffer = Pubkey::new_unique();
+        let bytes = payments::build(
+            &alice,
+            &primary.state,
+            sponsor.to_bytes(),
+            100,
+            Payment::Deposit {
+                amount: 100,
+                recipient: &alice.address_text(),
+            },
+        )
+        .unwrap();
+        let mut history = vec![instructions::initialize(
+            buffer,
+            sponsor,
+            bytes.len() as u32,
+            payload_digest(&bytes),
+            100,
+        )];
+        for (index, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
+            history.push(instructions::write(
+                buffer,
+                sponsor,
+                (index * MAX_CHUNK_BYTES) as u32,
+                chunk,
+            ));
+        }
+        history.push(instructions::seal(buffer, sponsor));
+        let payment = wire::decode(alice.network.network, &bytes).unwrap();
+        history.push(instructions::finalize(
+            buffer,
+            sponsor,
+            std::array::from_fn(|i| payment.bundle.actions()[i].nullifier().to_bytes()),
+        ));
+        let mut accepted = None;
+        for ix in history {
+            accepted = primary
+                .apply_verified(
+                    &HistoryInstruction {
+                        accounts: ix
+                            .accounts
+                            .iter()
+                            .map(|meta| (meta.pubkey, meta.is_signer))
+                            .collect(),
+                        data: ix.data,
+                    },
+                    1,
+                )
+                .unwrap()
+                .or(accepted);
+        }
+        let accepted = accepted.unwrap();
+        accepted.apply(&mut same_view).unwrap();
+        accepted.apply(&mut other_view).unwrap();
+        assert_eq!(same_view.balance().unwrap(), 100);
+        assert_eq!(other_view.balance().unwrap(), 0);
+        same_view.reconcile(&primary.state.pool).unwrap();
+        other_view.reconcile(&primary.state.pool).unwrap();
+        assert!(accepted.apply(&mut same_view).is_err());
+        other_view.pool.backing += 1;
+        assert!(accepted.apply(&mut other_view).is_err());
     }
 }

@@ -1,5 +1,5 @@
 use native_wallet::{
-    keys::{read_password, read_private, Network, WalletKey},
+    keys::{read_password, read_password_input, read_private, Network, WalletKey},
     operation::WalletOperation,
     payments::{self, Payment},
     rpc::Chain,
@@ -17,7 +17,7 @@ fn run() -> Result<()> {
         println!(
             "native-wallet init|restore|address|balance|deposit|send|withdraw|resolve|reclaim"
         );
-        println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file>");
+        println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
         println!("balance/deposit/send/withdraw/resolve/reclaim: --rpc http://127.0.0.1:<port>");
         println!("deposit/send/withdraw: --sponsor <private-keypair.json> --amount <native-units>");
@@ -65,7 +65,11 @@ fn run() -> Result<()> {
             .ok_or_else(|| format!("missing {name}").into())
     };
     let network = Network::load(Path::new(required("--network")?))?;
-    let password = read_password(Path::new(required("--password-file")?))?;
+    let password = if required("--password-file")? == "-" {
+        read_password_input(std::io::stdin().lock())?
+    } else {
+        read_password(Path::new(required("--password-file")?))?
+    };
     let path = Path::new(required("--wallet")?);
     if command == "init" {
         let backup = Path::new(required("--backup")?);

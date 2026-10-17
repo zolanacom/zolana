@@ -37,7 +37,7 @@ class ConsensusStorageTests(unittest.TestCase):
             (root / "ledger-0").mkdir()
             (root / "consensus-0").mkdir()
             (root / "consensus-0/tower-fixture.bin").touch()
-            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL002", "genesis_hash": "genesis"}))
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL003", "genesis_hash": "genesis"}))
             with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch, patch.dict("localnet.os.environ", {"NATIVE_LOCAL_SHRED_FAULT": "unexpected"}):
                 launch.return_value.pid = 123
                 start(root, 0)
@@ -53,7 +53,7 @@ class ConsensusStorageTests(unittest.TestCase):
             (root / "ledger-0").mkdir()
             (root / "consensus-0").mkdir()
             (root / "consensus-0/tower-fixture.bin").write_bytes(b"signed fixture")
-            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL002", "genesis_hash": "genesis"}))
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL003", "genesis_hash": "genesis"}))
             state = {"slot": 100, "bank_hash": "checkpoint", "shred_version": 123}
             with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch, patch("localnet.restart_state", return_value=state):
                 launch.return_value.pid = 123
@@ -73,7 +73,7 @@ class ConsensusStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "ledger-0").mkdir()
-            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL002"}))
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL003"}))
             (root / "validator-0.pid").write_text("123")
             with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch:
                 with self.assertRaisesRegex(RuntimeError, "no saved tower"):
@@ -114,7 +114,7 @@ class ConsensusStorageTests(unittest.TestCase):
     def test_replacing_snapshot_ledger_preserves_tower_and_requires_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "genesis_hash": "fixture", "pool_format": "NPOOL002"}))
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "genesis_hash": "fixture", "pool_format": "NPOOL003"}))
             (root / "ledger-1").mkdir()
             with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch, patch("localnet.subprocess.run"):
                 launch.return_value.pid = 1234

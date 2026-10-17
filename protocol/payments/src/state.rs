@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 
 /// Two-action payments must leave a representable 32-level frontier.
 pub const MAX_COMMITMENTS: u64 = (1u64 << 32) - 2;
-pub const MAX_ROOTS: usize = 16;
+/// A bounded burst allowance, not a guarantee that every live proof stays valid.
+/// Clients must still synchronize and avoid indefinite proof queues.
+pub const MAX_ROOTS: usize = 64;
 pub const STATE_BYTES: usize = 8 + 32 + 8 + 8 + 8 + 1 + 32 * 32 + MAX_ROOTS * 32;
 
 #[derive(Clone)]
@@ -102,7 +104,7 @@ impl PoolState {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(STATE_BYTES);
-        bytes.extend_from_slice(b"NPOOL002");
+        bytes.extend_from_slice(b"NPOOL003");
         bytes.extend_from_slice(&self.network);
         for number in [self.rent_floor, self.backing, self.count] {
             bytes.extend_from_slice(&number.to_le_bytes());
@@ -119,7 +121,7 @@ impl PoolState {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != STATE_BYTES || &bytes[..8] != b"NPOOL002" {
+        if bytes.len() != STATE_BYTES || &bytes[..8] != b"NPOOL003" {
             return Err(Error::InvalidEncoding);
         }
         let mut reader = Reader(&bytes[8..]);
@@ -188,6 +190,29 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_anchor_survives_63_updates_then_expires_at_the_exact_bound() {
+        let mut pool = PoolState::new([1; 32], 1000).unwrap();
+        let anchor = pool.root();
+        let effects = VerifiedPayment {
+            nullifiers: [[3; 32], [4; 32]],
+            commitments: [[1; 32], [2; 32]],
+            public_value_balance: -1,
+        };
+        for _ in 0..MAX_ROOTS - 1 {
+            pool = pool.with_payment(&effects).unwrap();
+            assert!(PoolState::decode(&pool.encode())
+                .unwrap()
+                .roots()
+                .contains(&anchor));
+        }
+        pool = pool.with_payment(&effects).unwrap();
+        assert!(!pool.roots().contains(&anchor));
+        let mut old = pool.encode();
+        old[..8].copy_from_slice(b"NPOOL002");
+        assert!(PoolState::decode(&old).is_err());
+    }
 
     #[test]
     fn compact_pool_exceeds_old_capacity_and_enforces_tree_limit() {

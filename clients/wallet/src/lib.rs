@@ -6,5 +6,6 @@ pub mod keys;
 pub mod operation;
 pub mod payments;
 pub mod rpc;
+mod upload;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

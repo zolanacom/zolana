@@ -36,7 +36,7 @@ fn validate(
         serde_json::from_slice(&fs::read(parent.join("network.json")).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     if network["fixture_keys_are_public"] != true
-        || network["pool_format"] != "NPOOL002"
+        || network["pool_format"] != "NPOOL003"
         || config.expected_genesis_hash.is_none()
         || config
             .expected_genesis_hash
@@ -103,7 +103,7 @@ mod tests {
         let hash = Hash::new_unique();
         fs::write(
             root.path().join("network.json"),
-            serde_json::json!({"fixture_keys_are_public":true,"pool_format":"NPOOL002","genesis_hash":hash.to_string()}).to_string(),
+            serde_json::json!({"fixture_keys_are_public":true,"pool_format":"NPOOL003","genesis_hash":hash.to_string()}).to_string(),
         ).unwrap();
         let mut config = ValidatorConfig {
             rpc_addrs: Some((

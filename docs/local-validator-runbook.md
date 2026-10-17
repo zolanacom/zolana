@@ -19,7 +19,7 @@ The build uses the fork's actual Agave validator source and the root lockfile, i
 
 The default RPC endpoints are `http://127.0.0.1:18899` and `http://127.0.0.1:19899`. Validator identities and genesis fingerprints are in `.data/v2/network.json`. No public entrypoints, faucet, production assets or hosted services are used. Validator gossip and RPC bind to loopback. The two processes have distinct keys and ledgers and genesis stake weights of 80% and 20%.
 
-The current pool format is `NPOOL002`; the original `.data/localnet` network uses `NPOOL001` and must remain preserved. Startup rejects that old format before launching the new binary. This development change requires a fresh genesis; it does not migrate existing notes. Initialization refuses an existing network directory. To repeat the complete fresh-pool experiment, stop the current network and choose a new directory using `--root .data/<new-directory>` on every command. No reset/delete command is provided.
+The current pool format is `NPOOL003`; the earlier fixtures use `NPOOL001` or `NPOOL002` and must remain preserved. Startup rejects that old format before launching the new binary. This development change requires a fresh genesis; it does not migrate existing notes. Initialization refuses an existing network directory. To repeat the complete fresh-pool experiment, stop the current network and choose a new directory using `--root .data/<new-directory>` on every command. No reset/delete command is provided.
 
 Restarting majority stake needs the explicit [coordinated restart procedure](coordinated-restart-runbook.md). Ordinary startup can expose RPC before ledger replay and quorum startup finish; use new finalized blocks as the liveness criterion.
 

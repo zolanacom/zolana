@@ -34,7 +34,7 @@ def durable(root, index, commitment="finalized"):
     result = {}
     for item in entries:
         data = base64.b64decode(item["account"]["data"][0])
-        if data[:8] in [b"NPOOL002", b"NSPENT01"]:
+        if data[:8] in [b"NPOOL003", b"NSPENT01"]:
             result[item["pubkey"]] = item["account"]
         elif data[:8] != b"NBUF0001":
             raise RuntimeError("unexpected native account format")

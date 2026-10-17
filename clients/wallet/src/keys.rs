@@ -28,7 +28,7 @@ pub struct Network {
 impl Network {
     pub fn load(path: &Path) -> Result<Self> {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-        if value["pool_format"] != "NPOOL002"
+        if value["pool_format"] != "NPOOL003"
             || value["program"] != native_payment_program::id().to_string()
             || value["pool"] != native_payment_program::pool_address().to_string()
         {
@@ -193,6 +193,14 @@ pub fn read_password(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 
+/// A bounded pipe avoids writing a web session password to a named disk file.
+pub fn read_password_input(input: impl Read) -> Result<Zeroizing<Vec<u8>>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    input.take(1025).read_to_end(&mut bytes)?;
+    validate_password(&bytes)?;
+    Ok(bytes)
+}
+
 pub fn read_private(path: &Path, maximum: usize) -> Result<Zeroizing<Vec<u8>>> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
@@ -279,6 +287,13 @@ fn network_tag(network: &Network) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piped_passwords_are_bounded_even_without_end_of_input() {
+        assert!(read_password_input(&b"too short"[..]).is_err());
+        assert_eq!(read_password_input(&[b'x'; 1024][..]).unwrap().len(), 1024);
+        assert!(read_password_input(std::io::repeat(b'x')).is_err());
+    }
 
     #[test]
     fn seed_only_recovery_rejects_wrong_password_network_and_tampering() {

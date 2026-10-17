@@ -1,5 +1,6 @@
 //! Disposable local-network tooling. Fixture spending keys are intentionally public.
 mod fault_lab;
+mod load_lab;
 // Exercise the exact validator fault guard in a first-party workspace target.
 #[cfg(test)]
 #[allow(dead_code)]
@@ -260,7 +261,7 @@ fn initialize(root: &Path) -> Result<()> {
         serde_json::to_vec_pretty(&json!({
             "network": network, "genesis_hash": genesis.hash().to_string(), "identities": identities,
             "pool": pool_address().to_string(), "program": id().to_string(),
-            "pool_format": "NPOOL002",
+            "pool_format": "NPOOL003",
             "fixture_keys_are_public": true
         }))?,
     )?;
@@ -717,6 +718,9 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if command == "load" {
+        return load_lab::run(&root, &args.collect::<Vec<_>>());
+    }
     if command.starts_with("fault-") {
         return fault_lab::run(&command, &root, &args.collect::<Vec<_>>());
     }

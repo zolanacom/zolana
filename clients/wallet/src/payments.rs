@@ -28,94 +28,119 @@ pub fn build(
     expires_at: u64,
     payment: Payment<'_>,
 ) -> Result<Vec<u8>> {
-    if state.pool.network != wallet.network.network {
-        return Err("wallet and payment state are on different networks".into());
+    PaymentProver::new().build(wallet, state, sponsor, expires_at, payment)
+}
+
+/// Reuse the expensive circuit key across independent payments in a wallet session.
+pub struct PaymentProver(ProvingKey);
+
+impl Default for PaymentProver {
+    fn default() -> Self {
+        Self::new()
     }
-    let (amount, public_balance, destination, spends) = match payment {
-        Payment::Deposit { amount, recipient } => (
-            amount,
-            -i64::try_from(amount)?,
-            Some(decode_address(&wallet.network, recipient)?),
-            false,
-        ),
-        Payment::Send { amount, recipient } => (
-            amount,
-            0,
-            Some(decode_address(&wallet.network, recipient)?),
-            true,
-        ),
-        Payment::Withdraw { amount } => (amount, i64::try_from(amount)?, None, true),
-    };
-    if amount == 0 {
-        return Err("payment amount must be positive".into());
+}
+
+impl PaymentProver {
+    pub fn new() -> Self {
+        Self(ProvingKey::build(bundle_version().circuit_version()))
     }
-    let version = bundle_version();
-    let anchor = Option::<Anchor>::from(Anchor::from_bytes(state.pool.root()))
-        .ok_or("invalid native root")?;
-    let mut builder = Builder::new(
-        BundleType::DEFAULT,
-        version,
-        version.default_flags(),
-        anchor,
-    )?;
-    if spends {
-        let mut notes = state.unspent();
-        notes.sort_by_key(|note| std::cmp::Reverse(note.note.value().inner()));
-        let mut total = 0u64;
-        for owned in notes.into_iter().take(2) {
-            builder.add_spend(
-                wallet.viewing_key(),
-                owned.note,
-                state.witness(owned.position)?,
-            )?;
-            total = total
-                .checked_add(owned.note.value().inner())
-                .ok_or("note value overflow")?;
-            if total >= amount {
-                break;
-            }
+
+    pub fn build(
+        &self,
+        wallet: &WalletKey,
+        state: &WalletState,
+        sponsor: [u8; 32],
+        expires_at: u64,
+        payment: Payment<'_>,
+    ) -> Result<Vec<u8>> {
+        if state.pool.network != wallet.network.network {
+            return Err("wallet and payment state are on different networks".into());
         }
-        if total < amount {
-            return Err(
+        let (amount, public_balance, destination, spends) = match payment {
+            Payment::Deposit { amount, recipient } => (
+                amount,
+                -i64::try_from(amount)?,
+                Some(decode_address(&wallet.network, recipient)?),
+                false,
+            ),
+            Payment::Send { amount, recipient } => (
+                amount,
+                0,
+                Some(decode_address(&wallet.network, recipient)?),
+                true,
+            ),
+            Payment::Withdraw { amount } => (amount, i64::try_from(amount)?, None, true),
+        };
+        if amount == 0 {
+            return Err("payment amount must be positive".into());
+        }
+        let version = bundle_version();
+        let anchor = Option::<Anchor>::from(Anchor::from_bytes(state.pool.root()))
+            .ok_or("invalid native root")?;
+        let mut builder = Builder::new(
+            BundleType::DEFAULT,
+            version,
+            version.default_flags(),
+            anchor,
+        )?;
+        if spends {
+            let mut notes = state.unspent();
+            notes.sort_by_key(|note| std::cmp::Reverse(note.note.value().inner()));
+            let mut total = 0u64;
+            for owned in notes.into_iter().take(2) {
+                builder.add_spend(
+                    wallet.viewing_key(),
+                    owned.note,
+                    state.witness(owned.position)?,
+                )?;
+                total = total
+                    .checked_add(owned.note.value().inner())
+                    .ok_or("note value overflow")?;
+                if total >= amount {
+                    break;
+                }
+            }
+            if total < amount {
+                return Err(
                 "insufficient value in two notes; consolidate smaller notes before this payment"
                     .into(),
             );
+            }
+            if total > amount {
+                builder.add_output(
+                    None,
+                    wallet.change_address(),
+                    NoteValue::from_raw(total - amount),
+                    [0; 512],
+                )?;
+            }
         }
-        if total > amount {
-            builder.add_output(
-                None,
-                wallet.change_address(),
-                NoteValue::from_raw(total - amount),
-                [0; 512],
-            )?;
+        if let Some(address) = destination {
+            builder.add_output(None, address, NoteValue::from_raw(amount), [0; 512])?;
         }
+        let mut rng = rand::rng();
+        let (bundle, _) = builder
+            .build::<i64>(&mut rng)?
+            .ok_or("missing payment bundle")?;
+        if *bundle.value_balance() != public_balance {
+            return Err("constructed public value does not match requested payment".into());
+        }
+        let context = AuthorizationContext {
+            expires_at,
+            public_value_balance: public_balance,
+            sponsor,
+        };
+        let digest = authorization_digest(wallet.network.network, &bundle, &context)?;
+        let signing = if spends {
+            vec![SpendAuthorizingKey::from(&wallet.spending_key())]
+        } else {
+            Vec::new()
+        };
+        let bundle = bundle
+            .create_proof(&self.0, &mut rng)?
+            .apply_signatures(&mut rng, digest, &signing)?;
+        Ok(wire::encode(wallet.network.network, &context, &bundle)?)
     }
-    if let Some(address) = destination {
-        builder.add_output(None, address, NoteValue::from_raw(amount), [0; 512])?;
-    }
-    let mut rng = rand::rng();
-    let (bundle, _) = builder
-        .build::<i64>(&mut rng)?
-        .ok_or("missing payment bundle")?;
-    if *bundle.value_balance() != public_balance {
-        return Err("constructed public value does not match requested payment".into());
-    }
-    let context = AuthorizationContext {
-        expires_at,
-        public_value_balance: public_balance,
-        sponsor,
-    };
-    let digest = authorization_digest(wallet.network.network, &bundle, &context)?;
-    let key = ProvingKey::build(version.circuit_version());
-    let signing = if spends {
-        vec![SpendAuthorizingKey::from(&wallet.spending_key())]
-    } else {
-        Vec::new()
-    };
-    let bundle = bundle
-        .create_proof(&key, &mut rng)?
-        .apply_signatures(&mut rng, digest, &signing)?;
-    Ok(wire::encode(wallet.network.network, &context, &bundle)?)
 }
 
 #[cfg(test)]

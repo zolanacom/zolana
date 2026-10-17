@@ -8,11 +8,7 @@ use native_payment_program::{
     id, instructions, pool_address,
     staging::{Buffer, ACCOUNT_BYTES},
 };
-use native_payments::{
-    staging::{payload_digest, MAX_CHUNK_BYTES},
-    state::PoolState,
-    wire,
-};
+use native_payments::{staging::payload_digest, state::PoolState, wire};
 use serde::{Deserialize, Serialize};
 use solana_account::Account;
 use solana_account_decoder_client_types::UiAccountEncoding;
@@ -82,6 +78,9 @@ pub struct Submitted {
     pub signature: String,
     pub staging_account: String,
     pub staging_rent_reclaimed: bool,
+    pub upload_transactions: usize,
+    pub upload_ms: u128,
+    pub finalization_ms: u128,
 }
 
 impl Chain {
@@ -109,8 +108,18 @@ impl Chain {
     }
 
     pub fn sync(&self, wallet: &WalletKey) -> Result<Synced> {
-        if wallet.network != self.network {
-            return Err("wallet network mismatch".into());
+        self.sync_many(&[wallet])?
+            .pop()
+            .ok_or_else(|| "missing synchronized wallet".into())
+    }
+
+    /// Scan the authenticated archive once for a bounded set of local wallets.
+    pub fn sync_many(&self, wallets: &[&WalletKey]) -> Result<Vec<Synced>> {
+        if wallets.is_empty()
+            || wallets.len() > 64
+            || wallets.iter().any(|wallet| wallet.network != self.network)
+        {
+            return Err("expected 1..64 wallets on this network".into());
         }
         let response = self
             .rpc
@@ -130,7 +139,14 @@ impl Chain {
             return Err("native pool network or backing mismatch".into());
         }
         let target = response.context.slot;
-        let mut replay = Replay::new(wallet, pool.rent_floor)?;
+        let key = std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
+            native_payments::verification::bundle_version().circuit_version(),
+        ));
+        let mut states = wallets
+            .iter()
+            .map(|wallet| WalletState::with_key(wallet, pool.rent_floor, key.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        let mut replay = Replay::from_state(states.remove(0));
         let mut previous_slot = 0;
         let mut previous_hash = None;
         let mut block_height = 0;
@@ -209,13 +225,15 @@ impl Chain {
                                 tx.message.is_signer(index),
                             ));
                         }
-                        replay.apply(
-                            &HistoryInstruction {
-                                accounts,
-                                data: ix.data.clone(),
-                            },
-                            slot,
-                        )?;
+                        let instruction = HistoryInstruction {
+                            accounts,
+                            data: ix.data.clone(),
+                        };
+                        if let Some(accepted) = replay.apply_verified(&instruction, slot)? {
+                            for state in &mut states {
+                                accepted.apply(state)?;
+                            }
+                        }
                         if ix.data.first() == Some(&3) {
                             accepted_finalizations.insert(tx.signatures[0].to_string());
                         }
@@ -233,13 +251,19 @@ impl Chain {
                     .into(),
             );
         }
-        replay.state.reconcile(&pool)?;
-        Ok(Synced {
-            state: replay.state,
-            slot: target,
-            block_height,
-            accepted_finalizations,
-        })
+        states.insert(0, replay.state);
+        states
+            .into_iter()
+            .map(|state| {
+                state.reconcile(&pool)?;
+                Ok(Synced {
+                    state,
+                    slot: target,
+                    block_height,
+                    accepted_finalizations: accepted_finalizations.clone(),
+                })
+            })
+            .collect()
     }
 
     pub fn expiry(&self) -> Result<u64> {
@@ -364,9 +388,29 @@ impl Chain {
         operation: &WalletOperation,
     ) -> Result<Submitted> {
         let pending_path = &operation.pending;
+        let upload_started = Instant::now();
         let payment = wire::decode(self.network.network, bytes)?;
         if payment.context.sponsor != sponsor.pubkey().to_bytes() {
             return Err("payment sponsor does not match the local signer".into());
+        }
+        let checkpoint = self
+            .rpc
+            .get_account_with_commitment(&pool_address(), CommitmentConfig::confirmed())?;
+        let current = checkpoint.value.ok_or("native pool is missing")?;
+        if current.owner != id()
+            || !PoolState::decode(&current.data)?
+                .roots()
+                .contains(&payment.bundle.anchor().to_bytes())
+        {
+            return Err(
+                "payment anchor is no longer available; sync and prepare a new payment".into(),
+            );
+        }
+        if payment.context.expires_at < checkpoint.context.slot {
+            return Err(
+                "payment authorization expired before upload; sync and prepare a new payment"
+                    .into(),
+            );
         }
         let expiry = payment.context.expires_at;
         let buffer = Keypair::new();
@@ -390,6 +434,7 @@ impl Chain {
                     payload_digest(bytes),
                     expiry,
                 ),
+                crate::upload::first_write(buffer.pubkey(), sponsor.pubkey(), bytes),
             ],
             Some(&sponsor.pubkey()),
             &[sponsor, &buffer],
@@ -411,23 +456,13 @@ impl Chain {
             })?,
         )?;
         self.send_signed(&initialization)?;
-        for (index, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
-            self.send(
-                sponsor,
-                &[instructions::write(
-                    buffer.pubkey(),
-                    sponsor.pubkey(),
-                    (index * MAX_CHUNK_BYTES) as u32,
-                    chunk,
-                )],
-                &[],
-            )?;
+        let batches = crate::upload::remaining(buffer.pubkey(), sponsor.pubkey(), bytes);
+        let upload_transactions = 1 + batches.len();
+        for batch in batches {
+            self.send(sponsor, &batch, &[])?;
         }
-        self.send(
-            sponsor,
-            &[instructions::seal(buffer.pubkey(), sponsor.pubkey())],
-            &[],
-        )?;
+        let upload_ms = upload_started.elapsed().as_millis();
+        let finalization_started = Instant::now();
         let nullifiers = std::array::from_fn(|index| {
             payment
                 .bundle
@@ -475,6 +510,7 @@ impl Chain {
                 )
             })?;
         fs::remove_file(pending_path)?;
+        let finalization_ms = finalization_started.elapsed().as_millis();
         // Finalization is already durable. Failure to reclaim staging rent must
         // not report a failed payment or encourage an unsafe fresh deposit retry.
         let reclaimed = self
@@ -493,6 +529,9 @@ impl Chain {
             signature: signature.to_string(),
             staging_account: buffer.pubkey().to_string(),
             staging_rent_reclaimed: reclaimed,
+            upload_transactions,
+            upload_ms,
+            finalization_ms,
         })
     }
 

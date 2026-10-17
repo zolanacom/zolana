@@ -8,11 +8,16 @@ This repository starts from upstream Agave source and a new development history.
 
 See development status for the current prototype stage, completed components and production gaps.
 
+The product is an independent privacy blockchain with its own validators and fee/staking coin. Its first user interface is a payments wallet; building that interface does not turn the chain into a Solana application. A DEX, private swaps and an Axiom-style terminal are not implemented. The Solana bridge remains later work.
+
+The [local wallet preview](docs/local-wallet-ui-runbook.md) now creates encrypted wallets, guides recovery-file backup, sponsors test funding and submits real private payments. Concurrent acceptance finalized 24 deposits and 24 private sends and preserved pool/nullifier state through a coordinated restart; see LOCAL-008 validation. This uses fresh-genesis NPOOL003; preserve older fixtures and use their corresponding historical builds.
+
 ## Layout
 
 - `protocol/payments/`: bounded payment validation and submission primitives.
 - `clients/cli/`: local proof and payment development commands.
 - `clients/wallet/`: encrypted seed wallet, verified history scanning, witnesses and signed RPC payments.
+- `clients/wallet-ui/` and `tools/wallet_ui.py`: device-local onboarding and payments interface over the real wallet CLI.
 - `node/agave/`: upstream validator source with gated native-payment registration.
 - `node/adapter/`: metered native execution, staging and real coin accounting.
 - `node/validator-check/`: signed-transaction integration tests using Agave Bank.
