@@ -50,9 +50,33 @@ function welcome() {
   });
 }
 function restore() {
-  setScreen(`<h2>Restore your wallet</h2><p class="caption">Use your encrypted recovery file and its password.</p><form id="restore-form"><label for="recovery-file">Recovery file</label><input id="recovery-file" type="file" accept=".json,application/json" required><label for="password">Wallet password</label><input id="password" type="password" autocomplete="current-password" minlength="12" required><button class="primary">Restore wallet</button></form><button class="text-button back" id="back">Back</button>`);
+  let paste = false;
+  setScreen(`<h2>Restore your wallet</h2><p class="caption">Use your encrypted recovery file and its password.</p><form id="restore-form"><div id="file-input"><label for="recovery-file">Recovery file</label><input id="recovery-file" type="file" accept=".json,application/json" required></div><div id="paste-input" hidden><label for="recovery-text">Encrypted recovery text</label><textarea id="recovery-text" rows="5" maxlength="4096" spellcheck="false" autocomplete="off" placeholder="Paste the complete contents of your recovery file"></textarea></div><button type="button" class="text-button back" id="restore-mode">Paste recovery text instead</button><label for="password">Wallet password</label><input id="password" type="password" autocomplete="current-password" minlength="12" required><button class="primary">Restore wallet</button></form><button class="text-button back" id="back">Back</button>`);
   on('back', 'click', welcome);
-  on('restore-form', 'submit', event => { event.preventDefault(); const file = document.querySelector('#recovery-file').files[0]; if (!file || file.size > 4096) return message('Choose an encrypted wallet recovery file smaller than 4 KiB.', 'error'); password = document.querySelector('#password').value; work('Restoring and verifying your wallet…', async () => { address = (await api('restore', { backup: JSON.parse(await file.text()) })).address; await dashboard(); }); });
+  on('restore-mode', 'click', () => {
+    paste = !paste;
+    document.querySelector('#file-input').hidden = paste;
+    document.querySelector('#paste-input').hidden = !paste;
+    document.querySelector('#recovery-file').required = !paste;
+    document.querySelector('#recovery-text').required = paste;
+    document.querySelector('#restore-mode').textContent = paste ? 'Choose a recovery file instead' : 'Paste recovery text instead';
+  });
+  on('restore-form', 'submit', event => {
+    event.preventDefault();
+    const file = document.querySelector('#recovery-file').files[0];
+    const text = document.querySelector('#recovery-text').value.trim();
+    if (paste ? !text || new TextEncoder().encode(text).length > 4096 : !file || file.size > 4096) return message('Use a complete encrypted recovery file smaller than 4 KiB.', 'error');
+    password = document.querySelector('#password').value;
+    work('Restoring and verifying your wallet…', async () => {
+      let backup;
+      try { backup = JSON.parse(paste ? text : await file.text()); }
+      catch { throw new Error('The recovery text is not valid JSON. Copy the complete encrypted recovery file and try again.'); }
+      address = (await api('restore', { backup })).address;
+      balance = null; renderDashboard();
+      try { await dashboard(); message('Wallet restored. Your balance is verified.', 'success'); }
+      catch { message('Wallet restored. Balance verification is unavailable; refresh when the local network is ready.', 'error'); }
+    });
+  });
 }
 async function downloadBackup() {
   const data = await api('backup');
@@ -62,15 +86,26 @@ async function downloadBackup() {
 }
 function recovery() {
   let downloaded = false;
-  setScreen(`<h2>Make it yours to keep.</h2><p class="caption">Save your encrypted recovery file before adding funds.</p><button class="primary" id="download">Download recovery file</button><label class="check"><input id="saved" type="checkbox">I saved my recovery file somewhere safe, separately from my password.</label><button class="secondary" id="continue">Continue to wallet</button><p class="hint">You need both the file and your password to restore your funds. We cannot reset your password.</p>`);
+  const required = session.needs_backup;
+  setScreen(`<h2>Make it yours to keep.</h2><p class="caption">${required ? 'Save your encrypted recovery file before adding funds.' : 'Keep an encrypted copy somewhere safe, separately from your password.'}</p><button class="primary" id="download">Download recovery file</button><button class="text-button back" id="show-backup">Save encrypted text instead</button><div id="backup-text-panel" hidden><label for="backup-text">Encrypted recovery text</label><textarea id="backup-text" rows="5" readonly spellcheck="false" autocomplete="off"></textarea><button class="secondary" id="copy-backup">Copy encrypted recovery</button><p class="hint">Save the complete text in a .json file. Restore with that file or paste its contents.</p></div>${required ? '<label class="check"><input id="saved" type="checkbox">I saved my recovery file somewhere safe, separately from my password.</label>' : ''}<button class="secondary" id="continue">${required ? 'Continue to wallet' : 'Back to wallet'}</button><p class="hint">You need both the file and your password to restore your funds. We cannot reset your password.</p>`);
   on('download', 'click', () => work('Preparing your encrypted recovery file…', async () => { await downloadBackup(); downloaded = true; message('Recovery download started. Confirm once you have saved it.'); }));
-  on('continue', 'click', () => { if (!downloaded || !document.querySelector('#saved').checked) return message('Download your recovery file and confirm that you have saved it.', 'error'); work('Opening your wallet…', async () => { await api('ack-backup'); await dashboard(); }); });
+  on('show-backup', 'click', () => work('Preparing your encrypted recovery text…', async () => {
+    document.querySelector('#backup-text').value = JSON.stringify((await api('backup')).backup, null, 2);
+    document.querySelector('#backup-text-panel').hidden = false; downloaded = true;
+    message('Save the complete encrypted text, then confirm below.');
+  }));
+  on('copy-backup', 'click', async () => {
+    const field = document.querySelector('#backup-text');
+    try { await navigator.clipboard.writeText(field.value); message('Encrypted recovery copied. Save it separately from your password.', 'success'); }
+    catch { field.focus(); field.select(); message('Copy the selected encrypted text and save it separately from your password.'); }
+  });
+  on('continue', 'click', () => { if (required && (!downloaded || !document.querySelector('#saved').checked)) return message('Save your recovery file or encrypted text and confirm that you have saved it.', 'error'); work('Opening your wallet…', async () => { if (required) await api('ack-backup'); await dashboard(); }); });
 }
 function renderDashboard() {
   setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">Add 100 test units</button><p class="hint small">Fees are paid by the local test sponsor. Solana funding is coming later.</p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
   on('lock', 'click', lock); on('receive', 'click', receive); on('send', 'click', send);
   on('refresh', 'click', () => work('Verifying finalized payment history…', dashboard));
-  on('backup', 'click', () => work('Preparing your encrypted recovery file…', async () => { await downloadBackup(); message('Recovery download started.'); }));
+  on('backup', 'click', recovery);
   on('fund', 'click', () => payment('fund'));
   if (receipt) {
     const element = document.querySelector('#receipt'); element.className = 'receipt';

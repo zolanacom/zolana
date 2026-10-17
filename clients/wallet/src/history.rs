@@ -1,4 +1,5 @@
 //! Reconstruct from successful finalized instructions; never accept an RPC balance assertion.
+mod snapshot;
 use crate::{keys::WalletKey, Result};
 use incrementalmerkletree::{Hashable, Level};
 use native_payment_program::{
@@ -20,6 +21,7 @@ use orchard::{
     tree::{MerkleHashOrchard, MerklePath},
     Bundle, Note,
 };
+pub(crate) use snapshot::ReplaySnapshot;
 use solana_pubkey::Pubkey;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -388,7 +390,7 @@ mod shared_scan_tests {
             std::array::from_fn(|i| payment.bundle.actions()[i].nullifier().to_bytes()),
         ));
         let mut accepted = None;
-        for ix in history {
+        for (index, ix) in history.into_iter().enumerate() {
             accepted = primary
                 .apply_verified(
                     &HistoryInstruction {
@@ -403,12 +405,28 @@ mod shared_scan_tests {
                 )
                 .unwrap()
                 .or(accepted);
+            if index == 2 {
+                // A checkpoint may land in the middle of an upload. Resume its
+                // bytes and authorization, rather than losing open buffers.
+                primary = Replay::restore(&alice, primary.snapshot()).unwrap();
+            }
         }
         let accepted = accepted.unwrap();
         accepted.apply(&mut same_view).unwrap();
         accepted.apply(&mut other_view).unwrap();
         assert_eq!(same_view.balance().unwrap(), 100);
         assert_eq!(other_view.balance().unwrap(), 0);
+        let restored = Replay::restore(&alice, primary.snapshot()).unwrap();
+        assert_eq!(restored.state.balance().unwrap(), 100);
+        assert_eq!(restored.state.spent, primary.state.spent);
+        assert_eq!(
+            restored.state.witness(0).unwrap().auth_path(),
+            primary.state.witness(0).unwrap().auth_path()
+        );
+        assert!(Replay::restore(&bob, primary.snapshot()).is_err());
+        let mut corrupted = serde_json::to_value(primary.snapshot()).unwrap();
+        corrupted["notes"][0]["value"] = serde_json::json!(101);
+        assert!(Replay::restore(&alice, serde_json::from_value(corrupted).unwrap()).is_err());
         same_view.reconcile(&primary.state.pool).unwrap();
         other_view.reconcile(&primary.state.pool).unwrap();
         assert!(accepted.apply(&mut same_view).is_err());

@@ -1,4 +1,5 @@
 use crate::{
+    cache::{self, Checkpoint},
     history::{HistoryInstruction, Replay, WalletState},
     keys::{read_private, write_private_new, Network, WalletKey},
     operation::WalletOperation,
@@ -49,6 +50,44 @@ pub struct Synced {
     pub slot: u64,
     pub block_height: u64,
     accepted_finalizations: BTreeSet<String>,
+    pub scan: ScanStats,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub struct ScanStats {
+    pub cache_used: bool,
+    pub cache_saved: bool,
+    pub blocks_fetched: usize,
+    pub payments_verified: usize,
+    pub from_slot: u64,
+    pub cache_reset: Option<String>,
+}
+
+struct ScanResult {
+    replay: Replay,
+    secondary: Vec<WalletState>,
+    slot: u64,
+    block_hash: Option<String>,
+    block_height: u64,
+    accepted: BTreeSet<String>,
+    scan: ScanStats,
+}
+
+impl ScanResult {
+    fn finish(self) -> Vec<Synced> {
+        let mut states = self.secondary;
+        states.insert(0, self.replay.state);
+        states
+            .into_iter()
+            .map(|state| Synced {
+                state,
+                slot: self.slot,
+                block_height: self.block_height,
+                accepted_finalizations: self.accepted.clone(),
+                scan: self.scan.clone(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -115,6 +154,42 @@ impl Chain {
 
     /// Scan the authenticated archive once for a bounded set of local wallets.
     pub fn sync_many(&self, wallets: &[&WalletKey]) -> Result<Vec<Synced>> {
+        Ok(self.scan(wallets, None)?.finish())
+    }
+
+    /// The operation guard serializes cache replacement with wallet submissions.
+    pub fn sync_cached(&self, wallet: &WalletKey, operation: &WalletOperation) -> Result<Synced> {
+        let (candidate, discarded) = if operation.scan_cache.exists() {
+            match cache::read(&operation.scan_cache, wallet) {
+                Ok(checkpoint) => (Some(checkpoint), false),
+                Err(_) => (None, true),
+            }
+        } else {
+            (None, false)
+        };
+        let mut result = self.scan(&[wallet], candidate)?;
+        if discarded {
+            result.scan.cache_reset = Some("invalid_cache".into());
+        }
+        let checkpoint = Checkpoint {
+            network: wallet.network.clone(),
+            address: wallet.address_text(),
+            slot: result.slot,
+            block_hash: result.block_hash.clone(),
+            block_height: result.block_height,
+            accepted: result.accepted.clone(),
+            replay: result.replay.snapshot(),
+        };
+        // A cache is optional. Its write failure must not invalidate verified
+        // state or encourage retrying a value-changing operation.
+        result.scan.cache_saved = cache::write(&operation.scan_cache, wallet, &checkpoint).is_ok();
+        result
+            .finish()
+            .pop()
+            .ok_or_else(|| "missing synchronized wallet".into())
+    }
+
+    fn scan(&self, wallets: &[&WalletKey], candidate: Option<Checkpoint>) -> Result<ScanResult> {
         if wallets.is_empty()
             || wallets.len() > 64
             || wallets.iter().any(|wallet| wallet.network != self.network)
@@ -139,23 +214,96 @@ impl Chain {
             return Err("native pool network or backing mismatch".into());
         }
         let target = response.context.slot;
-        let key = std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
-            native_payments::verification::bundle_version().circuit_version(),
-        ));
-        let mut states = wallets
-            .iter()
-            .map(|wallet| WalletState::with_key(wallet, pool.rent_floor, key.clone()))
-            .collect::<Result<Vec<_>>>()?;
-        let mut replay = Replay::from_state(states.remove(0));
-        let mut previous_slot = 0;
-        let mut previous_hash = None;
-        let mut block_height = 0;
-        let mut accepted_finalizations = BTreeSet::new();
-        let mut start = 0;
+        // Batched full scans share one verifier key with the primary replay.
+        let shared_key = (wallets.len() > 1).then(|| {
+            std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
+                native_payments::verification::bundle_version().circuit_version(),
+            ))
+        });
+        let mut stats = ScanStats::default();
+        let mut cached = None;
+        if let Some(checkpoint) = candidate {
+            if checkpoint.slot > target {
+                return Err("RPC finalized state is behind the verified wallet checkpoint; wait or use an up-to-date RPC".into());
+            }
+            let canonical = if checkpoint.slot == 0 {
+                true
+            } else {
+                self.rpc
+                    .get_block_with_config(
+                        checkpoint.slot,
+                        RpcBlockConfig {
+                            transaction_details: Some(TransactionDetails::None),
+                            rewards: Some(false),
+                            commitment: Some(CommitmentConfig::finalized()),
+                            ..Default::default()
+                        },
+                    )
+                    .is_ok_and(|block| Some(block.blockhash) == checkpoint.block_hash)
+            };
+            if canonical {
+                match Replay::restore(wallets[0], checkpoint.replay) {
+                    Ok(replay) => {
+                        cached = Some((
+                            replay,
+                            checkpoint.slot,
+                            checkpoint.block_hash,
+                            checkpoint.block_height,
+                            checkpoint.accepted,
+                        ));
+                        stats.cache_used = true;
+                    }
+                    Err(_) => stats.cache_reset = Some("invalid_cached_state".into()),
+                }
+            } else {
+                stats.cache_reset = Some("checkpoint_unavailable_or_changed".into());
+            }
+        }
+        let (
+            mut replay,
+            mut previous_slot,
+            mut previous_hash,
+            mut block_height,
+            mut accepted_finalizations,
+        ) = if let Some(cached) = cached {
+            cached
+        } else {
+            (
+                if let Some(key) = &shared_key {
+                    Replay::from_state(WalletState::with_key(
+                        wallets[0],
+                        pool.rent_floor,
+                        key.clone(),
+                    )?)
+                } else {
+                    Replay::new(wallets[0], pool.rent_floor)?
+                },
+                0,
+                None,
+                0,
+                BTreeSet::new(),
+            )
+        };
+        let mut states = if let Some(key) = shared_key {
+            wallets
+                .iter()
+                .skip(1)
+                .map(|wallet| WalletState::with_key(wallet, pool.rent_floor, key.clone()))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        let mut start = if stats.cache_used {
+            previous_slot.checked_add(1).ok_or("cached slot overflow")?
+        } else {
+            0
+        };
+        stats.from_slot = start;
         while start <= target {
             let end = start.saturating_add(9999).min(target);
             let blocks = self.rpc.get_blocks(start, Some(end))?;
             for slot in blocks.into_iter().filter(|slot| *slot != 0) {
+                stats.blocks_fetched += 1;
                 let block = self.rpc.get_block_with_config(slot, RpcBlockConfig {
                     encoding: Some(UiTransactionEncoding::Base64), transaction_details: Some(TransactionDetails::Full),
                     rewards: Some(false), commitment: Some(CommitmentConfig::finalized()), max_supported_transaction_version: Some(0),
@@ -230,6 +378,7 @@ impl Chain {
                             data: ix.data.clone(),
                         };
                         if let Some(accepted) = replay.apply_verified(&instruction, slot)? {
+                            stats.payments_verified += 1;
                             for state in &mut states {
                                 accepted.apply(state)?;
                             }
@@ -251,19 +400,19 @@ impl Chain {
                     .into(),
             );
         }
-        states.insert(0, replay.state);
-        states
-            .into_iter()
-            .map(|state| {
-                state.reconcile(&pool)?;
-                Ok(Synced {
-                    state,
-                    slot: target,
-                    block_height,
-                    accepted_finalizations: accepted_finalizations.clone(),
-                })
-            })
-            .collect()
+        replay.state.reconcile(&pool)?;
+        for state in &states {
+            state.reconcile(&pool)?;
+        }
+        Ok(ScanResult {
+            replay,
+            secondary: states,
+            slot: target,
+            block_hash: previous_hash,
+            block_height,
+            accepted: accepted_finalizations,
+            scan: stats,
+        })
     }
 
     pub fn expiry(&self) -> Result<u64> {
@@ -666,6 +815,126 @@ mod recovery_tests {
     use serde_json::json;
     use solana_rpc_client::mock_sender::MocksMap;
     use solana_rpc_client_api::request::RpcRequest;
+
+    fn cached_fixture(
+        target: u64,
+        blocks: Vec<serde_json::Value>,
+        slots: Vec<u64>,
+    ) -> (WalletKey, Checkpoint, Chain) {
+        let network = Network {
+            network: [9; 32],
+            genesis_hash: bs58::encode([8; 32]).into_string(),
+        };
+        let wallet = WalletKey::generate(network.clone()).unwrap();
+        let replay = Replay::new(&wallet, 1000).unwrap();
+        let pool = replay.state.pool.encode();
+        let checkpoint = Checkpoint {
+            network: network.clone(),
+            address: wallet.address_text(),
+            slot: 4,
+            block_hash: Some(bs58::encode([4; 32]).into_string()),
+            block_height: 4,
+            accepted: BTreeSet::new(),
+            replay: replay.snapshot(),
+        };
+        let mut mocks = MocksMap::from_iter([
+            (
+                RpcRequest::GetAccountInfo,
+                json!({"context":{"slot":target},"value":{
+                "lamports":1000,"owner":id().to_string(),"executable":false,"rentEpoch":0,
+                "data":[bs58::encode(pool).into_string(),"base58"]}}),
+            ),
+            (RpcRequest::GetBlocks, json!(slots)),
+        ]);
+        for block in blocks {
+            mocks.insert(RpcRequest::GetBlock, block);
+        }
+        let chain = Chain {
+            rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
+            network,
+        };
+        (wallet, checkpoint, chain)
+    }
+
+    fn block(slot: u64, parent: u64) -> serde_json::Value {
+        json!({"blockhash":bs58::encode([slot as u8;32]).into_string(),
+            "previousBlockhash":bs58::encode([parent as u8;32]).into_string(),
+            "parentSlot":parent,"blockHeight":slot,"blockTime":null,"transactions":[],"rewards":[]})
+    }
+
+    #[test]
+    fn incremental_scan_checks_canonical_checkpoint_and_extension_continuity() {
+        let (wallet, checkpoint, chain) =
+            cached_fixture(6, vec![block(4, 3), block(6, 4)], vec![6]);
+        let result = chain.scan(&[&wallet], Some(checkpoint)).unwrap();
+        assert!(result.scan.cache_used);
+        assert_eq!(result.scan.from_slot, 5);
+        assert_eq!(result.scan.blocks_fetched, 1);
+        assert_eq!(result.scan.payments_verified, 0);
+        for parent in [0, 5] {
+            let (wallet, checkpoint, chain) =
+                cached_fixture(6, vec![block(4, 3), block(6, parent)], vec![6]);
+            assert!(chain
+                .scan(&[&wallet], Some(checkpoint))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("discontinuous"));
+        }
+    }
+
+    #[test]
+    fn lagging_rpc_and_missing_archive_cannot_authorize_cached_balance() {
+        let (wallet, checkpoint, chain) = cached_fixture(3, vec![], vec![]);
+        assert!(chain
+            .scan(&[&wallet], Some(checkpoint))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("behind the verified"));
+        let (wallet, checkpoint, chain) =
+            cached_fixture(6, vec![serde_json::Value::Null, block(6, 4)], vec![6]);
+        assert!(chain
+            .scan(&[&wallet], Some(checkpoint))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("discontinuous"));
+        let (wallet, checkpoint, chain) = cached_fixture(6, vec![block(4, 3)], vec![]);
+        assert!(chain
+            .scan(&[&wallet], Some(checkpoint))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("does not reach"));
+    }
+
+    #[test]
+    fn changed_checkpoint_requires_complete_rescan_before_cache_replacement() {
+        let (wallet, checkpoint, chain) =
+            cached_fixture(6, vec![block(5, 3), block(2, 0), block(6, 2)], vec![2, 6]);
+        let result = chain.scan(&[&wallet], Some(checkpoint)).unwrap();
+        assert!(!result.scan.cache_used);
+        assert_eq!(
+            result.scan.cache_reset.as_deref(),
+            Some("checkpoint_unavailable_or_changed")
+        );
+        assert_eq!(result.scan.from_slot, 0);
+        assert_eq!(result.scan.blocks_fetched, 2);
+    }
+
+    #[test]
+    fn cache_storage_failure_does_not_discard_verified_state() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        fs::create_dir(&operation.scan_cache).unwrap();
+        let (wallet, _, chain) = cached_fixture(0, vec![], vec![]);
+        let synced = chain.sync_cached(&wallet, &operation).unwrap();
+        assert_eq!(synced.state.balance().unwrap(), 0);
+        assert!(!synced.scan.cache_saved);
+        assert_eq!(synced.scan.cache_reset.as_deref(), Some("invalid_cache"));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
 
     fn fixture(operation: &WalletOperation, sponsor: &Keypair, height: u64) -> Network {
         let network = Network {

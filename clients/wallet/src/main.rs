@@ -103,29 +103,25 @@ fn run() -> Result<()> {
         return Ok(());
     }
     // Hold the OS lock from before sync/proving until all submission/recovery work ends.
-    let operation = if command == "balance" {
-        None
-    } else {
-        Some(WalletOperation::acquire(path)?)
-    };
+    let operation = WalletOperation::acquire(path)?;
     let chain = Chain::connect(required("--rpc")?, network)?;
     if command == "resolve" {
-        println!("{}", chain.resolve(&wallet, operation.as_ref().unwrap())?);
+        println!("{}", chain.resolve(&wallet, &operation)?);
         return Ok(());
     }
     if command == "reclaim" {
         let sponsor = load_sponsor(Path::new(required("--sponsor")?))?;
-        println!("{}", chain.reclaim(&sponsor, operation.as_ref().unwrap())?);
+        println!("{}", chain.reclaim(&sponsor, &operation)?);
         return Ok(());
     }
-    if let Some(operation) = &operation {
+    if command != "balance" {
         operation.ensure_resolved()?;
     }
-    let synced = chain.sync(&wallet)?;
+    let synced = chain.sync_cached(&wallet, &operation)?;
     if command == "balance" {
         println!(
             "{}",
-            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count()})
+            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan})
         );
         return Ok(());
     }
@@ -151,7 +147,7 @@ fn run() -> Result<()> {
         chain.expiry()?,
         payment,
     )?;
-    let submitted = chain.submit(&sponsor, &bytes, operation.as_ref().unwrap())?;
+    let submitted = chain.submit(&sponsor, &bytes, &operation)?;
     println!("{}", serde_json::to_string(&submitted)?);
     Ok(())
 }

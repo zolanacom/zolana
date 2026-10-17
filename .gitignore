@@ -9,6 +9,10 @@
 *.wallet.json
 *.seed-backup.json
 *.pending.json
+*.staging.json
+*.scan-cache
+*.cache-*.tmp
+*.wallet.json.lock
 *.password
 node/agave/target/
 

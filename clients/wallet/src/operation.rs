@@ -10,6 +10,7 @@ pub struct WalletOperation {
     _lock: File,
     pub(crate) pending: PathBuf,
     pub(crate) staging: PathBuf,
+    pub(crate) scan_cache: PathBuf,
 }
 
 impl WalletOperation {
@@ -34,6 +35,7 @@ impl WalletOperation {
             _lock: file,
             pending: suffix("pending.json"),
             staging: suffix("staging.json"),
+            scan_cache: suffix("scan-cache"),
         })
     }
 
