@@ -89,7 +89,7 @@ def restart_state(root, index):
     return state
 
 
-def start(root, index, archive=False, coordinated=False):
+def start(root, index, archive=False, coordinated=False, faults=False):
     config = load(root)
     if config.get("pool_format") != "NPOOL002":
         raise RuntimeError("incompatible development pool format; preserve this network and initialize a fresh --root")
@@ -150,6 +150,11 @@ def start(root, index, archive=False, coordinated=False):
     if archive:
         args += ["--use-snapshot-archives-at-startup", "always"]
     env = dict(os.environ, SOLANA_METRICS_CONFIG="", RUST_LOG=LOG_FILTER + ",solana_core::validator=info")
+    # Never inherit fault injection into an ordinary validator launch.
+    env.pop("NATIVE_LOCAL_SHRED_FAULT", None)
+    if faults:
+        env["NATIVE_LOCAL_SHRED_FAULT"] = str(root / f"fault-{index}.json")
+        args += ["--tpu-enable-udp"]
     launched.touch(mode=0o600, exist_ok=True)
     with (root / f"validator-{index}.console.log").open("ab") as output:
         process = subprocess.Popen(args, cwd=PROJECT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)

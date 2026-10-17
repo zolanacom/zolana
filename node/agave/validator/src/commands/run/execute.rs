@@ -38,7 +38,7 @@ use {
     },
     solana_gossip::{
         cluster_info::{NodeConfig, DEFAULT_CONTACT_SAVE_INTERVAL_MILLIS},
-        contact_info::ContactInfo,
+        contact_info::{ContactInfo, Protocol},
         node::Node,
     },
     solana_hash::Hash,
@@ -1014,6 +1014,13 @@ pub fn execute(
     vote_quic_server_config.max_unstaked_connections = 0;
     vote_quic_server_config.num_threads = tpu_vote_transaction_receive_threads;
 
+    let local_fault_network = node.info.gossip().is_some_and(|a| a.ip().is_loopback())
+        && node.info.tvu(Protocol::UDP).is_some_and(|a| a.ip().is_loopback())
+        && node.info.tpu(Protocol::UDP).is_some_and(|a| a.ip().is_loopback());
+    if let Err(error) = super::local_fault::enable(&ledger_path, &validator_config, local_fault_network) {
+        error!("Refusing local fault configuration: {error}");
+        exit(1);
+    }
     let validator = match Validator::new(
         node,
         identity_keypair,

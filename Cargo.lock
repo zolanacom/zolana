@@ -4342,11 +4342,14 @@ name = "native-localnet"
 version = "0.1.0"
 dependencies = [
  "agave-validator",
+ "bincode",
  "blake2b_simd",
  "crossbeam-deque",
  "crossbeam-epoch",
+ "log",
  "native-payment-program",
  "native-payments",
+ "native-wallet",
  "payment-lab",
  "quinn",
  "quinn-proto",
@@ -4442,6 +4445,7 @@ dependencies = [
  "solana-transaction-error",
  "solana-validator-exit",
  "solana-vote-interface",
+ "tempfile",
 ]
 
 [[package]]

@@ -31,6 +31,22 @@ class SnapshotSelectionTests(unittest.TestCase):
 
 
 class ConsensusStorageTests(unittest.TestCase):
+    def test_fault_control_cannot_leak_into_ordinary_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ledger-0").mkdir()
+            (root / "consensus-0").mkdir()
+            (root / "consensus-0/tower-fixture.bin").touch()
+            (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL002", "genesis_hash": "genesis"}))
+            with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch, patch.dict("localnet.os.environ", {"NATIVE_LOCAL_SHRED_FAULT": "unexpected"}):
+                launch.return_value.pid = 123
+                start(root, 0)
+                self.assertNotIn("NATIVE_LOCAL_SHRED_FAULT", launch.call_args.kwargs["env"])
+                self.assertNotIn("--tpu-enable-udp", launch.call_args.args[0])
+                start(root, 0, faults=True)
+                self.assertEqual(launch.call_args.kwargs["env"]["NATIVE_LOCAL_SHRED_FAULT"], str(root / "fault-0.json"))
+                self.assertIn("--tpu-enable-udp", launch.call_args.args[0])
+
     def test_coordinated_start_uses_checkpoint_gate_and_keeps_tower_required(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

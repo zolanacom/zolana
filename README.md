@@ -33,6 +33,8 @@ The local wallet supports random private keys, encrypted seed-only backups, netw
 
 For majority or whole-cluster restarts, use the [coordinated restart runbook](docs/coordinated-restart-runbook.md). The explicit path verifies a saved tower and retained bank checkpoint before invoking the upstream hash/shred-version/stake gate, then requires new finalization. It preserves ordinary restart guards and signed ledger data.
 
+The [fault recovery runner](docs/fault-recovery-runbook.md) exercises owned-process SIGKILL, competing private payments during a shred partition and canonical rejoin. Its explicitly enabled loopback fault control uses the upstream shred-reception gate. See the fault validation record for observed recovery, nullifier rollback and remaining coverage.
+
 ## Attribution
 
 Upstream attribution is preserved in [THIRD_PARTY.md](THIRD_PARTY.md) and vendored notices.

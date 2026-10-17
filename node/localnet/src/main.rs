@@ -1,4 +1,10 @@
 //! Disposable local-network tooling. Fixture spending keys are intentionally public.
+mod fault_lab;
+// Exercise the exact validator fault guard in a first-party workspace target.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../agave/validator/src/commands/run/local_fault.rs"]
+mod local_fault_guard_tests;
 use native_payment_program::{
     id, instructions, nullifiers, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
 };
@@ -711,6 +717,9 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if command.starts_with("fault-") {
+        return fault_lab::run(&command, &root, &args.collect::<Vec<_>>());
+    }
     if command == "init" {
         return initialize(&root);
     }
