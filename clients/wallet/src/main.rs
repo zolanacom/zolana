@@ -1,5 +1,6 @@
 use native_wallet::{
     keys::{read_password, read_private, Network, WalletKey},
+    operation::WalletOperation,
     payments::{self, Payment},
     rpc::Chain,
     Result,
@@ -13,18 +14,22 @@ fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
-        println!("native-wallet init|restore|address|balance|deposit|send|withdraw|resolve");
+        println!(
+            "native-wallet init|restore|address|balance|deposit|send|withdraw|resolve|reclaim"
+        );
         println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file>");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
-        println!("balance/deposit/send/withdraw: --rpc http://127.0.0.1:<port>");
+        println!("balance/deposit/send/withdraw/resolve/reclaim: --rpc http://127.0.0.1:<port>");
         println!("deposit/send/withdraw: --sponsor <private-keypair.json> --amount <native-units>");
         println!("deposit/send: --to <npriv1-address> (deposit defaults to this wallet)");
         println!("Withdrawal pays the signed public sponsor; --to is not supported.");
+        println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
         return Ok(());
     }
     if ![
         "init", "restore", "address", "balance", "deposit", "send", "withdraw", "resolve",
+        "reclaim",
     ]
     .contains(&command.as_str())
     {
@@ -93,14 +98,24 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
+    // Hold the OS lock from before sync/proving until all submission/recovery work ends.
+    let operation = if command == "balance" {
+        None
+    } else {
+        Some(WalletOperation::acquire(path)?)
+    };
     let chain = Chain::connect(required("--rpc")?, network)?;
-    let pending = std::path::PathBuf::from(format!("{}.pending.json", path.display()));
     if command == "resolve" {
-        println!("{}", chain.resolve(&wallet, &pending)?);
+        println!("{}", chain.resolve(&wallet, operation.as_ref().unwrap())?);
         return Ok(());
     }
-    if command != "balance" && pending.exists() {
-        return Err("an unresolved payment exists; run resolve before sending again".into());
+    if command == "reclaim" {
+        let sponsor = load_sponsor(Path::new(required("--sponsor")?))?;
+        println!("{}", chain.reclaim(&sponsor, operation.as_ref().unwrap())?);
+        return Ok(());
+    }
+    if let Some(operation) = &operation {
+        operation.ensure_resolved()?;
     }
     let synced = chain.sync(&wallet)?;
     if command == "balance" {
@@ -110,10 +125,7 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
-    let raw = read_private(Path::new(required("--sponsor")?), 4096)?;
-    let secret: zeroize::Zeroizing<Vec<u8>> =
-        zeroize::Zeroizing::new(serde_json::from_slice(&raw)?);
-    let sponsor = Keypair::try_from(secret.as_slice())?;
+    let sponsor = load_sponsor(Path::new(required("--sponsor")?))?;
     let amount = required("--amount")?.parse::<u64>()?;
     let own_address = wallet.address_text();
     let payment = match command.as_str() {
@@ -135,9 +147,16 @@ fn run() -> Result<()> {
         chain.expiry()?,
         payment,
     )?;
-    let submitted = chain.submit(&sponsor, &bytes, &pending)?;
+    let submitted = chain.submit(&sponsor, &bytes, operation.as_ref().unwrap())?;
     println!("{}", serde_json::to_string(&submitted)?);
     Ok(())
+}
+
+fn load_sponsor(path: &Path) -> Result<Keypair> {
+    let raw = read_private(path, 4096)?;
+    let secret: zeroize::Zeroizing<Vec<u8>> =
+        zeroize::Zeroizing::new(serde_json::from_slice(&raw)?);
+    Ok(Keypair::try_from(secret.as_slice())?)
 }
 
 fn main() {

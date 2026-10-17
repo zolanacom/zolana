@@ -3,6 +3,7 @@
 
 pub mod history;
 pub mod keys;
+pub mod operation;
 pub mod payments;
 pub mod rpc;
 

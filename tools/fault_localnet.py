@@ -356,6 +356,13 @@ class Experiment:
             accepted = resolution["accepted"]
         else:
             accepted = client.returncode == 0
+        # New wallets preserve upload recovery independently of finalization.
+        # Resolve acceptance first, then reclaim the original buffer through the
+        # same guarded command used for interrupted ordinary wallet uploads.
+        staging_record = root / "wallets/alice.wallet.json.staging.json"
+        if staging_record.exists():
+            cleanup = self.wallet("reclaim", "alice", ["--sponsor", str(root / "sponsor.keypair.json")])
+            self.event("interrupted_wallet_staging_reclaimed", receipt=cleanup)
         if not accepted:
             if durable(root, 0) != before_state:
                 raise RuntimeError("noncanonical payment left backing or nullifier effects")

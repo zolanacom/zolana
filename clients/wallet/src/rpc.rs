@@ -1,15 +1,21 @@
 use crate::{
     history::{HistoryInstruction, Replay, WalletState},
     keys::{read_private, write_private_new, Network, WalletKey},
+    operation::WalletOperation,
     Result,
 };
-use native_payment_program::{id, instructions, pool_address, staging::ACCOUNT_BYTES};
+use native_payment_program::{
+    id, instructions, pool_address,
+    staging::{Buffer, ACCOUNT_BYTES},
+};
 use native_payments::{
     staging::{payload_digest, MAX_CHUNK_BYTES},
     state::PoolState,
     wire,
 };
 use serde::{Deserialize, Serialize};
+use solana_account::Account;
+use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_commitment_config::CommitmentConfig;
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_instruction::Instruction;
@@ -19,7 +25,9 @@ use solana_rpc_client::{
     http_sender::HttpSender,
     rpc_client::{RpcClient, RpcClientConfig},
 };
-use solana_rpc_client_api::config::{RpcBlockConfig, RpcSendTransactionConfig};
+use solana_rpc_client_api::config::{
+    RpcAccountInfoConfig, RpcBlockConfig, RpcSendTransactionConfig,
+};
 use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_system_interface::instruction as system;
@@ -30,7 +38,6 @@ use solana_transaction_status_client_types::{
 use std::{
     collections::BTreeSet,
     fs,
-    path::Path,
     str::FromStr,
     thread,
     time::{Duration, Instant},
@@ -55,6 +62,19 @@ struct Pending {
     signature: String,
     staging_account: String,
     last_valid_block_height: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagingRecovery {
+    network: Network,
+    sponsor: String,
+    staging_account: String,
+    initialize_signature: String,
+    last_valid_block_height: u64,
+    expiry: u64,
+    payload_len: u32,
+    payload_digest: [u8; 32],
 }
 
 #[derive(Serialize)]
@@ -244,11 +264,15 @@ impl Chain {
             &signers,
             self.rpc.get_latest_blockhash()?,
         );
+        self.send_signed(&tx)
+    }
+
+    fn send_signed(&self, tx: &Transaction) -> Result<Signature> {
         if 1 + tx.signatures.len() * 64 + tx.message_data().len() > 1232 {
             return Err("signed wallet transaction exceeds the network packet limit".into());
         }
         let signature = self.rpc.send_transaction_with_config(
-            &tx,
+            tx,
             RpcSendTransactionConfig {
                 skip_preflight: false,
                 preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
@@ -275,7 +299,12 @@ impl Chain {
         Err(format!("execution status is unknown for {signature}; sync the wallet and check this signature before retrying").into())
     }
 
-    pub fn resolve(&self, wallet: &WalletKey, path: &Path) -> Result<serde_json::Value> {
+    pub fn resolve(
+        &self,
+        wallet: &WalletKey,
+        operation: &WalletOperation,
+    ) -> Result<serde_json::Value> {
+        let path = &operation.pending;
         let pending: Pending = serde_json::from_slice(&read_private(path, 4096)?)?;
         if pending.network != self.network {
             return Err("pending transaction network mismatch".into());
@@ -304,7 +333,8 @@ impl Chain {
         Ok(
             serde_json::json!({"signature":pending.signature,"accepted":accepted,"failed":failed,
             "expired_without_execution":expired_without_execution,"staging_account":pending.staging_account,
-            "balance":synced.state.balance()?,"pending_cleared":true}),
+            "balance":synced.state.balance()?,"pending_cleared":true,
+            "staging_recovery_required":operation.staging.exists()}),
         )
     }
 
@@ -312,19 +342,38 @@ impl Chain {
         &self,
         sponsor: &Keypair,
         bytes: &[u8],
-        pending_path: &Path,
+        operation: &WalletOperation,
     ) -> Result<Submitted> {
-        if pending_path.exists() {
-            return Err("an unresolved payment exists; run resolve before sending again".into());
-        }
+        operation.ensure_resolved()?;
+        self.submit_inner(sponsor, bytes, operation)
+            .map_err(|error| {
+                if operation.pending.exists() {
+                    format!("{error}; payment remains recorded; run resolve before retrying").into()
+                } else if operation.staging.exists() {
+                    format!("{error}; staging remains recorded; run reclaim before retrying").into()
+                } else {
+                    error
+                }
+            })
+    }
+
+    fn submit_inner(
+        &self,
+        sponsor: &Keypair,
+        bytes: &[u8],
+        operation: &WalletOperation,
+    ) -> Result<Submitted> {
+        let pending_path = &operation.pending;
         let payment = wire::decode(self.network.network, bytes)?;
         if payment.context.sponsor != sponsor.pubkey().to_bytes() {
             return Err("payment sponsor does not match the local signer".into());
         }
         let expiry = payment.context.expires_at;
         let buffer = Keypair::new();
-        self.send(
-            sponsor,
+        let (blockhash, last_valid_block_height) = self
+            .rpc
+            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?;
+        let initialization = Transaction::new_signed_with_payer(
             &[
                 system::create_account(
                     &sponsor.pubkey(),
@@ -342,8 +391,26 @@ impl Chain {
                     expiry,
                 ),
             ],
-            &[&buffer],
+            Some(&sponsor.pubkey()),
+            &[sponsor, &buffer],
+            blockhash,
+        );
+        // The initialization identity is persisted before any staging broadcast.
+        // Only the account's public key is needed to reclaim its sponsor's rent.
+        write_private_new(
+            &operation.staging,
+            &serde_json::to_vec_pretty(&StagingRecovery {
+                network: self.network.clone(),
+                sponsor: sponsor.pubkey().to_string(),
+                staging_account: buffer.pubkey().to_string(),
+                initialize_signature: initialization.signatures[0].to_string(),
+                last_valid_block_height,
+                expiry,
+                payload_len: bytes.len() as u32,
+                payload_digest: payload_digest(bytes),
+            })?,
         )?;
+        self.send_signed(&initialization)?;
         for (index, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
             self.send(
                 sponsor,
@@ -416,11 +483,239 @@ impl Chain {
                 &[instructions::close(buffer.pubkey(), sponsor.pubkey())],
                 &[],
             )
+            .and_then(|signature| self.wait_closed(&buffer.pubkey(), &signature))
             .is_ok();
+        if reclaimed {
+            // Payment acceptance must remain a success even if local cleanup fails.
+            let _ = fs::remove_file(&operation.staging);
+        }
         Ok(Submitted {
             signature: signature.to_string(),
             staging_account: buffer.pubkey().to_string(),
             staging_rent_reclaimed: reclaimed,
         })
+    }
+
+    fn account_config(commitment: CommitmentConfig, minimum_slot: u64) -> RpcAccountInfoConfig {
+        RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            commitment: Some(commitment),
+            min_context_slot: Some(minimum_slot),
+            ..Default::default()
+        }
+    }
+
+    fn staging_account(
+        &self,
+        buffer: &Pubkey,
+        commitment: CommitmentConfig,
+        minimum_slot: u64,
+    ) -> Result<Option<Account>> {
+        let response = self
+            .rpc
+            .get_account_with_config(buffer, Self::account_config(commitment, minimum_slot))?;
+        if response.context.slot < minimum_slot {
+            return Err("RPC staging account checkpoint is older than required".into());
+        }
+        Ok(response.value)
+    }
+
+    fn wait_closed(&self, buffer: &Pubkey, signature: &Signature) -> Result<()> {
+        self.wait(signature, CommitmentConfig::finalized())?;
+        let status = self
+            .rpc
+            .get_signature_statuses_with_history(&[*signature])?
+            .value
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or("finalized staging-close status is unavailable")?;
+        if status.err.is_some() || !status.satisfies_commitment(CommitmentConfig::finalized()) {
+            return Err("staging close has not finalized successfully".into());
+        }
+        if self
+            .staging_account(buffer, CommitmentConfig::finalized(), status.slot)?
+            .is_some()
+        {
+            return Err("staging account remains present after finalized close".into());
+        }
+        Ok(())
+    }
+
+    pub fn reclaim(
+        &self,
+        sponsor: &Keypair,
+        operation: &WalletOperation,
+    ) -> Result<serde_json::Value> {
+        if operation.pending.exists() {
+            return Err(
+                "an unresolved payment exists; run resolve before reclaiming staging".into(),
+            );
+        }
+        let recovery: StagingRecovery =
+            serde_json::from_slice(&read_private(&operation.staging, 4096)?)?;
+        if recovery.network != self.network || recovery.sponsor != sponsor.pubkey().to_string() {
+            return Err("staging recovery network or sponsor mismatch".into());
+        }
+        let buffer = Pubkey::from_str(&recovery.staging_account)?;
+        let initialization = Signature::from_str(&recovery.initialize_signature)?;
+        let checkpoint = self
+            .rpc
+            .get_epoch_info_with_commitment(CommitmentConfig::finalized())?;
+        let confirmed = self.staging_account(
+            &buffer,
+            CommitmentConfig::confirmed(),
+            checkpoint.absolute_slot,
+        )?;
+        let mut close_signature = None;
+        if let Some(account) = confirmed {
+            if account.owner != id() || account.data.len() != ACCOUNT_BYTES {
+                return Err("staging recovery account owner or size mismatch".into());
+            }
+            let staged = Buffer::decode(&account.data)?;
+            if staged.sponsor() != sponsor.pubkey().to_bytes()
+                || staged.expiry() != recovery.expiry
+                || account.data[40..44] != recovery.payload_len.to_le_bytes()
+                || account.data[48..80] != recovery.payload_digest
+            {
+                return Err("staging recovery account does not match the saved upload".into());
+            }
+            let signature = self.send(
+                sponsor,
+                &[instructions::close(buffer, sponsor.pubkey())],
+                &[],
+            )?;
+            self.wait_closed(&buffer, &signature)?;
+            close_signature = Some(signature.to_string());
+        } else {
+            let status = self
+                .rpc
+                .get_signature_statuses_with_history(&[initialization])?
+                .value
+                .into_iter()
+                .next()
+                .flatten();
+            let finalized_slot = status
+                .as_ref()
+                .filter(|s| s.satisfies_commitment(CommitmentConfig::finalized()))
+                .map(|s| s.slot);
+            let expired = checkpoint.block_height > recovery.last_valid_block_height;
+            if finalized_slot.is_none() && !expired {
+                return Err(
+                    "staging initialization is still pending; recovery record retained".into(),
+                );
+            }
+            let minimum = checkpoint.absolute_slot.max(finalized_slot.unwrap_or(0));
+            if self
+                .staging_account(&buffer, CommitmentConfig::finalized(), minimum)?
+                .is_some()
+            {
+                return Err("staging account is still present; run reclaim again".into());
+            }
+        }
+        fs::remove_file(&operation.staging)?;
+        Ok(
+            serde_json::json!({"staging_account":buffer.to_string(),"close_signature":close_signature,
+            "recovery_cleared":true,"rent_reclaimed":close_signature.is_some()}),
+        )
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use serde_json::json;
+    use solana_rpc_client::mock_sender::MocksMap;
+    use solana_rpc_client_api::request::RpcRequest;
+
+    fn fixture(operation: &WalletOperation, sponsor: &Keypair, height: u64) -> Network {
+        let network = Network {
+            network: [9; 32],
+            genesis_hash: bs58::encode([8; 32]).into_string(),
+        };
+        let recovery = StagingRecovery {
+            network: network.clone(),
+            sponsor: sponsor.pubkey().to_string(),
+            staging_account: Pubkey::new_unique().to_string(),
+            initialize_signature: Signature::from([3; 64]).to_string(),
+            last_valid_block_height: height,
+            expiry: 2000,
+            payload_len: 10,
+            payload_digest: [7; 32],
+        };
+        write_private_new(&operation.staging, &serde_json::to_vec(&recovery).unwrap()).unwrap();
+        network
+    }
+
+    fn absent_chain(network: Network, slot: u64, url: &str) -> Chain {
+        let response = json!({"context":{"slot":slot},"value":null});
+        let mocks = MocksMap::from_iter([
+            (RpcRequest::GetAccountInfo, response.clone()),
+            (RpcRequest::GetAccountInfo, response),
+        ]);
+        Chain {
+            rpc: RpcClient::new_mock_with_mocks_map(url, mocks),
+            network,
+        }
+    }
+
+    #[test]
+    fn absent_live_initialization_is_retained_until_finalized_expiry() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let sponsor = Keypair::new();
+        let network = fixture(&operation, &sponsor, 100);
+        let chain = absent_chain(network.clone(), 34, "sig_not_found");
+        assert!(chain
+            .reclaim(&sponsor, &operation)
+            .unwrap_err()
+            .to_string()
+            .contains("still pending"));
+        assert!(operation.staging.exists());
+        let mut recovery: StagingRecovery =
+            serde_json::from_slice(&fs::read(&operation.staging).unwrap()).unwrap();
+        recovery.last_valid_block_height = 20; // A synthetic unit fixture, never broadcast.
+        fs::write(&operation.staging, serde_json::to_vec(&recovery).unwrap()).unwrap();
+        let cleared = absent_chain(network, 34, "sig_not_found")
+            .reclaim(&sponsor, &operation)
+            .unwrap();
+        assert_eq!(cleared["recovery_cleared"], true);
+        assert_eq!(cleared["rent_reclaimed"], false);
+        assert!(!operation.staging.exists());
+    }
+
+    #[test]
+    fn stale_absence_cannot_clear_an_expired_initialization() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let sponsor = Keypair::new();
+        let network = fixture(&operation, &sponsor, 20);
+        let error = absent_chain(network, 1, "sig_not_found")
+            .reclaim(&sponsor, &operation)
+            .unwrap_err();
+        assert!(error.to_string().contains("checkpoint is older"));
+        assert!(operation.staging.exists());
+    }
+
+    #[test]
+    fn pending_payment_and_wrong_signer_block_reclamation() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let sponsor = Keypair::new();
+        let network = fixture(&operation, &sponsor, 20);
+        let chain = absent_chain(network, 34, "sig_not_found");
+        write_private_new(&operation.pending, b"unresolved").unwrap();
+        assert!(chain
+            .reclaim(&sponsor, &operation)
+            .unwrap_err()
+            .to_string()
+            .contains("unresolved payment"));
+        fs::remove_file(&operation.pending).unwrap();
+        assert!(chain
+            .reclaim(&Keypair::new(), &operation)
+            .unwrap_err()
+            .to_string()
+            .contains("sponsor mismatch"));
+        assert!(operation.staging.exists());
     }
 }
