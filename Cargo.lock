@@ -1724,7 +1724,9 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
+ "getrandom 0.4.3",
  "hybrid-array",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -4509,6 +4511,42 @@ dependencies = [
  "solana-system-interface",
  "solana-transaction",
  "solana-transaction-error",
+]
+
+[[package]]
+name = "native-wallet"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "bs58",
+ "chacha20poly1305",
+ "hmac 0.12.1",
+ "incrementalmerkletree",
+ "native-payment-program",
+ "native-payments",
+ "orchard",
+ "pbkdf2 0.11.0",
+ "rand 0.10.3",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-account",
+ "solana-commitment-config",
+ "solana-compute-budget-interface",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-pubkey",
+ "solana-rpc-client",
+ "solana-rpc-client-api",
+ "solana-sdk-ids",
+ "solana-signature",
+ "solana-signer",
+ "solana-system-interface",
+ "solana-transaction",
+ "solana-transaction-status-client-types",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]

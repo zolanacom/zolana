@@ -93,7 +93,7 @@ def start(root, index, archive=False):
         "--gossip-port", str(18000 + index * 1000),
         "--dynamic-port-range", f"{18100 + index * 1000}-{18200 + index * 1000}",
         "--rpc-bind-address", "127.0.0.1", "--rpc-port", str(port(index)),
-        "--private-rpc", "--full-rpc-api", "--allow-private-addr",
+        "--private-rpc", "--full-rpc-api", "--enable-rpc-transaction-history", "--allow-private-addr",
         "--no-genesis-fetch", "--no-snapshot-fetch", "--no-port-check",
         "--no-os-network-limits-test", "--no-poh-speed-test",
         "--no-incremental-snapshots",

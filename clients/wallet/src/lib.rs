@@ -1,0 +1,9 @@
+//! Experimental local wallet. RPC consensus is trusted; keys never leave this process.
+#![forbid(unsafe_code)]
+
+pub mod history;
+pub mod keys;
+pub mod payments;
+pub mod rpc;
+
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

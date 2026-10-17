@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocol/payments", "clients/cli", "node/adapter", "node/validator-check", "node/localnet"]
+members = ["protocol/payments", "clients/cli", "clients/wallet", "node/adapter", "node/validator-check", "node/localnet"]
 exclude = ["node/agave"]
 resolver = "2"
 

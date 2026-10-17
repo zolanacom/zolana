@@ -50,6 +50,7 @@ class ConsensusStorageTests(unittest.TestCase):
                 launch.return_value.pid = 1234
                 start(root, 1)
                 first = launch.call_args.args[0]
+                self.assertIn("--enable-rpc-transaction-history", first)
                 tower = Path(first[first.index("--tower") + 1])
                 self.assertEqual(tower, root / "consensus-1")
                 (tower / "tower-fixture.bin").touch()

@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Fixture construction: {} ms; validation: {} ms",
                 report.build_ms, report.verify_ms
             );
-            println!("Native Agave integration and supply accounting remain pending.");
+            println!("For signed local-chain payments, use the separate native-wallet command.");
         }
         None | Some("--help") | Some("-h") => {
             println!("Usage: payment-lab proof-smoke");

@@ -6,6 +6,10 @@
 .env.*
 *.key
 *.keypair.json
+*.wallet.json
+*.seed-backup.json
+*.pending.json
+*.password
 node/agave/target/
 
 __pycache__/

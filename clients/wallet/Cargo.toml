@@ -1,0 +1,40 @@
+[package]
+name = "native-wallet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+native-payments = { path = "../../protocol/payments" }
+native-payment-program = { path = "../../node/adapter" }
+orchard.workspace = true
+incrementalmerkletree.workspace = true
+blake2b_simd.workspace = true
+rand.workspace = true
+chacha20poly1305 = "=0.11.0"
+pbkdf2 = { version = "=0.11.0", default-features = false }
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+zeroize = "1"
+bs58 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
+solana-account = "=3.0.0"
+solana-pubkey = "=3.0.0"
+solana-instruction = "=3.0.0"
+solana-keypair = "=3.0.0"
+solana-signer = "=3.0.0"
+solana-signature = "=3.1.0"
+solana-transaction = { version = "=3.0.0", features = ["verify"] }
+solana-compute-budget-interface = "=3.0.0"
+solana-sdk-ids = "=3.0.0"
+solana-system-interface = { version = "=2.0.0", features = ["bincode"] }
+solana-commitment-config = "=3.0.0"
+solana-rpc-client = { path = "../../node/agave/rpc-client" }
+solana-rpc-client-api = { path = "../../node/agave/rpc-client-api" }
+solana-transaction-status-client-types = { path = "../../node/agave/transaction-status-client-types" }
+
+[dev-dependencies]
+tempfile = "3"
