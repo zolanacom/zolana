@@ -47,7 +47,9 @@ class HostIsolationTests(unittest.TestCase):
                     with conn:
                         data=b''
                         while b'\r\n\r\n' not in data:data+=conn.recv(4096)
-                        seen.append(data)
+                        head,body=data.split(b'\r\n\r\n',1)
+                        while len(body)<2:body+=conn.recv(2-len(body))
+                        seen.append(head+b'\r\n\r\n'+body)
                         conn.sendall(f'HTTP/1.1 {code} test\r\nContent-Length: 2\r\nLocation: http://127.0.0.1:1\r\nConnection: close\r\n\r\n{{}}'.encode())
             thread=threading.Thread(target=serve,daemon=True);thread.start()
             client=Operator('http://127.0.0.1:18899',self.key)

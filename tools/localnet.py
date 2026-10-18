@@ -51,14 +51,22 @@ def load(root):
             raise RuntimeError("not a disposable fixture or owner-only local testnet rehearsal")
     from rpc_isolation import validate as validate_rpc_policy
     credential=validate_rpc_policy(root,config)
+    shift=offset(config)
     for i in [0,1]:
-        if credential: RPC_CREDENTIALS[port(i)]=credential
-        else: RPC_CREDENTIALS.pop(port(i),None)
+        if credential: RPC_CREDENTIALS[port(i,shift)]=credential
+        else: RPC_CREDENTIALS.pop(port(i,shift),None)
     return config
 
 
-def port(index):
-    return 18899 + index * 1000
+def offset(config):
+    value=config.get("local_port_offset",0)
+    if type(value) is not int or value not in (0,5000):
+        raise ValueError("unsupported local port layout")
+    return value
+
+
+def port(index, shift=0):
+    return 18899 + index * 1000 + shift
 
 
 def ledger(root, index):
@@ -72,16 +80,17 @@ def ledger(root, index):
 
 def wait_rpc(root, index, timeout=120):
     config = load(root)
+    shift=offset(config)
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
         try:
-            if rpc(port(index), "getGenesisHash") != config["genesis_hash"]:
+            if rpc(port(index,shift), "getGenesisHash") != config["genesis_hash"]:
                 raise RuntimeError("loopback port belongs to another network")
-            actual = rpc(port(index), "getIdentity")["identity"]
+            actual = rpc(port(index,shift), "getIdentity")["identity"]
             if actual != config["identities"][index]:
                 raise RuntimeError("unexpected validator identity")
-            return rpc(port(index), "getSlot", [{"commitment": "confirmed"}])
+            return rpc(port(index,shift), "getSlot", [{"commitment": "confirmed"}])
         except (OSError, ValueError, RuntimeError) as error:
             last = error
             time.sleep(0.3)
@@ -107,8 +116,9 @@ def restart_state(root, index):
     return state
 
 
-def start(root, index, archive=False, coordinated=False, faults=False):
+def start(root, index, archive=False, coordinated=False, faults=False, new_session=True):
     config = load(root)
+    shift=offset(config)
     private = config.get("key_mode") == "local-testnet-rehearsal-v1"
     if private and faults:
         raise RuntimeError("fault fixtures require disposable keys")
@@ -125,7 +135,7 @@ def start(root, index, archive=False, coordinated=False, faults=False):
         with socket.socket() as probe:
             # Ignore completed connections in TIME_WAIT, reject live listeners.
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind(("127.0.0.1", port(index)))
+            probe.bind(("127.0.0.1", port(index,shift)))
     path = ledger(root, index)
     if len(os.fsencode(path / "admin.rpc")) >= 104:
         raise RuntimeError("ledger path exceeds the portable local admin socket limit")
@@ -147,9 +157,9 @@ def start(root, index, archive=False, coordinated=False, faults=False):
         "--authorized-voter", str(root / f"{'voter' if private else 'vote'}-{index}.keypair.json"),
         "--expected-genesis-hash", config["genesis_hash"],
         "--bind-address", "127.0.0.1", "--gossip-host", "127.0.0.1",
-        "--gossip-port", str(18000 + index * 1000),
-        "--dynamic-port-range", f"{18100 + index * 1000}-{18200 + index * 1000}",
-        "--rpc-bind-address", "127.0.0.1", "--rpc-port", str(port(index)),
+        "--gossip-port", str(18000 + index * 1000 + shift),
+        "--dynamic-port-range", f"{18100 + index * 1000 + shift}-{18200 + index * 1000 + shift}",
+        "--rpc-bind-address", "127.0.0.1", "--rpc-port", str(port(index,shift)),
         "--private-rpc", "--full-rpc-api", "--enable-rpc-transaction-history", "--allow-private-addr",
         "--no-genesis-fetch", "--no-snapshot-fetch", "--no-port-check",
         "--no-os-network-limits-test", "--no-poh-speed-test",
@@ -168,13 +178,13 @@ def start(root, index, archive=False, coordinated=False, faults=False):
     elif index == 0:
         args += ["--no-wait-for-vote-to-start-leader"]
     if index:
-        args += ["--entrypoint", "127.0.0.1:18000"]
+        args += ["--entrypoint", f"127.0.0.1:{18000+shift}"]
     if checkpoint:
         args += ["--wait-for-supermajority", str(checkpoint["slot"]),
                  "--expected-bank-hash", checkpoint["bank_hash"],
                  "--expected-shred-version", str(checkpoint["shred_version"])]
         if not index:
-            args += ["--entrypoint", "127.0.0.1:19000"]
+            args += ["--entrypoint", f"127.0.0.1:{19000+shift}"]
         # Retain the signed inputs for review. Never copy, delete or reset a tower.
         checkpoint["tower_files"] = {p.name: digest(p) for p in tower.glob("tower-*.bin")}
         (root / f"restart-checkpoint-{index}.json").write_text(json.dumps(checkpoint, indent=2))
@@ -188,10 +198,10 @@ def start(root, index, archive=False, coordinated=False, faults=False):
         args += ["--tpu-enable-udp"]
     launched.touch(mode=0o600, exist_ok=True)
     with (root / f"validator-{index}.console.log").open("ab") as output:
-        process = subprocess.Popen(args, cwd=PROJECT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(args, cwd=PROJECT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=new_session)
     (root / f"validator-{index}.pid").write_text(str(process.pid))
     (root / f"validator-{index}.command.json").write_text(json.dumps(args, indent=2))
-    transport=f"private Unix socket rpc-{port(index)}.sock" if config.get("raw_rpc_host_isolation") else f"http://127.0.0.1:{port(index)}"
+    transport=f"private Unix socket rpc-{port(index,shift)}.sock" if config.get("raw_rpc_host_isolation") else f"http://127.0.0.1:{port(index,shift)}"
     print(f"Started local validator {index}; PID {process.pid}, RPC {transport}", flush=True)
     return process
 
@@ -259,8 +269,11 @@ def newer_full_snapshot(directory, after_slot):
 
 
 def digest(path):
+    checksum = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.hexdigest()
 
 
 def prepare_snapshot_recovery(root, name, shutdown_tip):

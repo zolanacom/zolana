@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 
-from localnet import LAB, PROJECT, VALIDATOR, digest, ledger, load, restart_state
+from localnet import LAB, PROJECT, VALIDATOR, digest, ledger, load, restart_state, offset
 from restart_localnet import preserved
 from wallet_localnet import private_new
 
@@ -46,6 +46,7 @@ def prepare(root):
 
 
 def _replay(root,config,before,index,slot,expected):
+    shift=offset(config)
     sponsor_ledger = root / "sponsor-policy.json.reservations.json"
     sponsor_digest = digest(sponsor_ledger) if sponsor_ledger.exists() else None
     towers = {str(p.relative_to(root)): digest(p) for i in [0, 1] for p in (root / f"consensus-{i}").glob("tower-*.bin")}
@@ -58,9 +59,9 @@ def _replay(root,config,before,index,slot,expected):
             "--authorized-voter", str(root / f"{'voter' if private else 'vote'}-{index}.keypair.json"),
             "--expected-genesis-hash", config["genesis_hash"], "--require-tower", "--no-voting",
             "--dev-halt-at-slot", str(slot), "--process-ledger-before-services",
-            "--bind-address", "127.0.0.1", "--gossip-host", "127.0.0.1", "--gossip-port", str(28000+index*1000),
-            "--dynamic-port-range", f"{28100+index*1000}-{28200+index*1000}",
-            "--rpc-bind-address", "127.0.0.1", "--rpc-port", str(28899+index*1000), "--private-rpc", "--allow-private-addr",
+            "--bind-address", "127.0.0.1", "--gossip-host", "127.0.0.1", "--gossip-port", str(28000+index*1000+shift),
+            "--dynamic-port-range", f"{28100+index*1000+shift}-{28200+index*1000+shift}",
+            "--rpc-bind-address", "127.0.0.1", "--rpc-port", str(28899+index*1000+shift), "--private-rpc", "--allow-private-addr",
             "--no-genesis-fetch", "--no-snapshot-fetch", "--no-port-check", "--no-os-network-limits-test", "--no-poh-speed-test",
             "--no-incremental-snapshots", "--snapshot-interval-slots", "40", "--maximum-full-snapshots-to-retain", "2",
             "--rpc-threads", "2", "--rpc-blocking-threads", "2", "--rayon-global-threads", "2",
