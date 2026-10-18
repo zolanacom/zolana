@@ -41,6 +41,24 @@ class IsolationPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)/'tls';create(root)
             self.assertEqual(context(root/'server.crt',root/'server.key').minimum_version,ssl.TLSVersion.TLSv1_2)
+            def handshake(certificate,key):
+                client_context=ssl.create_default_context(cafile=str(root/'ca.crt'))
+                client_context.verify_flags|=ssl.VERIFY_X509_STRICT
+                ci,co,si,so=[ssl.MemoryBIO() for _ in range(4)]
+                client=client_context.wrap_bio(ci,co,server_hostname='127.0.0.1')
+                server=context(certificate,key).wrap_bio(si,so,server_side=True)
+                done=set()
+                for _ in range(20):
+                    for name,peer,outgoing,incoming in [('client',client,co,si),('server',server,so,ci)]:
+                        try:peer.do_handshake();done.add(name)
+                        except ssl.SSLWantReadError:pass
+                        raw=outgoing.read()
+                        if raw:incoming.write(raw)
+                    if len(done)==2:return
+                self.fail('local TLS handshake did not finish')
+            handshake(root/'server.crt',root/'server.key')
+            for name,key in [('wrong-host','wrong-host'),('expired','server')]:
+                with self.assertRaises(ssl.SSLCertVerificationError):handshake(root/(name+'.crt'),root/(key+'.key'))
             for key in [root/'missing.key',root/'rotated.key']:
                 with patch('service_tls.TLSServer') as bind:
                     with self.assertRaises((OSError,ValueError)):listener('https://127.0.0.1:18897',18897,object,object(),root/'server.crt',key)

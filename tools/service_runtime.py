@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -92,17 +93,34 @@ def ready(timeout=120):
 def supervise():
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
-    children=[None,None];shutdown=threading.Event()
+    children=[None,None];shutdown=threading.Event();ingress=None
     def terminate(*_):shutdown.set()
     signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
     try:
+        if shutil.disk_usage(ROOT).free<1536*1024*1024:
+            print('Service kept paused: less than 1.5 GiB free; private state retained.',flush=True)
+            while not shutdown.wait(5):pass
+            return
         if any((ROOT/f'consensus-{i}').exists() for i in [0,1]):prepare(ROOT)
         for i in [0,1]:children[i]=start(ROOT,i,coordinated=True,new_session=False);wait_rpc(ROOT,i)
         quiet(ROOT)
         save(ROOT/'service-instance.json',{'supervisor':os.getpid(),'validators':[p.pid for p in children],'started_at':time.time(),'uid':os.getuid(),'gid':os.getgid(),'process_groups':[os.getpgid(p.pid) for p in children]})
+        if (ROOT/'ingress-setup.json').exists():
+            from service_ingress import Ingress
+            if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':ingress=Ingress()
         while not shutdown.wait(1):
             if any(p.poll() is not None for p in children):raise RuntimeError('owned validator exited; restart the coordinated service group')
+            if ingress is not None and not ingress.healthy():raise RuntimeError('wallet ingress worker exited; restart original service group')
+            if shutil.disk_usage(ROOT).free<1024*1024*1024:
+                # Stop writers, then wait without a launchd restart/write loop.
+                if ingress is not None:ingress.close();ingress=None
+                for i in [1,0]:
+                    if children[i].poll() is None:stop(ROOT,i)
+                print('Service paused at low-disk guard; private state retained.',flush=True)
+                while not shutdown.wait(5):pass
+                return
     finally:
+        if ingress is not None:ingress.close()
         for i in [1,0]:
             if children[i] is not None and children[i].poll() is None:stop(ROOT,i)
 
@@ -211,11 +229,18 @@ def test_finish():
 
 
 if __name__=='__main__':
-    action=sys.argv[1] if len(sys.argv)==2 else ''
+    action=sys.argv[1] if len(sys.argv)>=2 else ''
+    if (action!='client-export' and len(sys.argv)!=2) or (action=='client-export' and (len(sys.argv)!=3 or sys.argv[2] not in ('alice','bob'))):raise ValueError('unexpected service arguments')
     if action=='init':output=initialize()
     elif action=='run':output=supervise()
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':ready(timeout=4);output={'slots':slots(),'native_state':canonical(),'uid':os.getuid()}
+    elif action=='ingress-init':
+        from service_ingress import initialize as initialize_ingress
+        output=initialize_ingress()
+    elif action=='client-export':
+        from service_ingress import export_client
+        output=export_client(sys.argv[2])
     else:raise ValueError('unknown sealed service action')
     if output is not None:print(json.dumps(output,sort_keys=True))
