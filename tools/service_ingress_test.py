@@ -99,6 +99,29 @@ class ServiceIngressTests(unittest.TestCase):
         with self.assertRaises(ValueError):app.arm_ack_gate('A'*88)
         with self.assertRaises(OSError):app.ack_gate()
 
+    def test_browser_fault_controls_preserve_previous_gate_and_broadcast_evidence(self):
+        app,gateway=self.gate();original=app.ACK_GATE;original_log=app.ACK_BROADCASTS
+        previous=original.read_bytes();original_log.write_bytes(b'{"attempts":[]}')
+        app.browser_test_paths();app.arm_ack_gate('B'*88)
+        self.assertEqual(app.ack_gate()['signature'],'B'*88)
+        self.assertEqual(original.read_bytes(),previous)
+        self.assertEqual(original_log.read_bytes(),b'{"attempts":[]}')
+        self.assertEqual(app.ACK_BROADCASTS,app.ROOT/'browser-ack-broadcasts-024.json')
+
+    def test_browser_recovery_cleanup_rejects_failed_payments_and_other_programs(self):
+        app=self.app;app.load.return_value={'program':'native'}
+        instruction={'programIdIndex':0,'accounts':[1,2],'data':'5'}
+        value={'meta':{'err':None},'transaction':{'message':{'accountKeys':['native','original-stage','fee-owner'],'instructions':[instruction]}}}
+        app.rpc.return_value=value
+        self.assertEqual(app.browser_close_checkpoint('A'*88)['staging_account'],'original-stage')
+        for change in ('failed','finalize','other'):
+            changed=json.loads(json.dumps(value))
+            if change=='failed':changed['meta']['err']='failed'
+            if change=='finalize':changed['transaction']['message']['instructions'][0]['data']='4'
+            if change=='other':changed['transaction']['message']['accountKeys'][0]='other-program'
+            app.rpc.return_value=changed
+            with self.subTest(change=change),self.assertRaises(ValueError):app.browser_close_checkpoint('A'*88)
+
     def test_checkpoint_loads_private_rpc_routes_before_its_first_query(self):
         app,gateway=self.gate();gate=app.ack_gate();gate['phase']='held';app.save(app.ACK_GATE,gate)
         order=[]

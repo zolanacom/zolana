@@ -105,6 +105,13 @@ def signature(value):
     return value
 
 
+def browser_test_paths():
+    """Fixed service-only namespace; preserve prior acceptance evidence."""
+    global ACK_GATE,ACK_BROADCASTS
+    ACK_GATE=ROOT/'browser-ack-test-024.json'
+    ACK_BROADCASTS=ROOT/'browser-ack-broadcasts-024.json'
+
+
 def arm_ack_gate(target):
     signature(target)
     if os.path.lexists(ACK_GATE):raise ValueError('acknowledgement experiment already started; retain its original record')
@@ -176,6 +183,20 @@ def ack_checkpoint():
     return {'signature':gate['signature'],'native_state':canonical(),'slots':slots(),'gate':gate}
 
 
+def browser_close_checkpoint(target):
+    config=load(ROOT);signature(target)
+    value=rpc(23899,'getTransaction',[target,{'encoding':'json','commitment':'finalized','maxSupportedTransactionVersion':0}])
+    if not value or value['meta']['err'] is not None:raise ValueError('staging cleanup is not finalized successfully')
+    message=value['transaction']['message'];keys=message['accountKeys'];native=[]
+    for instruction in message['instructions']:
+        program=keys[instruction['programIdIndex']]
+        if program==config['program']:native.append(instruction)
+        elif program!='ComputeBudget111111111111111111111111111111':raise ValueError('unexpected program in staging cleanup')
+    # Native Close is one byte 0x04, encoded as base58 "5" in JSON RPC.
+    if len(native)!=1 or native[0]['data']!='5' or len(native[0]['accounts'])!=2:raise ValueError('recovery broadcast was not an original staging close')
+    return {'signature':target,'staging_account':keys[native[0]['accounts'][0]],'only_native_close':True}
+
+
 class PackageRecoveryGateway(Gateway):
     """Bounded package-recovery test: record and reject any broadcast attempt."""
     def forward(self,raw):
@@ -187,11 +208,12 @@ class PackageRecoveryGateway(Gateway):
 
 
 class Ingress:
-    def __init__(self,ack_test=False,package_test=False):
+    def __init__(self,ack_test=False,package_test=False,browser_test=False):
         check_ready();self.services=[];self.threads=[];self.worker=None;self.faucet=None
         try:
+            if browser_test:browser_test_paths()
             self.faucet=Faucet(FAUCET_ROOT,PASSWORD,binary=FAUCET)
-            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test else Gateway)(self.faucet)
+            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test or browser_test else Gateway)(self.faucet)
             self.gateway=gateway
             for port,handler,app,endpoint in [(FAUCET_PORT,FaucetHandler,self.faucet,gateway.info['faucet_audience']),
                 (RPC_PORT,GatewayHandler,gateway,gateway.info['rpc_audience'])]:
