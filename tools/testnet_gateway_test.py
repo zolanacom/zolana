@@ -37,7 +37,8 @@ class GatewayTests(unittest.TestCase):
         if access is not None: handler.headers['X-Testnet-Access']=access
         response=[]
         handler.send_response=lambda code:response.append(code)
-        handler.send_header=lambda *_:None; handler.end_headers=lambda:None
+        self.last_headers={}
+        handler.send_header=lambda key,value:self.last_headers.__setitem__(key,value); handler.end_headers=lambda:None
         handler.do_POST()
         return response[0],json.loads(handler.wfile.getvalue()),calls
 
@@ -67,6 +68,15 @@ class GatewayTests(unittest.TestCase):
         for header in ['?', 'x'*3073, base64.urlsafe_b64encode(b'{}').decode()]:
             code,_,calls=self.request(dict(genesis,method='getBalance'),header)
             self.assertEqual(code,403); self.assertFalse(any(c[0]=='forward' for c in calls))
+
+    def test_quota_wait_is_bounded_until_next_minute_and_denials_do_not_suggest_retry(self):
+        request=dict(jsonrpc='2.0',id=1,method='getGenesisHash')
+        for clock,expected in [(120,61),(179,2)]:
+            with patch('testnet_gateway.time.time',return_value=clock):
+                self.assertEqual(self.request(request,limit=True)[0],429)
+                self.assertEqual(self.last_headers['Retry-After'],str(expected))
+        self.assertEqual(self.request(dict(request,method='getIdentity'))[0],403)
+        self.assertNotIn('Retry-After',self.last_headers)
 
     def test_history_reads_are_bounded_read_only_and_charged_per_block(self):
         request=dict(jsonrpc='2.0',id=1,method='getWalletHistoryBlocks',params=[list(range(1,17))])

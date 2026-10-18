@@ -197,7 +197,8 @@ function inviteAccess() {
 async function dashboard() {
   if (session.invite_required && !session.testnet_admitted) return inviteAccess();
   try {
-    progress('Verifying finalized payment history… Your first sync checks the full history; later refreshes use your verified checkpoint.');
+    setScreen('<h2>Verifying your balance</h2><p class="caption">Checking finalized payment history for this wallet.</p><p class="hint">Your first sync checks the full history. Later refreshes use your verified checkpoint. Network limits may briefly pause this check.</p>');
+    progress('Verifying finalized payment history…');
     const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; feeBalance = result.fee_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null;
   } catch (error) { if (session.invite_required && !session.testnet_admitted) inviteAccess(); else renderDashboard(); throw error; }
   renderDashboard();
