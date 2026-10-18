@@ -931,7 +931,14 @@ impl Chain {
             return Err("pending transaction network mismatch".into());
         }
         let signature = Signature::from_str(&pending.signature)?;
-        let synced = self.sync(wallet)?;
+        // Private sends can extend the same authenticated, canonically pinned
+        // checkpoint used by normal wallet sync. Withdrawal intent still needs
+        // full receipt replay: that recipient/amount map is not cached.
+        let synced = if pending.withdrawal.is_none() {
+            self.sync_cached(wallet, operation)?
+        } else {
+            self.sync(wallet)?
+        };
         let accepted = synced.accepted_finalizations.contains(&pending.signature);
         let withdrawal = synced.withdrawals.get(&pending.signature).cloned();
         if accepted
@@ -965,7 +972,7 @@ impl Chain {
             serde_json::json!({"signature":pending.signature,"accepted":accepted,"failed":failed,
             "expired_without_execution":expired_without_execution,"staging_account":pending.staging_account,
             "balance":synced.state.balance()?,"pending_cleared":true,
-            "staging_recovery_required":operation.staging.exists(),"withdrawal":withdrawal}),
+            "staging_recovery_required":operation.staging.exists(),"withdrawal":withdrawal,"sync":synced.scan}),
         )
     }
 
@@ -1589,6 +1596,71 @@ mod recovery_tests {
                 .unwrap()
                 .to_string()
                 .contains("discontinuous"));
+        }
+    }
+
+    #[test]
+    fn private_pending_resolution_extends_authenticated_checkpoint_without_genesis_rescan() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let (wallet, mut checkpoint, chain) =
+            cached_fixture(6, vec![block(4, 3), block(6, 4)], vec![6]);
+        let signature = Signature::from([11; 64]).to_string();
+        checkpoint.accepted.insert(signature.clone());
+        cache::write(&operation.scan_cache, &wallet, &checkpoint).unwrap();
+        let pending = Pending {
+            network: wallet.network.clone(),
+            signature: signature.clone(),
+            staging_account: Pubkey::new_unique().to_string(),
+            last_valid_block_height: 100,
+            withdrawal: None,
+        };
+        write_private_new(&operation.pending, &serde_json::to_vec(&pending).unwrap()).unwrap();
+        let resolution = chain.resolve(&wallet, &operation).unwrap();
+        assert_eq!(resolution["signature"], signature);
+        assert_eq!(resolution["accepted"], true);
+        assert_eq!(resolution["sync"]["cache_used"], true);
+        assert_eq!(resolution["sync"]["blocks_fetched"], 1);
+        assert!(!operation.pending.exists());
+        assert_eq!(cache::read(&operation.scan_cache, &wallet).unwrap().slot, 6);
+    }
+
+    #[test]
+    fn pending_resolution_preserves_journal_on_rpc_rollback_and_missing_withdrawal_history() {
+        for withdrawal in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let (wallet, mut checkpoint, chain) = if withdrawal {
+                cached_fixture(6, vec![block(6, 4)], vec![6])
+            } else {
+                cached_fixture(3, vec![], vec![])
+            };
+            let signature = Signature::from([12; 64]).to_string();
+            checkpoint.accepted.insert(signature.clone());
+            cache::write(&operation.scan_cache, &wallet, &checkpoint).unwrap();
+            let pending = Pending {
+                network: wallet.network.clone(),
+                signature,
+                staging_account: Pubkey::new_unique().to_string(),
+                last_valid_block_height: 100,
+                withdrawal: withdrawal.then(|| crate::payments::WithdrawalReceipt {
+                    recipient: Pubkey::new_unique().to_string(),
+                    amount: 10,
+                    sponsor: Pubkey::new_unique().to_string(),
+                }),
+            };
+            let original = serde_json::to_vec(&pending).unwrap();
+            write_private_new(&operation.pending, &original).unwrap();
+            let error = chain.resolve(&wallet, &operation).unwrap_err().to_string();
+            assert!(
+                error.contains(if withdrawal {
+                    "discontinuous"
+                } else {
+                    "behind the verified"
+                }),
+                "{error}"
+            );
+            assert_eq!(fs::read(&operation.pending).unwrap(), original);
         }
     }
 

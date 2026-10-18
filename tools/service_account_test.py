@@ -17,6 +17,7 @@ class ServiceIsolationTests(unittest.TestCase):
         self.assertEqual(config['UserName'],'_nativepay')
         self.assertEqual(config['GroupName'],'_nativepay')
         self.assertEqual(config['ProgramArguments'][:2],['/usr/bin/python3','-I'])
+        self.assertEqual(config['ProgramArguments'][-1],'run')
         self.assertEqual(config['Umask'],63)
         self.assertFalse(config['AbandonProcessGroup'])
         self.assertTrue(config['KeepAlive'])

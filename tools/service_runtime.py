@@ -4,6 +4,7 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -90,13 +91,26 @@ def ready(timeout=120):
     raise RuntimeError('service validators not ready')
 
 
-def supervise():
+def supervise(ack_test=False):
+    if ack_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
     children=[None,None];shutdown=threading.Event();ingress=None
     def terminate(*_):shutdown.set()
     signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
     try:
+        test_deadline=None
+        if ack_test:
+            from service_tls import private_bytes
+            session=json.loads(private_bytes(ROOT/'gateway-ack-session-022.json',4096))
+            test_deadline=session.get('expires_at')
+            if (set(session)!={'format','expires_at'} or session['format']!='local-gateway-ack-test-v1' or
+                type(test_deadline) not in (float,int) or not math.isfinite(test_deadline) or test_deadline>time.time()+600):
+                raise ValueError('invalid bounded acknowledgement experiment session')
+            if time.time()>=test_deadline:
+                print('Acknowledgement experiment expired; validators kept paused.',flush=True)
+                while not shutdown.wait(5):pass
+                return
         if shutil.disk_usage(ROOT).free<1536*1024*1024:
             print('Service kept paused: less than 1.5 GiB free; private state retained.',flush=True)
             while not shutdown.wait(5):pass
@@ -107,16 +121,16 @@ def supervise():
         save(ROOT/'service-instance.json',{'supervisor':os.getpid(),'validators':[p.pid for p in children],'started_at':time.time(),'uid':os.getuid(),'gid':os.getgid(),'process_groups':[os.getpgid(p.pid) for p in children]})
         if (ROOT/'ingress-setup.json').exists():
             from service_ingress import Ingress
-            if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':ingress=Ingress()
+            if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':ingress=Ingress(ack_test=True) if ack_test else Ingress()
         while not shutdown.wait(1):
             if any(p.poll() is not None for p in children):raise RuntimeError('owned validator exited; restart the coordinated service group')
             if ingress is not None and not ingress.healthy():raise RuntimeError('wallet ingress worker exited; restart original service group')
-            if shutil.disk_usage(ROOT).free<1024*1024*1024:
+            if shutil.disk_usage(ROOT).free<1024*1024*1024 or (test_deadline is not None and time.time()>=test_deadline):
                 # Stop writers, then wait without a launchd restart/write loop.
                 if ingress is not None:ingress.close();ingress=None
                 for i in [1,0]:
                     if children[i].poll() is None:stop(ROOT,i)
-                print('Service paused at low-disk guard; private state retained.',flush=True)
+                print('Service paused at disk/test-duration guard; private state retained.',flush=True)
                 while not shutdown.wait(5):pass
                 return
     finally:
@@ -230,9 +244,12 @@ def test_finish():
 
 if __name__=='__main__':
     action=sys.argv[1] if len(sys.argv)>=2 else ''
-    if (action!='client-export' and len(sys.argv)!=2) or (action=='client-export' and (len(sys.argv)!=3 or sys.argv[2] not in ('alice','bob'))):raise ValueError('unexpected service arguments')
+    if action in ('client-export','ack-arm'):
+        if len(sys.argv)!=3 or (action=='client-export' and sys.argv[2] not in ('alice','bob')):raise ValueError('unexpected service arguments')
+    elif len(sys.argv)!=2:raise ValueError('unexpected service arguments')
     if action=='init':output=initialize()
     elif action=='run':output=supervise()
+    elif action=='run-ack-test':output=supervise(ack_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':ready(timeout=4);output={'slots':slots(),'native_state':canonical(),'uid':os.getuid()}
@@ -242,5 +259,11 @@ if __name__=='__main__':
     elif action=='client-export':
         from service_ingress import export_client
         output=export_client(sys.argv[2])
+    elif action=='ack-arm':
+        from service_ingress import arm_ack_gate
+        output=arm_ack_gate(sys.argv[2])
+    elif action=='ack-checkpoint':
+        from service_ingress import ack_checkpoint
+        output=ack_checkpoint()
     else:raise ValueError('unknown sealed service action')
     if output is not None:print(json.dumps(output,sort_keys=True))

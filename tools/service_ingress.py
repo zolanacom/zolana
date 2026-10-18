@@ -1,6 +1,7 @@
 """Invited desktop-wallet ingress inside the sealed service UID boundary."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import threading
@@ -20,6 +21,8 @@ TLS=OPERATORS/'ingress-tls'
 PROFILE=ROOT/'client-profile.json'
 RPC_PORT=23898
 FAUCET_PORT=13780
+ACK_GATE=ROOT/'gateway-ack-test-022.json'
+ACK_BROADCASTS=ROOT/'gateway-ack-broadcasts-022.json'
 
 
 def public_profile(config,ca=None):
@@ -96,12 +99,90 @@ def export_client(client):
     return {'profile':json.loads(PROFILE.read_text()),'invitation':invitation['invitation'],'invite_id':invitation['invite_id']}
 
 
+def signature(value):
+    if not isinstance(value,str) or not 64<=len(value)<=88 or any(c not in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz' for c in value):
+        raise ValueError('invalid exact test transaction signature')
+    return value
+
+
+def arm_ack_gate(target):
+    signature(target)
+    if os.path.lexists(ACK_GATE):raise ValueError('acknowledgement experiment already started; retain its original record')
+    private(ACK_GATE,json.dumps({'phase':'armed','signature':target,'expires_at':time.time()+180}).encode())
+    return {'phase':'armed','signature':target}
+
+
+def ack_gate():
+    if not os.path.lexists(ACK_GATE):return None
+    from service_tls import private_bytes
+    gate=json.loads(private_bytes(ACK_GATE,4096))
+    signature(gate.get('signature'))
+    if gate.get('phase') not in ('armed','held') or type(gate.get('expires_at')) not in (int,float):raise ValueError('invalid private test gate')
+    return gate
+
+
+class FinalityGateGateway(Gateway):
+    """Only selected by the temporary administrator-owned run-ack-test job."""
+    def __init__(self,faucet):
+        self.gate_lock=threading.Lock();self.release=threading.Event()
+        ack_gate()  # Unsafe existing controls fail before opening a listener.
+        super().__init__(faucet)
+
+    def forward(self,raw):
+        query=json.loads(raw);attempt=None
+        if query.get('method')=='sendTransaction':
+            with self.gate_lock:
+                log=self.broadcasts()
+                if len(log['attempts'])>=256:raise ValueError('bounded test broadcast log exhausted')
+                attempt=len(log['attempts']);log['attempts'].append({'request_sha256':hashlib.sha256(raw).hexdigest(),'signature':None})
+                save(ACK_BROADCASTS,log)  # Count even a failed/interrupted attempt.
+        result=super().forward(raw)
+        if attempt is not None:
+            with self.gate_lock:
+                log=self.broadcasts();log['attempts'][attempt]['signature']=json.loads(result).get('result')
+                save(ACK_BROADCASTS,log)
+        if query.get('method')!='getSignatureStatuses':return result
+        held=False
+        with self.gate_lock:
+            gate=ack_gate()
+            if gate and gate['phase']=='armed' and time.time()<gate['expires_at']:
+                for target,status in zip(query.get('params',[[]])[0],json.loads(result).get('result',{}).get('value',[])):
+                    if target==gate['signature'] and status and status.get('confirmationStatus')=='finalized' and status.get('err') is None:
+                        gate.update(phase='held',response_sha256=hashlib.sha256(result).hexdigest(),finalized_slot=status['slot'])
+                        save(ACK_GATE,gate);held=True;break
+        if held:
+            self.release.wait(60)
+            # Never return this selected acknowledgement, including on timeout.
+            raise OSError('local test withheld the original finalized acknowledgement')
+        return result
+
+    def broadcasts(self):
+        if not os.path.lexists(ACK_BROADCASTS):return {'attempts':[]}
+        from service_tls import private_bytes
+        log=json.loads(private_bytes(ACK_BROADCASTS,65536))
+        if set(log)!={'attempts'} or not isinstance(log['attempts'],list) or len(log['attempts'])>256:raise ValueError('invalid bounded broadcast log')
+        return log
+
+
+def ack_checkpoint():
+    from service_runtime import canonical,slots
+    # A fresh service action has no process-local Unix RPC routes until load.
+    # Initialize them before the first status query, just as ready/canonical do.
+    load(ROOT)
+    gate=ack_gate()
+    if not gate or gate['phase']!='held':raise ValueError('original finalized acknowledgement not held')
+    status=rpc(23899,'getSignatureStatuses',[[gate['signature']],{'searchTransactionHistory':True}])['value'][0]
+    if not status or status.get('confirmationStatus')!='finalized' or status.get('err') is not None:raise ValueError('original signature is not canonically finalized')
+    return {'signature':gate['signature'],'native_state':canonical(),'slots':slots(),'gate':gate}
+
+
 class Ingress:
-    def __init__(self):
+    def __init__(self,ack_test=False):
         check_ready();self.services=[];self.threads=[];self.worker=None;self.faucet=None
         try:
             self.faucet=Faucet(FAUCET_ROOT,PASSWORD,binary=FAUCET)
-            gateway=Gateway(self.faucet)
+            gateway=(FinalityGateGateway if ack_test else Gateway)(self.faucet)
+            self.gateway=gateway
             for port,handler,app,endpoint in [(FAUCET_PORT,FaucetHandler,self.faucet,gateway.info['faucet_audience']),
                 (RPC_PORT,GatewayHandler,gateway,gateway.info['rpc_audience'])]:
                 self.services.append(listener(endpoint,port,handler,app,TLS/'server.crt',TLS/'server.key'))
@@ -113,6 +194,7 @@ class Ingress:
     def healthy(self):return self.worker is not None and self.worker.is_alive() and all(t.is_alive() for t in self.threads)
 
     def close(self):
+        if getattr(self,'gateway',None) is not None and isinstance(self.gateway,FinalityGateGateway):self.gateway.release.set()
         if self.faucet:self.faucet.close()
         for index,server in reversed(list(enumerate(self.services))):
             if index<len(self.threads):server.shutdown()
