@@ -25,6 +25,8 @@ class GatewayTests(unittest.TestCase):
             faucet=Faucet()
             def history_blocks(self, request, slots):
                 calls.append(('history',slots)); return json.dumps({'result':slots}).encode()
+            def retained_history(self, request):
+                calls.append(('retained',request['params'])); return b'{"result":null}'
             def forward(self, raw):
                 calls.append(('forward',json.loads(raw)))
                 return b'{"jsonrpc":"2.0","id":1,"result":"genuine-upstream"}'
@@ -91,6 +93,21 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(code,403);self.assertFalse(any(c[0] in ('forward','history') for c in calls))
         code,_,calls=self.request(request,None)
         self.assertEqual(code,403);self.assertFalse(any(c[0]=='history' for c in calls))
+
+    def test_retained_pages_require_original_authorization_and_never_rewrite_canonical_methods(self):
+        request=dict(jsonrpc='2.0',id=1,method='getWalletRetainedHistory',params=[0,100,None])
+        header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
+        self.assertEqual(self.request(request)[0],403)
+        code,_,calls=self.request(request,header)
+        self.assertEqual(code,200)
+        self.assertEqual([c[0] for c in calls],['ingress','authorize','retained'])
+        self.assertEqual(self.request(request,header,limit=True)[0],429)
+        for params in [[],[0,100],[0,True,None],[-1,100,None],[0,100,'../file'],[0,100,{'segments':1,'sha256':'a'*64,'path':'outside'}]]:
+            code,_,calls=self.request(dict(request,params=params),header)
+            self.assertEqual(code,403);self.assertFalse(any(c[0]=='retained' for c in calls))
+        for method in ['getBlocks','getBlock','getTransaction','getSignatureStatuses']:
+            code,_,calls=self.request(dict(request,method=method,params=[]),header)
+            self.assertEqual(code,200);self.assertEqual(calls[-1][0],'forward')
 
     def test_history_aggregation_fixes_encoding_finality_and_refuses_missing_or_oversized_blocks(self):
         gateway=object.__new__(Gateway);queries=[]

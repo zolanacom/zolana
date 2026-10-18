@@ -1,3 +1,4 @@
+mod retained;
 use crate::{
     archive::{Archive, HistoryBlock, Writer},
     cache::{self, Checkpoint},
@@ -56,6 +57,7 @@ pub struct Synced {
     pub slot: u64,
     pub block_height: u64,
     accepted_finalizations: BTreeSet<String>,
+    canonical_from_slot: u64,
     withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
     pub scan: ScanStats,
 }
@@ -67,6 +69,7 @@ pub struct ScanStats {
     pub blocks_fetched: usize,
     pub payments_verified: usize,
     pub block_rpc_requests: usize,
+    pub retained_rpc_requests: usize,
     pub fetch_ms: u128,
     pub replay_ms: u128,
     pub setup_ms: u128,
@@ -82,12 +85,26 @@ struct ScanResult {
     block_hash: Option<String>,
     block_height: u64,
     accepted: BTreeSet<String>,
+    canonical_from_slot: u64,
     withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
     scan: ScanStats,
 }
 
 impl ScanResult {
-    fn apply_block(&mut self, mut block: HistoryBlock) -> Result<HistoryBlock> {
+    fn apply_block(&mut self, block: HistoryBlock) -> Result<HistoryBlock> {
+        self.apply_source_block(block, true)
+    }
+
+    fn apply_retained_block(&mut self, block: HistoryBlock) -> Result<HistoryBlock> {
+        self.canonical_from_slot = self.canonical_from_slot.max(block.slot.saturating_add(1));
+        self.apply_source_block(block, false)
+    }
+
+    fn apply_source_block(
+        &mut self,
+        mut block: HistoryBlock,
+        canonical: bool,
+    ) -> Result<HistoryBlock> {
         if block.slot <= self.slot
             || block.parent_slot != self.slot
             || self
@@ -158,7 +175,7 @@ impl ScanResult {
                     data: ix.data.clone(),
                 };
                 if let Some(accepted) = self.replay.apply_verified(&instruction, block.slot)? {
-                    if let Some(withdrawal) = accepted.withdrawal() {
+                    if let Some(withdrawal) = accepted.withdrawal().filter(|_| canonical) {
                         self.withdrawals
                             .insert(tx.signatures[0].to_string(), withdrawal);
                     }
@@ -167,7 +184,7 @@ impl ScanResult {
                         accepted.apply(state)?;
                     }
                 }
-                if ix.data.first() == Some(&3) {
+                if canonical && ix.data.first() == Some(&3) {
                     self.accepted.insert(tx.signatures[0].to_string());
                 }
             }
@@ -190,6 +207,7 @@ impl ScanResult {
                 slot: self.slot,
                 block_height: self.block_height,
                 accepted_finalizations: self.accepted.clone(),
+                canonical_from_slot: self.canonical_from_slot,
                 withdrawals: self.withdrawals.clone(),
                 scan: self.scan.clone(),
             })
@@ -662,6 +680,7 @@ impl Chain {
             block_hash: result.block_hash.clone(),
             block_height: result.block_height,
             accepted: result.accepted.clone(),
+            canonical_from_slot: result.canonical_from_slot,
             replay: result.replay.snapshot(),
         };
         // A cache is optional. Its write failure must not invalidate verified
@@ -722,7 +741,18 @@ impl Chain {
         wallets: &[&WalletKey],
         candidate: Option<Checkpoint>,
         history: Option<&Archive>,
+        writer: Option<&mut Writer>,
+    ) -> Result<ScanResult> {
+        self.scan_source_mode(wallets, candidate, history, writer, true)
+    }
+
+    fn scan_source_mode(
+        &self,
+        wallets: &[&WalletKey],
+        candidate: Option<Checkpoint>,
+        history: Option<&Archive>,
         mut writer: Option<&mut Writer>,
+        allow_remote_retained: bool,
     ) -> Result<ScanResult> {
         if wallets.is_empty()
             || wallets.len() > 64
@@ -788,6 +818,9 @@ impl Chain {
                             checkpoint.block_hash,
                             checkpoint.block_height,
                             checkpoint.accepted,
+                            checkpoint
+                                .canonical_from_slot
+                                .min(checkpoint.slot.saturating_add(1)),
                         ));
                         stats.cache_used = true;
                     }
@@ -797,26 +830,33 @@ impl Chain {
                 stats.cache_reset = Some("checkpoint_unavailable_or_changed".into());
             }
         }
-        let (replay, previous_slot, previous_hash, block_height, accepted_finalizations) =
-            if let Some(cached) = cached {
-                cached
-            } else {
-                (
-                    if let Some(key) = &shared_key {
-                        Replay::from_state(WalletState::with_key(
-                            wallets[0],
-                            pool.rent_floor,
-                            key.clone(),
-                        )?)
-                    } else {
-                        Replay::new(wallets[0], pool.rent_floor)?
-                    },
-                    0,
-                    None,
-                    0,
-                    BTreeSet::new(),
-                )
-            };
+        let (
+            replay,
+            previous_slot,
+            previous_hash,
+            block_height,
+            accepted_finalizations,
+            canonical_from_slot,
+        ) = if let Some(cached) = cached {
+            cached
+        } else {
+            (
+                if let Some(key) = &shared_key {
+                    Replay::from_state(WalletState::with_key(
+                        wallets[0],
+                        pool.rent_floor,
+                        key.clone(),
+                    )?)
+                } else {
+                    Replay::new(wallets[0], pool.rent_floor)?
+                },
+                0,
+                None,
+                0,
+                BTreeSet::new(),
+                0,
+            )
+        };
         let states = if let Some(key) = shared_key {
             wallets
                 .iter()
@@ -839,6 +879,7 @@ impl Chain {
             block_hash: previous_hash,
             block_height,
             accepted: accepted_finalizations,
+            canonical_from_slot,
             withdrawals: BTreeMap::new(),
             scan: stats,
         };
@@ -852,10 +893,22 @@ impl Chain {
                     continue;
                 }
                 result.scan.history_blocks_read += 1;
-                result.apply_block(block)?;
+                result.apply_retained_block(block)?;
             }
         }
         result.scan.setup_ms = setup_started.elapsed().as_millis();
+        // A pinned checkpoint already supplies verified state. Read its recent
+        // canonical suffix directly, including original pending-send receipts.
+        let remote_retained = if allow_remote_retained
+            && self.history_batches
+            && history.is_none()
+            && !result.scan.cache_used
+            && result.slot < target
+        {
+            self.scan_retained(&mut result, target)?
+        } else {
+            false
+        };
         let mut start = result.slot.checked_add(1).ok_or("history slot overflow")?;
         while start <= target {
             let end = start.saturating_add(9999).min(target);
@@ -896,7 +949,7 @@ impl Chain {
                     .into(),
             );
         }
-        if history.is_some() && target != 0 {
+        if (history.is_some() || remote_retained) && target != 0 {
             let header = self.rpc.get_block_with_config(target, RpcBlockConfig {
                 transaction_details:Some(TransactionDetails::None), rewards:Some(false),
                 commitment:Some(CommitmentConfig::finalized()), ..Default::default()
@@ -917,6 +970,9 @@ impl Chain {
         if history.is_some() {
             result.accepted.clear();
             result.withdrawals.clear();
+            result.canonical_from_slot = result
+                .canonical_from_slot
+                .max(history.unwrap().tip().min(target).saturating_add(1));
         }
         Ok(result)
     }
@@ -997,11 +1053,29 @@ impl Chain {
         // Private sends can extend the same authenticated, canonically pinned
         // checkpoint used by normal wallet sync. Withdrawal intent still needs
         // full receipt replay: that recipient/amount map is not cached.
-        let synced = if pending.withdrawal.is_none() {
+        let mut synced = if pending.withdrawal.is_none() {
             self.sync_cached(wallet, operation)?
         } else {
             self.sync(wallet)?
         };
+        let statuses = self.rpc.get_signature_statuses_with_history(&[signature])?;
+        let failed = statuses
+            .value
+            .first()
+            .and_then(Option::as_ref)
+            .is_some_and(|status| {
+                status.satisfies_commitment(CommitmentConfig::finalized()) && status.err.is_some()
+            });
+        if !synced.accepted_finalizations.contains(&pending.signature)
+            && !failed
+            && synced.canonical_from_slot != 0
+        {
+            // Recover old/retained-derived checkpoints when a full canonical
+            // archive is available. Never substitute ciphertext metadata here.
+            synced = self.scan_source_mode(&[wallet], None, None, None, false)
+                .map_err(|_| "canonical full RPC history is required; retained ciphertexts and checkpoints cannot prove absence; pending record retained")?
+                .finish().pop().ok_or("missing canonical recovery state")?;
+        }
         let accepted = synced.accepted_finalizations.contains(&pending.signature);
         let withdrawal = synced.withdrawals.get(&pending.signature).cloned();
         if accepted
@@ -1012,14 +1086,6 @@ impl Chain {
         {
             return Err("canonical withdrawal differs from the saved recipient/amount/sponsor intent; pending record retained".into());
         }
-        let statuses = self.rpc.get_signature_statuses_with_history(&[signature])?;
-        let failed = statuses
-            .value
-            .first()
-            .and_then(Option::as_ref)
-            .is_some_and(|status| {
-                status.satisfies_commitment(CommitmentConfig::finalized()) && status.err.is_some()
-            });
         let expired_without_execution =
             !accepted && !failed && synced.block_height > pending.last_valid_block_height;
         if !accepted && !failed && !expired_without_execution {
@@ -1520,6 +1586,7 @@ mod recovery_tests {
             block_hash: Some(bs58::encode([4; 32]).into_string()),
             block_height: 4,
             accepted: BTreeSet::new(),
+            canonical_from_slot: 0,
             replay: replay.snapshot(),
         };
         let mut mocks = MocksMap::from_iter([
@@ -1601,6 +1668,148 @@ mod recovery_tests {
                 assert!(result.is_err(), "invalid batch mode {mode} accepted");
             }
         }
+    }
+
+    #[test]
+    fn remote_pages_pin_identity_cursor_continuity_and_live_header() {
+        for mode in 0..11 {
+            let (wallet, _, mut chain) = cached_fixture(2, vec![], vec![]);
+            chain.history_batches = true;
+            let token = json!({"segments":1,"sha256":"a".repeat(64)});
+            let compact = |slot, parent| {
+                serde_json::to_value(
+                    HistoryBlock::from_rpc(
+                        slot,
+                        serde_json::from_value(block(slot, parent)).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            };
+            let page = |after, slot, complete| {
+                json!({"network":wallet.network,"checkpoint":token,"retained_tip":2,
+                "after_slot":after,"through_slot":2,"next_slot":slot,"complete":complete,"blocks":[compact(slot,after)]})
+            };
+            let mut first = page(0, 1, false);
+            let mut second = page(1, 2, true);
+            match mode {
+                1 => second["checkpoint"]["sha256"] = json!("b".repeat(64)),
+                2 => first["network"]["network"][0] = json!(99),
+                3 => first["blocks"] = json!([]),
+                4 => second["blocks"][0]["parent_slot"] = json!(0),
+                5 => first["next_slot"] = json!(2),
+                6 => first["complete"] = json!(true),
+                7 => second = serde_json::Value::Null,
+                8 => first["blocks"][0]["slot"] = json!(3),
+                9 => first["extra"] = json!("denied"),
+                _ => (),
+            }
+            let pool = Replay::new(&wallet, 1000).unwrap().state.pool.encode();
+            chain.rpc = RpcClient::new_mock_with_mocks_map(
+                "succeeds",
+                MocksMap::from_iter([
+                    (
+                        RpcRequest::GetAccountInfo,
+                        json!({"context":{"slot":2},"value":{
+                    "lamports":1000,"owner":id().to_string(),"executable":false,"rentEpoch":0,
+                    "data":[bs58::encode(pool).into_string(),"base58"]}}),
+                    ),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletRetainedHistory",
+                        },
+                        first,
+                    ),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletRetainedHistory",
+                        },
+                        second,
+                    ),
+                    (
+                        RpcRequest::GetBlock,
+                        block(if mode == 10 { 3 } else { 2 }, 1),
+                    ),
+                ]),
+            );
+            let scanned = chain.scan(&[&wallet], None);
+            if mode == 0 {
+                let scanned = scanned.unwrap();
+                assert_eq!(scanned.slot, 2);
+                assert_eq!(scanned.canonical_from_slot, 3);
+                assert_eq!(scanned.scan.history_blocks_read, 2);
+                assert_eq!(scanned.scan.retained_rpc_requests, 2);
+                assert!(scanned.accepted.is_empty());
+            } else {
+                assert!(scanned.is_err(), "invalid retained mode {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn retained_and_legacy_checkpoints_cannot_clear_unknown_expired_payments() {
+        for canonical_from_slot in [5, u64::MAX] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let (wallet, mut checkpoint, chain) =
+                cached_fixture(6, vec![block(4, 3), block(6, 4)], vec![6]);
+            checkpoint.canonical_from_slot = canonical_from_slot;
+            cache::write(&operation.scan_cache, &wallet, &checkpoint).unwrap();
+            let pending = Pending {
+                network: wallet.network.clone(),
+                signature: Signature::from([12; 64]).to_string(),
+                staging_account: Pubkey::new_unique().to_string(),
+                last_valid_block_height: 0,
+                withdrawal: None,
+            };
+            let original = serde_json::to_vec(&pending).unwrap();
+            write_private_new(&operation.pending, &original).unwrap();
+            let error = chain.resolve(&wallet, &operation).unwrap_err().to_string();
+            assert!(error.contains("cannot prove absence"), "{error}");
+            assert_eq!(fs::read(&operation.pending).unwrap(), original);
+            assert!(
+                cache::read(&operation.scan_cache, &wallet)
+                    .unwrap()
+                    .canonical_from_slot
+                    > 0
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_unknown_outcome_recovers_with_a_complete_canonical_rescan() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let (wallet, mut checkpoint, mut chain) = cached_fixture(6, vec![], vec![]);
+        checkpoint.canonical_from_slot = u64::MAX;
+        cache::write(&operation.scan_cache, &wallet, &checkpoint).unwrap();
+        let pool = Replay::new(&wallet, 1000).unwrap().state.pool.encode();
+        let account = json!({"context":{"slot":6},"value":{"lamports":1000,"owner":id().to_string(),"executable":false,"rentEpoch":0,"data":[bs58::encode(pool).into_string(),"base58"]}});
+        chain.rpc = RpcClient::new_mock_with_mocks_map(
+            "succeeds",
+            MocksMap::from_iter([
+                (RpcRequest::GetAccountInfo, account.clone()),
+                (RpcRequest::GetAccountInfo, account),
+                (RpcRequest::GetBlocks, json!([6])),
+                (RpcRequest::GetBlocks, json!([2, 6])),
+                (RpcRequest::GetBlock, block(4, 3)),
+                (RpcRequest::GetBlock, block(6, 4)),
+                (RpcRequest::GetBlock, block(2, 0)),
+                (RpcRequest::GetBlock, block(6, 2)),
+            ]),
+        );
+        let pending = Pending {
+            network: wallet.network.clone(),
+            signature: Signature::from([12; 64]).to_string(),
+            staging_account: Pubkey::new_unique().to_string(),
+            last_valid_block_height: 0,
+            withdrawal: None,
+        };
+        write_private_new(&operation.pending, &serde_json::to_vec(&pending).unwrap()).unwrap();
+        let resolved = chain.resolve(&wallet, &operation).unwrap();
+        assert_eq!(resolved["expired_without_execution"], true);
+        assert!(!operation.pending.exists());
+        assert_eq!(resolved["sync"]["cache_used"], false);
     }
 
     #[test]

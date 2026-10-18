@@ -13,7 +13,7 @@ import urllib.request
 from test_faucet import BoundedServer, Faucet
 
 METHODS = {
-    "getWalletHistoryBlocks",
+    "getWalletHistoryBlocks", "getWalletRetainedHistory",
     "getGenesisHash", "getHealth", "getVersion", "getAccountInfo", "getMultipleAccounts",
     "getBlocks", "getBlock", "getBlockHeight", "getSlot", "getEpochInfo", "getBalance",
     "getSignaturesForAddress", "getSignatureStatuses", "getTransaction", "getLatestBlockhash",
@@ -27,7 +27,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Gateway:
-    def __init__(self, faucet):
+    def __init__(self, faucet, history_root=None):
         self.faucet = faucet
         self.info = faucet.command("access-info")
         if self.info.get("invite_required") is not True:
@@ -47,6 +47,16 @@ class Gateway:
         result = self.forward(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getGenesisHash"}).encode())
         if json.loads(result).get("result") != self.info["network"]["genesis_hash"]:
             raise ValueError("upstream genesis mismatch")
+
+        self.history = None
+        if history_root is not None:
+            from gateway_history import History
+            self.history = History(history_root, self.info['network'])
+
+    def retained_history(self, request):
+        if self.history is None:
+            return json.dumps({'jsonrpc':'2.0','id':request['id'],'result':None}).encode()
+        return self.history.page(request)
 
     def forward(self, raw, timeout=15):
         if self.operator is not None:return self.operator.forward(raw, timeout=timeout)
@@ -112,13 +122,17 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(request, dict) or set(request) - {"jsonrpc", "id", "method", "params"} or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str) or request["method"] not in METHODS or type(request.get("id")) not in (str, int) or len(str(request["id"])) > 64 or (request.get("params") is not None and not isinstance(request["params"], list)):
                 raise ValueError("RPC method or envelope denied")
             if request["method"] != "getGenesisHash":
+                if request['method'] == 'getWalletRetainedHistory':
+                    from gateway_history import parameters
+                    parameters(request)
                 slots = history_slots(request) if request["method"] == "getWalletHistoryBlocks" else None
                 header = self.headers.get("X-Testnet-Access", "")
                 if not 1 <= len(header) <= 3072:
                     raise ValueError("invitation required")
                 proof = json.loads(base64.b64decode(header + "=" * (-len(header) % 4), altchars=b"-_", validate=True))
                 self.server.app.faucet.command("authorize", proof)
-            data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
+            if request['method'] == 'getWalletRetainedHistory':data = self.server.app.retained_history(request)
+            else:data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
         except (ValueError, RecursionError, OSError, urllib.error.URLError, subprocess.SubprocessError) as error:
             code = 429 if "quota exhausted" in str(error) else 403
             data = json.dumps({"error": "request_limit" if code == 429 else "access_denied"}).encode()
@@ -143,12 +157,13 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--password-file", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18898)
+    parser.add_argument("--history",type=Path,help="operator-configured retained mirror; never supplied by a client")
     parser.add_argument("--tls-cert",type=Path)
     parser.add_argument("--tls-key",type=Path)
     args = parser.parse_args()
     # Reuse the bounded, owner-only operator service interface; no worker starts here.
     faucet = Faucet(args.root, args.password_file)
-    app = Gateway(faucet)
+    app = Gateway(faucet,history_root=args.history)
     from service_tls import listener
     server=listener(app.info['rpc_audience'],args.port,Handler,app,args.tls_cert,args.tls_key)
     try:

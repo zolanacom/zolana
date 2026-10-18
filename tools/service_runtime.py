@@ -91,8 +91,8 @@ def ready(timeout=120):
     raise RuntimeError('service validators not ready')
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False):
-    if ack_test or package_test or browser_test or restore_test or retention_test:os.nice(10)
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False):
+    if ack_test or package_test or browser_test or restore_test or retention_test or history_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
     children=[None,None];shutdown=threading.Event();ingress=None;retention=None
@@ -121,10 +121,10 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
 
     try:
         test_deadline=None
-        if ack_test or package_test or browser_test or restore_test or retention_test:
+        if ack_test or package_test or browser_test or restore_test or retention_test or history_test:
             from service_tls import private_bytes
-            session_name='history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
@@ -286,6 +286,7 @@ if __name__=='__main__':
     elif action=='run-browser-test':output=supervise(browser_test=True)
     elif action=='run-restore-test':output=supervise(restore_test=True)
     elif action=='run-retention-test':output=supervise(retention_test=True)
+    elif action=='run-history-test':output=supervise(history_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':
@@ -293,6 +294,18 @@ if __name__=='__main__':
         from history_retention import read
         output={'slots':slots(),'native_state':canonical(),'uid':os.getuid(),
             'history_retention':json.loads(read(ROOT/'history-retention.json',8192)) if (ROOT/'history-retention.json').exists() else {'phase':'starting'}}
+    elif action=='history-check':
+        from test_faucet import Faucet
+        from testnet_gateway import Gateway
+        load(ROOT)
+        faucet=Faucet(ROOT/'faucet',OPERATORS/'faucet.password',binary=BASE/'target/debug/native-faucet')
+        try:
+            gateway=Gateway(faucet,history_root=ROOT/'recovery-history-mirror')
+            raw=gateway.retained_history({'jsonrpc':'2.0','id':1,'params':[0,2**64-1,None]})
+            page=json.loads(raw)['result']
+            output={'blocks':len(page['blocks']),'retained_tip':page['retained_tip'],
+                'checkpoint':page['checkpoint'],'response_sha256':hashlib.sha256(raw).hexdigest()}
+        finally:faucet.close()
     elif action=='history-status':
         from history_retention import read
         output=json.loads(read(ROOT/'history-retention.json',8192))

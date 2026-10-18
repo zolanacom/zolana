@@ -1,0 +1,11 @@
+# Invited retained ciphertext history
+
+The gateway serves a distinct `getWalletRetainedHistory` method from its fixed owner-only mirror. It never replaces canonical `getBlock`, `getBlocks`, `getTransaction`, signature statuses or block heights with retained metadata. Existing invitation authorization and durable request/ingress accounting protect every retained page.
+
+Requests contain `[after_slot, target_slot, checkpoint_or_null]`. A page contains at most 16 produced blocks and 16 MiB, within a 15-second server deadline and existing 8 MiB-record/32 MiB-segment bounds. A checkpoint identifies a prefix of immutable manifest descriptors by segment count and canonical SHA-256. It can be reconstructed from a later append-only manifest after gateway restart; no in-memory cursor session or caller file path is used. Wrong identity, changed/missing references and malformed or oversized pages fail closed. No configured archive or an empty initial archive returns null so ordinary complete RPC history can be used.
+
+The native wallet automatically replays this prefix for fresh invited scans, verifies all transaction signatures, staging authorization and payment proofs, then reads the recent canonical RPC suffix and checks the actual finalized header and complete pool. A verified cached checkpoint reads its canonical recent suffix directly, preserving original pending-send inclusion checks and avoiding repeated genesis recovery.
+
+Encrypted checkpoints record the start of their continuously canonical coverage. Retained records cannot add canonical inclusion/withdrawal receipts or establish absence. Legacy cache provenance defaults to unknown, rather than claiming complete canonical history. When an unknown pending outcome needs absence evidence, the wallet attempts an explicitly canonical complete scan without retained pages; if unavailable it keeps the original journal. Known canonical accepted/failed outcomes retain their normal behavior. No new payment is authorized by a retry of recovery.
+
+The configured RPC/consensus and genesis remain trusted. Checksums and retained block metadata are not independent consensus proofs. Same-disk mirrors do not cover host loss; off-host retention and operational alerts remain release work.

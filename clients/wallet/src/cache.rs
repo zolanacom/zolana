@@ -30,7 +30,15 @@ pub(crate) struct Checkpoint {
     pub block_hash: Option<String>,
     pub block_height: u64,
     pub accepted: BTreeSet<String>,
+    // Legacy checkpoints lack source provenance. Their absence assertions are
+    // deliberately unknown until a fresh complete canonical scan is available.
+    #[serde(default = "unknown_provenance")]
+    pub canonical_from_slot: u64,
     pub replay: ReplaySnapshot,
+}
+
+fn unknown_provenance() -> u64 {
+    u64::MAX
 }
 
 pub(crate) fn read(path: &Path, wallet: &WalletKey) -> Result<Checkpoint> {
@@ -70,6 +78,8 @@ pub(crate) fn read(path: &Path, wallet: &WalletKey) -> Result<Checkpoint> {
     let checkpoint: Checkpoint = serde_json::from_slice(&plain)?;
     if checkpoint.network != wallet.network
         || checkpoint.address != wallet.address_text()
+        || (checkpoint.canonical_from_slot != u64::MAX
+            && checkpoint.canonical_from_slot > checkpoint.slot.saturating_add(1))
         || (checkpoint.slot == 0) != checkpoint.block_hash.is_none()
         || checkpoint.block_hash.as_ref().is_some_and(|hash| {
             bs58::decode(hash)
@@ -144,9 +154,33 @@ mod tests {
             block_hash: Some(bs58::encode([17; 32]).into_string()),
             block_height: 40,
             accepted: BTreeSet::from(["private-cache-test-marker".into()]),
+            canonical_from_slot: 0,
             replay: Replay::new(&wallet, 1000).unwrap().snapshot(),
         };
         (wallet, checkpoint)
+    }
+
+    #[test]
+    fn legacy_checkpoint_source_is_unknown_and_new_provenance_roundtrips() {
+        let (_, mut checkpoint) = fixture();
+        let mut legacy = serde_json::to_value(&checkpoint).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("canonical_from_slot");
+        assert_eq!(
+            serde_json::from_value::<Checkpoint>(legacy)
+                .unwrap()
+                .canonical_from_slot,
+            u64::MAX
+        );
+        checkpoint.canonical_from_slot = 43;
+        assert_eq!(
+            serde_json::from_slice::<Checkpoint>(&serde_json::to_vec(&checkpoint).unwrap())
+                .unwrap()
+                .canonical_from_slot,
+            43
+        );
     }
 
     #[test]

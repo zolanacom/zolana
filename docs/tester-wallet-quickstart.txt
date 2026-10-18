@@ -41,6 +41,12 @@ Check previous payment resolves the original signed payment; it does not send
 another payment. It can extend an authenticated checkpoint for private sends.
 If the network is offline or behind the verified checkpoint, the original
 pending journal stays in place. Retry recovery when the network is healthy.
+A new-device restore can fetch verified retained history through the invited
+gateway; you do not need an operator history folder. Use the matching updated
+wallet/gateway build. Retained data can recover balances but cannot prove an
+unknown payment executed or never executed. Recovery tries complete canonical
+RPC history when needed; if unavailable, keep the pending file and ask the local
+operator for archival RPC recovery. Never send a replacement as a recovery step.
 
 This package has no operator sponsor. It receives native private payments,
 sends privately and withdraws with user-paid fees after its separate public fee
