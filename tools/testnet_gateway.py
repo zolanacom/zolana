@@ -108,8 +108,6 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("RPC method or envelope denied")
             if request["method"] != "getGenesisHash":
                 slots = history_slots(request) if request["method"] == "getWalletHistoryBlocks" else None
-                if slots and len(slots) > 1:
-                    self.server.app.faucet.ingress("rpc", self.client_address[0], len(slots) - 1)
                 header = self.headers.get("X-Testnet-Access", "")
                 if not 1 <= len(header) <= 3072:
                     raise ValueError("invitation required")

@@ -83,9 +83,9 @@ class GatewayTests(unittest.TestCase):
         header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
         code,body,calls=self.request(request,header)
         self.assertEqual(code,200); self.assertEqual(body['result'],list(range(1,17)))
-        self.assertEqual(calls[1],('ingress','rpc','127.0.0.1',15))
-        self.assertEqual(calls[2],('authorize',{'signature':'valid'},['--units','16']))
-        self.assertEqual([c[0] for c in calls],['ingress','ingress','authorize','history'])
+        self.assertEqual(calls[0],('ingress','rpc','127.0.0.1'))
+        self.assertEqual(calls[1],('authorize',{'signature':'valid'},['--units','16']))
+        self.assertEqual([c[0] for c in calls],['ingress','authorize','history'])
         for params in [None,[],[[]],[[0]],[[True]],[[1,1]],[[2,1]],[[2**64]],[[1.0]],[list(range(1,18))],[[1],{'commitment':'processed'}]]:
             code,_,calls=self.request(dict(request,params=params),header)
             self.assertEqual(code,403);self.assertFalse(any(c[0] in ('forward','history') for c in calls))

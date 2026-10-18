@@ -59,16 +59,7 @@ fn run() -> Result<()> {
             options.get("--bind-fee").cloned(),
         )?,
         "invite-revoke" => access::revoke(root, get("--invite-id")?)?,
-        "edge" => access::edge_units(
-            root,
-            get("--channel")?,
-            get("--peer")?,
-            options
-                .get("--units")
-                .map(|s| s.parse())
-                .transpose()?
-                .unwrap_or(1),
-        )?,
+        "edge" => access::edge(root, get("--channel")?, get("--peer")?)?,
         "accept" | "join" | "access-status" | "authorize" => {
             let raw = std::fs::read(get("--request-file")?)?;
             if raw.len() > 4096 {

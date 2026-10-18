@@ -49,9 +49,9 @@ class Faucet:
             raise ValueError(result.stderr.strip().removeprefix("Faucet error: "))
         return json.loads(result.stdout)
 
-    def ingress(self, channel, peer, units=1):
+    def ingress(self, channel, peer):
         if self.required:
-            self.command("edge", extra=["--channel", channel, "--peer", peer, "--units", str(units)])
+            self.command("edge", extra=["--channel", channel, "--peer", peer])
 
     def access_action(self, path, data):
         if not self.required or not isinstance(data, dict):

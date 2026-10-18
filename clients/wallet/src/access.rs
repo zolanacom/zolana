@@ -619,9 +619,6 @@ fn authorize_units_at(root: &Path, proof: Proof, time: u64, units: u64) -> Resul
     Ok(json!({"authorized":true}))
 }
 pub fn edge(root: &Path, channel: &str, peer: &str) -> Result<Value> {
-    edge_units(root, channel, peer, 1)
-}
-pub fn edge_units(root: &Path, channel: &str, peer: &str, units: u64) -> Result<Value> {
     let _lock = lock(root)?;
     let mut state = load(root)?;
     let time = clock(&mut state, now()?)?;
@@ -652,11 +649,9 @@ pub fn edge_units(root: &Path, channel: &str, peer: &str, units: u64) -> Result<
             });
             state.edge.len() - 1
         };
-        state.edge[index].bucket.take_units(
-            time / 60,
-            if name == "global" { limit * 2 } else { limit },
-            units,
-        )?;
+        state.edge[index]
+            .bucket
+            .take(time / 60, if name == "global" { limit * 2 } else { limit })?;
     }
     save(root, &state)?;
     Ok(json!({"allowed":true}))
@@ -757,16 +752,6 @@ mod tests {
             20
         );
         assert!(authorize_units_at(&root, proof(), time, 1).is_err());
-        edge_units(&root, "rpc", "127.0.0.1", 1).unwrap();
-        edge_units(&root, "rpc", "127.0.0.1", 15).unwrap();
-        assert!(load(&root)
-            .unwrap()
-            .edge
-            .iter()
-            .all(|e| e.bucket.count == 16));
-        let original = fs::read(root.join(STATE)).unwrap();
-        assert!(edge_units(&root, "rpc", "127.0.0.1", 17).is_err());
-        assert_eq!(fs::read(root.join(STATE)).unwrap(), original);
         let id = load(&root).unwrap().invitations[0].id.clone();
         revoke(&root, &id).unwrap();
         assert!(authorize_units_at(&root, proof(), time + 60, 16).is_err());
