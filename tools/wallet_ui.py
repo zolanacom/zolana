@@ -11,7 +11,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from localnet import PROJECT, load, quiet, start, stop, wait_rpc
+PROJECT = Path(__file__).resolve().parents[1]
+
+
+def load(root):
+    from localnet import load as load_fixture
+    return load_fixture(root)
 
 ASSETS = PROJECT / "clients/wallet-ui"
 WALLET = PROJECT / "target/debug/native-wallet"
@@ -20,6 +25,9 @@ WALLET = PROJECT / "target/debug/native-wallet"
 class WalletApp:
     def __init__(self, root, profile="default", rpc_index=0, sponsor_password_file=None):
         self.root = root.resolve()
+        self.tester = False
+        self.network_file = self.root / "network.json"
+        self.binary = WALLET
         if not self.root.is_relative_to(PROJECT / ".data"):
             raise ValueError("wallet UI requires a local .data fixture")
         config = load(self.root)
@@ -38,6 +46,12 @@ class WalletApp:
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or not 12 <= metadata.st_size <= 1024:
                     raise ValueError("sponsor password file must be bounded and owner-only")
             self.sponsor_password_file = path
+        self._storage(profile)
+        if type(rpc_index) is not int or rpc_index not in (0, 1):
+            raise ValueError("use one of this fixture's two local RPC peers")
+        self.rpc_index = rpc_index
+
+    def _storage(self, profile):
         if not isinstance(profile, str) or not 1 <= len(profile) <= 24 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in profile):
             raise ValueError("use a short lowercase wallet profile name")
         self.directory = self.root / ("wallet-ui" if profile == "default" else "wallet-ui-" + profile)
@@ -45,19 +59,54 @@ class WalletApp:
         if self.directory.is_symlink() or self.directory.stat().st_mode & 0o077:
             raise ValueError("wallet UI directory must be owner-only")
         self.wallet = self.directory / "wallet.json"
-        if type(rpc_index) is not int or rpc_index not in (0, 1):
-            raise ValueError("use one of this fixture's two local RPC peers")
-        self.rpc_index = rpc_index
         self.backup = self.directory / "recovery.json"
         self.ack = self.directory / "backup-confirmed"
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
 
+    @classmethod
+    def from_profile(cls, network_file, data_directory, profile="default", binary=WALLET):
+        """Standalone client: public configuration only, never a validator root."""
+        result = subprocess.run([str(binary), "profile", "--network", str(network_file)], capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise ValueError(result.stderr.strip().removeprefix("Wallet error: "))
+        config = json.loads(result.stdout)
+        data_directory = Path(data_directory).absolute()
+        if data_directory.is_symlink():
+            raise ValueError("wallet data directory must not be a symlink")
+        data_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = data_directory.stat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+            raise ValueError("wallet data directory must be owner-only")
+        app = cls.__new__(cls)
+        app.root = data_directory.resolve()
+        app.network_file = app.root / "network.json"
+        encoded = (json.dumps(config, sort_keys=True, indent=2) + "\n").encode()
+        try:
+            with os.fdopen(os.open(app.network_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as saved:
+                saved.write(encoded)
+                saved.flush()
+                os.fsync(saved.fileno())
+        except FileExistsError:
+            with os.fdopen(os.open(app.network_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as saved:
+                metadata = os.fstat(saved.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077 or metadata.st_size > 8192 or saved.read(8193) != encoded:
+                    raise ValueError("wallet data is bound to a different profile; preserve it and select its original profile")
+        app.tester = True
+        app.network_label = config["label"]
+        app.private_setup = True
+        app.withdrawal_enabled = True
+        app.faucet_amount = 0
+        app.sponsor_password_file = None
+        app.binary = Path(binary).resolve()
+        app._storage(profile)
+        return app
+
     def status(self):
         return {"exists": self.wallet.exists() or self.backup.exists(), "needs_backup": not self.ack.exists(),
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
-                "network": "Local testnet rehearsal" if self.private_setup else "Local test network", "solana_funding_available": False,
+                "network": self.network_label if self.tester else ("Local testnet rehearsal" if self.private_setup else "Local test network"), "solana_funding_available": False,
                 "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True}
 
     def cli(self, command, password, extra=()):
@@ -65,9 +114,9 @@ class WalletApp:
             raise ValueError("Use a password with at least 12 characters.")
         # Send passwords only through a bounded CLI stdin pipe, never a file,
         # environment variable, command argument, URL or browser storage.
-        args = [str(WALLET), command, "--network", str(self.root / "network.json"),
+        args = [str(self.binary), command, "--network", str(self.network_file),
                 "--wallet", str(self.wallet), "--password-file", "-",
-                "--rpc", f"http://127.0.0.1:{18899+self.rpc_index*1000}", *extra]
+                *([] if self.tester else ["--rpc", f"http://127.0.0.1:{18899+self.rpc_index*1000}"]), *extra]
         history = self.root / "recovery-history"
         if command in {"balance", "deposit", "send", "withdraw"} and (history / "manifest.json").exists():
             args += ["--history", str(history)]
@@ -231,22 +280,33 @@ def serve(app, port, duration):
         server.server_close()
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--root", type=Path)
+    source.add_argument("--network-profile", type=Path)
+    parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--duration", type=int, default=1800)
     parser.add_argument("--start-network", action="store_true")
     parser.add_argument("--profile", default="default")
     parser.add_argument("--rpc-index", type=int, choices=[0, 1], default=0)
     parser.add_argument("--sponsor-password-file", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not 1024 <= args.port <= 65535 or not 60 <= args.duration <= 3600:
         parser.error("use a nonprivileged port and a session of 60..3600 seconds")
-    app = WalletApp(args.root, args.profile, args.rpc_index, args.sponsor_password_file)
+    if args.network_profile:
+        if not args.data_dir or args.start_network or args.sponsor_password_file or args.rpc_index != 0:
+            parser.error("standalone mode requires --data-dir and forbids validator/sponsor options")
+        app = WalletApp.from_profile(args.network_profile, args.data_dir, args.profile, WALLET)
+    else:
+        if args.data_dir:
+            parser.error("--data-dir is only for standalone profiles")
+        app = WalletApp(args.root, args.profile, args.rpc_index, args.sponsor_password_file)
     children = [None, None]
     try:
         if args.start_network:
+            from localnet import quiet, start, stop, wait_rpc
             if all(list((app.root / f"consensus-{index}").glob("tower-*.bin")) for index in [0, 1]):
                 from replay_localnet import prepare
                 prepare(app.root)
@@ -259,3 +319,7 @@ if __name__ == "__main__":
         for index in [1, 0]:
             if children[index] is not None and children[index].poll() is None:
                 stop(app.root, index)
+
+
+if __name__ == "__main__":
+    main()

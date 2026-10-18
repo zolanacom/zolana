@@ -9,3 +9,5 @@ Local modifications to the Agave snapshot register a gated native-payment built-
 Local validator build support also selects the upstream networking patches and release-compatible SDK types through the root lockfile, uses a Cargo-packaged Protocol Buffers compiler, and provides an optional platform-allocator build for paths unsupported by jemalloc. The scheduler benchmark retains its allocator as a development dependency. Compiler-compatibility annotations in ledger, gossip and core code do not change their algorithms.
 
 The feature-set and SVM feature mapping also include a separate gate for recipient-bound native withdrawals. Existing payment activation and historical payloads remain supported; the new gate is enabled explicitly in fresh local genesis. Payment authorization and account movement remain in the independent protocol/adapter modules.
+
+The RPC HTTP sender also returns an ordinary error for unfollowed 3xx responses instead of assuming every non-success status is a reqwest 4xx/5xx error and panicking. The wallet disables redirects explicitly. This does not alter validator consensus.

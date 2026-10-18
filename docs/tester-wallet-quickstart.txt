@@ -1,0 +1,49 @@
+TEST WALLET - LOCAL DEVELOPMENT BUILD
+
+Test coins only. This wallet connects to an independent privacy blockchain.
+It cannot receive SOL or Solana tokens. There is no Solana bridge or trading.
+
+Requirements: the machine/OS named in MANIFEST.json, Python 3.10 or newer,
+and a browser. Rust, a validator, a repository checkout and operator keys
+are not required. The current macOS build is unsigned and not notarized;
+this archive is for local rehearsal, not an installer ready for distribution.
+
+1. Extract the archive. Verify the archive SHA-256 against a checksum received
+   through a trusted channel. A checksum shipped beside an archive does not
+   establish its publisher. Preserve upstream/dependency notices.
+2. In Terminal run:
+     sh start-wallet.command --verify
+     sh start-wallet.command --check
+   The second command checks the configured RPC, genesis, native pool and
+   withdrawal activation without opening your wallet. Loopback profiles need
+   a separately running local test network. HTTPS profiles need the configured
+   testnet RPC; endpoints and genesis are fixed in wallet-profile.json.
+3. Run:
+     sh start-wallet.command
+   Your browser opens a device-local wallet at http://127.0.0.1:8765/.
+   If that port is occupied use --port 8766. The session ends after one hour;
+   restart the same command and unlock to resume. Ctrl-C stops the wallet.
+4. Create a password and save the encrypted recovery file separately from it.
+   Keep both; there is no reset service. You can create/restore while offline;
+   balances and payments require the configured network and retained history.
+
+Wallet data lives outside the archive in your user application-data directory,
+under Zolana Test Wallet and this chain's genesis hash. --data-dir selects
+another owner-only directory. Reuse that directory when updating a bundle.
+Never delete an unfinished payment's files or start a replacement payment to
+resolve an unknown result. Use Check previous payment, then Recover upload rent.
+The launcher refuses to replace a data directory's pinned profile silently.
+
+This package has no operator sponsor. Private sending and test-coin requests
+are currently unavailable in standalone mode. It can receive native private
+payments and withdraw with user-paid fees after its separate public fee account
+has test coins, including upfront refundable upload rent. Ask the test operator
+to provision test balances/gas separately; no automatic public faucet exists.
+
+The wallet service and browser use your password locally. Only RPC traffic
+leaves the device; the seed/password are not sent to RPC. Remote profiles use
+normal certificate-validated HTTPS, no redirects and no proxy auto-discovery.
+The RPC/validator consensus is trusted; this is not a light client. Shielded
+contents are private; public fees, funding/withdrawal amounts and timing are
+visible. This prototype is unaudited; physical phone/Safari and remote hosting
+have not been accepted. Keep recovery files and passwords out of bug reports.

@@ -36,7 +36,14 @@ async function work(label, action) {
   finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); applyAvailability(); touch(); }
 }
 function applyAvailability() {
-  if (session.operator_sponsor_available === false) ['send','fund'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+  if (session.operator_sponsor_available === false) {
+    ['send','fund'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+    const fund = document.getElementById('fund');
+    if (fund && !document.getElementById('availability-note')) {
+      const note = document.createElement('p'); note.id = 'availability-note'; note.className = 'hint';
+      note.textContent = 'This build supports receiving and user-paid withdrawals. Private sending and test coin requests are not enabled yet.'; fund.after(note);
+    }
+  }
 }
 function lock() { if (busy) return; password = ''; address = ''; balance = null; receipt = null; publicAddress = ''; publicBalance = null; minimumPublicWithdrawal = null; welcome(); }
 function touch() { clearTimeout(idle); if (password) idle = setTimeout(lock, 15 * 60 * 1000); }
@@ -134,7 +141,10 @@ function renderDashboard() {
   }
 }
 async function dashboard() {
-  const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null; renderDashboard();
+  try {
+    const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null;
+  } catch (error) { renderDashboard(); throw error; }
+  renderDashboard();
 }
 function receive() {
   setScreen(`<h2>Receive privately</h2><p class="caption">Share this address with someone using this local network.</p><p class="address" id="address"></p><button class="primary" id="copy">Copy receiving address</button><button class="secondary" id="back">Back to wallet</button><p class="hint">This is a private address for this chain. It cannot receive SOL or USDC from Solana.</p>`);
@@ -205,5 +215,5 @@ async function payment(action, extra = {}) {
 }
 document.querySelector('#privacy').addEventListener('click', () => document.querySelector('#privacy-dialog').showModal());
 document.querySelector('#close-privacy').addEventListener('click', () => document.querySelector('#privacy-dialog').close());
-try { session = await (await fetch('/api/session')).json(); welcome(); }
+try { session = await (await fetch('/api/session')).json(); document.querySelector('#network-label').textContent = session.network; welcome(); }
 catch { message('The local wallet is unavailable. Restart the local wallet session.', 'error'); }

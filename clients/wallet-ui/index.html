@@ -2,11 +2,11 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Private wallet</title><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script></head>
 <body>
-<header><a class="wordmark" href="/">Wallet</a><span>Local test network</span></header>
+<header><a class="wordmark" href="/">Wallet</a><span id="network-label">Test network</span></header>
 <main>
-<section class="introduction"><h1>Your money.<br>Your business.</h1><p class="lead">A private wallet for<br> everyday payments.</p><p class="network-note">Local test funds only. Solana funding is coming later.</p></section>
+<section class="introduction"><h1>Your money.<br>Your business.</h1><p class="lead">A private wallet for<br> everyday payments.</p><p class="network-note">Test coins only. This network cannot receive Solana funds.</p></section>
 <section class="panel" aria-label="Private wallet"><div id="screen"><h2>Opening your wallet…</h2></div><p id="notice" role="status" aria-live="polite"></p></section>
 </main>
 <footer><button class="text-button" id="privacy">What stays private?</button></footer>
-<dialog id="privacy-dialog"><h2>What stays private?</h2><p>Shielded payment amounts and recipients are protected by proofs. Your wallet decrypts its own notes.</p><p>Sponsors, fees, timing, nullifiers, and public deposit and withdrawal amounts remain visible. A shared test sponsor pays fees in this local preview.</p><p>This is an experimental independent network. There is no Solana bridge or mainnet settlement.</p><button id="close-privacy" class="primary">Got it</button></dialog>
+<dialog id="privacy-dialog"><h2>What stays private?</h2><p>Shielded payment amounts and recipients are protected by proofs. Your wallet decrypts its own notes.</p><p>Fee payers, fees, timing, nullifiers, and public deposit and withdrawal amounts remain visible. User-paid withdrawals use your funded public fee account.</p><p>This is an experimental independent network. There is no Solana bridge or mainnet settlement.</p><button id="close-privacy" class="primary">Got it</button></dialog>
 </body></html>

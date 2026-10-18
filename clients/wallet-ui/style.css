@@ -24,8 +24,14 @@ header {
   display:flex;
   align-items:center;
   justify-content:space-between;
+  gap:16px;
   font-size:18px;
   color:#466171;
+}
+#network-label {
+  max-width:60%;
+  overflow-wrap:anywhere;
+  text-align:right;
 }
 .wordmark {
   font-size:34px;

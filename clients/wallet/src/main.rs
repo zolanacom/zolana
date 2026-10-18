@@ -15,11 +15,12 @@ fn run() -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
         println!(
-            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive"
+            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive|check|profile"
         );
         println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
         println!("balance/deposit/send/withdraw/resolve/reclaim: --rpc http://127.0.0.1:<port>");
+        println!("Tester mode: --network <wallet-profile.json> pins the RPC; omit --rpc. Remote profiles require HTTPS. check needs only --network (and --rpc for fixtures), no wallet/password.");
         println!("deposit/send/withdraw: --sponsor <private-keypair.json> --amount <native-units>");
         println!("rehearsal deposit/send/withdraw: --sponsor-password-file <private-operator-file> --sponsor-request-id <unique-id> --amount <native-units>; fixed encrypted sponsor/policy beside network.json");
         println!("rehearsal reclaim: --sponsor-password-file; reuses the saved original reservation for cleanup only.");
@@ -46,6 +47,8 @@ fn run() -> Result<()> {
         "resolve",
         "reclaim",
         "archive",
+        "check",
+        "profile",
         "withdraw-legacy",
     ]
     .contains(&command.as_str())
@@ -114,10 +117,34 @@ fn run() -> Result<()> {
     let configuration: serde_json::Value =
         serde_json::from_slice(&std::fs::read(required("--network")?)?)?;
     let private_setup = configuration["key_mode"] == "local-testnet-rehearsal-v1";
+    let tester = if configuration["key_mode"] == "user-wallet-v1" {
+        let profile =
+            native_wallet::connection::TesterProfile::load(Path::new(required("--network")?))?;
+        if args.contains_key("--rpc") {
+            return Err("tester profile pins the RPC; --rpc override is forbidden".into());
+        }
+        if [
+            "--sponsor",
+            "--sponsor-password-file",
+            "--sponsor-request-id",
+        ]
+        .iter()
+        .any(|flag| args.contains_key(*flag))
+            || matches!(command.as_str(), "deposit" | "send" | "withdraw-legacy")
+            || (command == "withdraw" && !user_paid)
+        {
+            return Err(
+                "tester profile permits no operator sponsorship; use user-paid withdrawals".into(),
+            );
+        }
+        Some(profile)
+    } else {
+        None
+    };
     if command == "withdraw-legacy" && configuration["fixture_keys_are_public"] != true {
         return Err("legacy sponsor withdrawals are restricted to disposable fixtures".into());
     }
-    if !private_setup && configuration["fixture_keys_are_public"] != true {
+    if tester.is_none() && !private_setup && configuration["fixture_keys_are_public"] != true {
         return Err(
             "network must explicitly select disposable fixture or guarded rehearsal keys".into(),
         );
@@ -125,8 +152,27 @@ fn run() -> Result<()> {
     if private_setup && args.contains_key("--sponsor") {
         return Err("rehearsal network requires its encrypted sponsor and durable policy; plaintext sponsor override is forbidden".into());
     }
+    let connect = || match &tester {
+        Some(profile) => Chain::connect_profile(profile),
+        None => Chain::connect(required("--rpc")?, network.clone()),
+    };
+    if command == "profile" {
+        println!(
+            "{}",
+            serde_json::to_string(
+                tester
+                    .as_ref()
+                    .ok_or("profile requires a public tester configuration")?
+            )?
+        );
+        return Ok(());
+    }
+    if command == "check" {
+        println!("{}", connect()?.health()?);
+        return Ok(());
+    }
     if command == "archive" {
-        let chain = Chain::connect(required("--rpc")?, network)?;
+        let chain = connect()?;
         println!(
             "{}",
             chain.export_history(Path::new(required("--history")?))?
@@ -150,7 +196,7 @@ fn run() -> Result<()> {
         if path.exists() || backup.exists() || path == backup {
             return Err("wallet and backup must be distinct new files".into());
         }
-        let wallet = WalletKey::generate(network)?;
+        let wallet = WalletKey::generate(network.clone())?;
         wallet.save(backup, &password)?;
         wallet.save(path, &password)?;
         println!(
@@ -178,7 +224,7 @@ fn run() -> Result<()> {
     }
     // Hold the OS lock from before sync/proving until all submission/recovery work ends.
     let operation = WalletOperation::acquire(path)?;
-    let mut chain = Chain::connect(required("--rpc")?, network.clone())?;
+    let mut chain = connect()?;
     if command == "resolve" {
         println!("{}", chain.resolve(&wallet, &operation)?);
         return Ok(());

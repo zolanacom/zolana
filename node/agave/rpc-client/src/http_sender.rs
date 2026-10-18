@@ -182,7 +182,16 @@ impl RpcSender for HttpSender {
                     stats_updater.add_rate_limited_time(duration);
                     continue;
                 }
-                return Err(response.error_for_status().unwrap_err().into());
+                // With redirects disabled, 3xx is non-success but is not a
+                // reqwest 4xx/5xx error. Return a transport error, never panic.
+                let status = response.status();
+                return Err(match response.error_for_status() {
+                    Err(error) => error.into(),
+                    Ok(_) => RpcError::RpcRequestError(format!(
+                        "RPC returned unsupported HTTP status {status}"
+                    ))
+                    .into(),
+                });
             }
 
             let mut json = response.json::<serde_json::Value>().await?;

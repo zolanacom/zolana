@@ -234,13 +234,20 @@ pub struct Submitted {
 
 impl Chain {
     pub fn connect(url: &str, network: Network) -> Result<Self> {
-        let port: u16 = url
-            .strip_prefix("http://127.0.0.1:")
-            .ok_or("local wallet RPC must use http://127.0.0.1:<port>")?
-            .parse()?;
-        if port == 0 {
-            return Err("RPC port must be nonzero".into());
-        }
+        let endpoint = crate::connection::Endpoint {
+            transport: "loopback-http".into(),
+            url: url.into(),
+        };
+        endpoint.validate()?;
+        Self::connect_endpoint(url, network)
+    }
+
+    pub fn connect_profile(profile: &crate::connection::TesterProfile) -> Result<Self> {
+        profile.validate()?;
+        Self::connect_endpoint(&profile.rpc.url, profile.network())
+    }
+
+    fn connect_endpoint(url: &str, network: Network) -> Result<Self> {
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -259,6 +266,30 @@ impl Chain {
             sponsor_budget: None,
             user_fees: None,
         })
+    }
+
+    /// Read-only diagnosis without decrypting a seed or sending a transaction.
+    pub fn health(&self) -> Result<serde_json::Value> {
+        let response = self
+            .rpc
+            .get_account_with_commitment(&pool_address(), CommitmentConfig::finalized())?;
+        let account = response.value.ok_or("native pool is missing")?;
+        let pool = PoolState::decode(&account.data)?;
+        if account.owner != id()
+            || pool.network != self.network.network
+            || account.lamports
+                < pool
+                    .rent_floor
+                    .checked_add(pool.backing)
+                    .ok_or("pool backing overflow")?
+        {
+            return Err("native pool owner, domain or backing mismatch".into());
+        }
+        self.check_withdrawal_activation()?;
+        Ok(
+            serde_json::json!({"connected":true, "genesis_hash":self.network.genesis_hash,
+            "finalized_slot":response.context.slot, "pool_format":"NPOOL003", "recipient_withdrawals":true}),
+        )
     }
 
     pub fn with_sponsor_budget(mut self, budget: crate::sponsor::Budget) -> Self {
@@ -295,6 +326,15 @@ impl Chain {
             .max(1))
     }
     pub fn check_withdrawal(&self, recipient: Pubkey, amount: u64) -> Result<()> {
+        self.check_withdrawal_activation()?;
+        let minimum = self.minimum_withdrawal(recipient)?;
+        if amount < minimum {
+            return Err(format!("withdrawal needs at least {minimum} native units to meet the public account minimum balance").into());
+        }
+        Ok(())
+    }
+
+    fn check_withdrawal_activation(&self) -> Result<()> {
         let feature = self
             .rpc
             .get_account(&native_payment_program::WITHDRAWAL_ACTIVATION_ID)?;
@@ -302,10 +342,6 @@ impl Chain {
             solana_feature_gate_interface::from_account(&feature).and_then(|f| f.activated_at);
         if !active.is_some_and(|slot| self.rpc.get_slot().is_ok_and(|current| slot <= current)) {
             return Err("recipient-bound withdrawals are not active on this network".into());
-        }
-        let minimum = self.minimum_withdrawal(recipient)?;
-        if amount < minimum {
-            return Err(format!("withdrawal needs at least {minimum} native units to meet the public account minimum balance").into());
         }
         Ok(())
     }

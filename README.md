@@ -12,6 +12,8 @@ This repository starts from upstream Agave source and a new development history.
 
 See development status for the current prototype stage, completed components and production gaps.
 
+The [standalone tester wallet](docs/tester-wallet-runbook.md) packages the device-local client independently of the checkout and operator keys, with a pinned genesis/RPC profile, HTTPS for remote endpoints and preserved wallet data across package replacement. Extracted-package acceptance passed offline recovery and real local-validator reads. This unsigned development bundle remains local; sponsor-free private sends, test-gas provisioning, hosting and release review are still required before inviting testers.
+
 The product is an independent privacy blockchain with its own validators and fee/staking coin. Its first user interface is a payments wallet; building that interface does not turn the chain into a Solana application. A DEX, private swaps and an Axiom-style terminal are not implemented. The Solana bridge remains later work.
 
 The [local wallet preview](docs/local-wallet-ui-runbook.md) now creates encrypted wallets, guides recovery-file backup, sponsors test funding and submits real private payments. Concurrent acceptance finalized 24 deposits and 24 private sends and preserved pool/nullifier state through a coordinated restart; see LOCAL-008 validation. This uses fresh-genesis NPOOL003; preserve older fixtures and use their corresponding historical builds.
