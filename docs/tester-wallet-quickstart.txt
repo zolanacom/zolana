@@ -35,6 +35,12 @@ another owner-only directory. Reuse that directory when updating a bundle.
 Never delete an unfinished payment's files or start a replacement payment to
 resolve an unknown result. Use Check previous payment, then Recover upload rent.
 The launcher refuses to replace a data directory's pinned profile silently.
+To update, stop the local wallet, replace only the extracted package, and start
+it with the same data directory. Keep that directory and your recovery file.
+Check previous payment resolves the original signed payment; it does not send
+another payment. It can extend an authenticated checkpoint for private sends.
+If the network is offline or behind the verified checkpoint, the original
+pending journal stays in place. Retry recovery when the network is healthy.
 
 This package has no operator sponsor. It receives native private payments,
 sends privately and withdraws with user-paid fees after its separate public fee

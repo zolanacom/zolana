@@ -91,8 +91,8 @@ def ready(timeout=120):
     raise RuntimeError('service validators not ready')
 
 
-def supervise(ack_test=False):
-    if ack_test:os.nice(10)
+def supervise(ack_test=False,package_test=False):
+    if ack_test or package_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
     children=[None,None];shutdown=threading.Event();ingress=None
@@ -100,11 +100,13 @@ def supervise(ack_test=False):
     signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
     try:
         test_deadline=None
-        if ack_test:
+        if ack_test or package_test:
             from service_tls import private_bytes
-            session=json.loads(private_bytes(ROOT/'gateway-ack-session-022.json',4096))
+            session_name='package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
-            if (set(session)!={'format','expires_at'} or session['format']!='local-gateway-ack-test-v1' or
+            if (set(session)!={'format','expires_at'} or session['format']!=session_format or
                 type(test_deadline) not in (float,int) or not math.isfinite(test_deadline) or test_deadline>time.time()+600):
                 raise ValueError('invalid bounded acknowledgement experiment session')
             if time.time()>=test_deadline:
@@ -121,7 +123,8 @@ def supervise(ack_test=False):
         save(ROOT/'service-instance.json',{'supervisor':os.getpid(),'validators':[p.pid for p in children],'started_at':time.time(),'uid':os.getuid(),'gid':os.getgid(),'process_groups':[os.getpgid(p.pid) for p in children]})
         if (ROOT/'ingress-setup.json').exists():
             from service_ingress import Ingress
-            if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':ingress=Ingress(ack_test=True) if ack_test else Ingress()
+            if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':
+                ingress=Ingress(package_test=True) if package_test else Ingress(ack_test=True) if ack_test else Ingress()
         while not shutdown.wait(1):
             if any(p.poll() is not None for p in children):raise RuntimeError('owned validator exited; restart the coordinated service group')
             if ingress is not None and not ingress.healthy():raise RuntimeError('wallet ingress worker exited; restart original service group')
@@ -250,6 +253,7 @@ if __name__=='__main__':
     if action=='init':output=initialize()
     elif action=='run':output=supervise()
     elif action=='run-ack-test':output=supervise(ack_test=True)
+    elif action=='run-package-test':output=supervise(package_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':ready(timeout=4);output={'slots':slots(),'native_state':canonical(),'uid':os.getuid()}

@@ -130,6 +130,19 @@ class ServiceIngressTests(unittest.TestCase):
         self.assertEqual(len(attempts),2);self.assertEqual(attempts[0]['signature'],'C'*88)
         self.assertIsNone(attempts[1]['signature']);self.assertEqual(attempts[1]['request_sha256'],hashlib.sha256(query).hexdigest())
 
+    def test_package_recovery_records_and_denies_broadcast_before_upstream(self):
+        app=self.app;gateway=object.__new__(app.PackageRecoveryGateway)
+        read=b'{"method":"getSignatureStatuses"}';send=b'{"method":"sendTransaction","params":["original or replacement"]}'
+        with patch.object(app.Gateway,'forward',return_value=b'authentic upstream status') as forward:
+            self.assertEqual(gateway.forward(read),b'authentic upstream status')
+            forward.assert_called_once_with(read);forward.reset_mock()
+            with self.assertRaisesRegex(ValueError,'must not broadcast'):gateway.forward(send)
+            forward.assert_not_called()
+            path,raw=app.private.call_args.args
+            self.assertEqual(path,app.ROOT/'package-recovery-broadcast-attempt-023.json')
+            self.assertTrue(json.loads(raw)['attempted'])
+            self.assertEqual(json.loads(raw)['request_sha256'],hashlib.sha256(send).hexdigest())
+
     def test_authenticated_https_handler_never_leaks_the_selected_finalized_reply(self):
         from local_test_tls import create
         from service_tls import TLSServer,context

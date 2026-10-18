@@ -79,7 +79,7 @@ def main():
     parser.add_argument("--binary", type=Path, default=PROJECT / "target/debug/native-wallet")
     args = parser.parse_args()
     if args.binary.resolve() == (PROJECT / "target/debug/native-wallet").resolve():
-        subprocess.run(["sh", "tools/dev.sh", "build", "--offline", "--locked", "-p", "native-wallet"], cwd=PROJECT, check=True)
+        subprocess.run(["sh", "tools/dev.sh", "build", "--offline", "--locked", "-p", "native-wallet", "--bin", "native-wallet"], cwd=PROJECT, check=True)
     profile = public_profile(json.loads(args.network.read_text()), args.label, args.rpc, args.transport)
     if args.faucet:
         profile["faucet"] = {"transport": args.transport, "url": args.faucet}

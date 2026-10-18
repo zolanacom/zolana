@@ -176,12 +176,22 @@ def ack_checkpoint():
     return {'signature':gate['signature'],'native_state':canonical(),'slots':slots(),'gate':gate}
 
 
+class PackageRecoveryGateway(Gateway):
+    """Bounded package-recovery test: record and reject any broadcast attempt."""
+    def forward(self,raw):
+        if json.loads(raw).get('method')=='sendTransaction':
+            private(ROOT/'package-recovery-broadcast-attempt-023.json',
+                json.dumps({'request_sha256':hashlib.sha256(raw).hexdigest(),'attempted':True}).encode())
+            raise ValueError('package journal recovery must not broadcast a transaction')
+        return super().forward(raw)
+
+
 class Ingress:
-    def __init__(self,ack_test=False):
+    def __init__(self,ack_test=False,package_test=False):
         check_ready();self.services=[];self.threads=[];self.worker=None;self.faucet=None
         try:
             self.faucet=Faucet(FAUCET_ROOT,PASSWORD,binary=FAUCET)
-            gateway=(FinalityGateGateway if ack_test else Gateway)(self.faucet)
+            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test else Gateway)(self.faucet)
             self.gateway=gateway
             for port,handler,app,endpoint in [(FAUCET_PORT,FaucetHandler,self.faucet,gateway.info['faucet_audience']),
                 (RPC_PORT,GatewayHandler,gateway,gateway.info['rpc_audience'])]:
