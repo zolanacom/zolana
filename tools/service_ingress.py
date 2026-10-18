@@ -142,7 +142,7 @@ class FinalityGateGateway(Gateway):
         ack_gate()  # Unsafe existing controls fail before opening a listener.
         super().__init__(faucet)
 
-    def forward(self,raw):
+    def forward(self,raw,timeout=15):
         query=json.loads(raw);attempt=None
         if query.get('method')=='sendTransaction':
             with self.gate_lock:
@@ -150,7 +150,7 @@ class FinalityGateGateway(Gateway):
                 if len(log['attempts'])>=256:raise ValueError('bounded test broadcast log exhausted')
                 attempt=len(log['attempts']);log['attempts'].append({'request_sha256':hashlib.sha256(raw).hexdigest(),'signature':None})
                 save(ACK_BROADCASTS,log)  # Count even a failed/interrupted attempt.
-        result=super().forward(raw)
+        result=super().forward(raw,timeout=timeout)
         if attempt is not None:
             with self.gate_lock:
                 log=self.broadcasts();log['attempts'][attempt]['signature']=json.loads(result).get('result')
@@ -206,12 +206,12 @@ def browser_close_checkpoint(target):
 
 class PackageRecoveryGateway(Gateway):
     """Bounded package-recovery test: record and reject any broadcast attempt."""
-    def forward(self,raw):
+    def forward(self,raw,timeout=15):
         if json.loads(raw).get('method')=='sendTransaction':
             private(ROOT/'package-recovery-broadcast-attempt-023.json',
                 json.dumps({'request_sha256':hashlib.sha256(raw).hexdigest(),'attempted':True}).encode())
             raise ValueError('package journal recovery must not broadcast a transaction')
-        return super().forward(raw)
+        return super().forward(raw,timeout=timeout)
 
 
 class Ingress:

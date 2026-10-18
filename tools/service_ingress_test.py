@@ -163,7 +163,7 @@ class ServiceIngressTests(unittest.TestCase):
         read=b'{"method":"getSignatureStatuses"}';send=b'{"method":"sendTransaction","params":["original or replacement"]}'
         with patch.object(app.Gateway,'forward',return_value=b'authentic upstream status') as forward:
             self.assertEqual(gateway.forward(read),b'authentic upstream status')
-            forward.assert_called_once_with(read);forward.reset_mock()
+            forward.assert_called_once_with(read,timeout=15);forward.reset_mock()
             with self.assertRaisesRegex(ValueError,'must not broadcast'):gateway.forward(send)
             forward.assert_not_called()
             path,raw=app.private.call_args.args

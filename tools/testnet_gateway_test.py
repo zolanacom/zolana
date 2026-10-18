@@ -78,13 +78,13 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.request(dict(request,method='getIdentity'))[0],403)
         self.assertNotIn('Retry-After',self.last_headers)
 
-    def test_history_reads_are_bounded_read_only_and_charged_per_block(self):
+    def test_history_reads_are_bounded_read_only_and_use_original_per_rpc_authorization(self):
         request=dict(jsonrpc='2.0',id=1,method='getWalletHistoryBlocks',params=[list(range(1,17))])
         header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
         code,body,calls=self.request(request,header)
         self.assertEqual(code,200); self.assertEqual(body['result'],list(range(1,17)))
         self.assertEqual(calls[0],('ingress','rpc','127.0.0.1'))
-        self.assertEqual(calls[1],('authorize',{'signature':'valid'},['--units','16']))
+        self.assertEqual(calls[1],('authorize',{'signature':'valid'}))
         self.assertEqual([c[0] for c in calls],['ingress','authorize','history'])
         for params in [None,[],[[]],[[0]],[[True]],[[1,1]],[[2,1]],[[2**64]],[[1.0]],[list(range(1,18))],[[1],{'commitment':'processed'}]]:
             code,_,calls=self.request(dict(request,params=params),header)
@@ -94,7 +94,8 @@ class GatewayTests(unittest.TestCase):
 
     def test_history_aggregation_fixes_encoding_finality_and_refuses_missing_or_oversized_blocks(self):
         gateway=object.__new__(Gateway);queries=[]
-        def forward(raw):
+        def forward(raw,timeout=15):
+            self.assertGreater(timeout,0);self.assertLessEqual(timeout,15)
             query=json.loads(raw);queries.append(query)
             return json.dumps({'jsonrpc':'2.0','id':query['id'],'result':{'transactions':[]}}).encode()
         gateway.forward=forward
@@ -104,9 +105,20 @@ class GatewayTests(unittest.TestCase):
         for query in queries:
             self.assertEqual(query['method'],'getBlock')
             self.assertEqual(query['params'][1],dict(encoding='base64',transactionDetails='full',rewards=False,commitment='finalized',maxSupportedTransactionVersion=0))
-        for response in [{'id':1,'result':None},{'id':2,'result':{}},{'id':1,'error':{'code':-1}},{'id':1,'result':{'data':'x'*(16*1024*1024)}}]:
-            gateway.forward=lambda raw:json.dumps(response).encode()
+        for response in [[],{'id':1,'result':None},{'id':2,'result':{}},{'id':1,'error':{'code':-1}},{'id':1,'result':{'data':'x'*(16*1024*1024)}}]:
+            gateway.forward=lambda raw,timeout=15:json.dumps(response).encode()
             with self.assertRaises(ValueError):gateway.history_blocks(request,[1])
+
+    def test_history_deadline_and_exact_escaped_response_limit(self):
+        gateway=object.__new__(Gateway)
+        gateway.forward=lambda raw,timeout:json.dumps({'id':1,'result':{'data':'x'*(16*1024*1024-200)}}).encode()
+        with self.assertRaisesRegex(ValueError,'exceeds gateway limit'):
+            gateway.history_blocks({'id':'😀'*64},[1])
+        calls=[]
+        gateway.forward=lambda raw,timeout:calls.append(timeout) or b'{"id":1,"result":{}}'
+        with patch('testnet_gateway.time.monotonic',side_effect=[0,1,16]):
+            with self.assertRaisesRegex(ValueError,'deadline exceeded'):gateway.history_blocks({'id':1},[1,2])
+        self.assertEqual(calls,[14])
 
 
 class InvitedWalletTests(unittest.TestCase):

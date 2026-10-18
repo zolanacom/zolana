@@ -48,10 +48,10 @@ class Gateway:
         if json.loads(result).get("result") != self.info["network"]["genesis_hash"]:
             raise ValueError("upstream genesis mismatch")
 
-    def forward(self, raw):
-        if self.operator is not None:return self.operator.forward(raw)
+    def forward(self, raw, timeout=15):
+        if self.operator is not None:return self.operator.forward(raw, timeout=timeout)
         request = urllib.request.Request(self.upstream, raw, {"Content-Type": "application/json"})
-        with self.opener.open(request, timeout=15) as response:
+        with self.opener.open(request, timeout=timeout) as response:
             body = response.read(16 * 1024 * 1024 + 1)
             if len(body) > 16 * 1024 * 1024:
                 raise ValueError("RPC response exceeds gateway limit")
@@ -61,20 +61,25 @@ class Gateway:
         # Read-only aggregation, never arbitrary JSON-RPC batches. Every full
         # finalized block is returned; clients still authenticate continuity and
         # replay every payment proof. The aggregate has the ordinary response cap.
-        items, total = [], 0
+        prefix = json.dumps({"jsonrpc": "2.0", "id": request["id"]}).encode()[:-1] + b',"result":['
+        items, total = [], len(prefix) + 2
+        deadline = time.monotonic() + 15
         for slot in slots:
             raw = json.dumps({"jsonrpc": "2.0", "id": slot, "method": "getBlock", "params": [slot, {
                 "encoding": "base64", "transactionDetails": "full", "rewards": False,
                 "commitment": "finalized", "maxSupportedTransactionVersion": 0}]}).encode()
-            response = json.loads(self.forward(raw))
-            if response.get("id") != slot or response.get("error") is not None or not isinstance(response.get("result"), dict):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("history read deadline exceeded")
+            response = json.loads(self.forward(raw, timeout=remaining))
+            if not isinstance(response, dict) or response.get("id") != slot or response.get("error") is not None or not isinstance(response.get("result"), dict):
                 raise ValueError("complete finalized history is unavailable")
             item = json.dumps({"slot": slot, "block": response["result"]}, separators=(",", ":")).encode()
-            total += len(item) + 1
-            if total > 16 * 1024 * 1024 - 256:
+            total += len(item) + (1 if items else 0)
+            if total > 16 * 1024 * 1024:
                 raise ValueError("RPC response exceeds gateway limit")
             items.append(item)
-        return json.dumps({"jsonrpc": "2.0", "id": request["id"]}).encode()[:-1] + b',"result":[' + b','.join(items) + b']}'
+        return prefix + b','.join(items) + b']}'
 
 
 def history_slots(request):
@@ -112,10 +117,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not 1 <= len(header) <= 3072:
                     raise ValueError("invitation required")
                 proof = json.loads(base64.b64decode(header + "=" * (-len(header) % 4), altchars=b"-_", validate=True))
-                if slots:
-                    self.server.app.faucet.command("authorize", proof, extra=["--units", str(len(slots))])
-                else:
-                    self.server.app.faucet.command("authorize", proof)
+                self.server.app.faucet.command("authorize", proof)
             data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
         except (ValueError, RecursionError, OSError, urllib.error.URLError, subprocess.SubprocessError) as error:
             code = 429 if "quota exhausted" in str(error) else 403

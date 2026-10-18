@@ -24,7 +24,6 @@ fn run() -> Result<()> {
             "--rpc-limit",
             "--channel",
             "--peer",
-            "--units",
         ]
         .contains(&flag.as_str())
         {
@@ -71,15 +70,7 @@ fn run() -> Result<()> {
                 "access-status" => {
                     access::status(root, serde_json::from_slice::<access::Status>(&raw)?.proof)?
                 }
-                _ => access::authorize_units(
-                    root,
-                    serde_json::from_slice(&raw)?,
-                    options
-                        .get("--units")
-                        .map(|s| s.parse())
-                        .transpose()?
-                        .unwrap_or(1),
-                )?,
+                _ => access::authorize(root, serde_json::from_slice(&raw)?)?,
             }
         }
         "init" | "tick" => {
