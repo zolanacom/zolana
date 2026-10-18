@@ -47,6 +47,7 @@ pub struct Chain {
     rpc: RpcClient,
     network: Network,
     sponsor_budget: Option<crate::sponsor::Budget>,
+    user_fees: Option<(Pubkey, u64, std::path::PathBuf)>,
 }
 
 pub struct Synced {
@@ -215,6 +216,8 @@ struct StagingRecovery {
     payload_digest: [u8; 32],
     #[serde(default)]
     sponsor_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_fee: Option<crate::fees::Authorization>,
 }
 
 #[derive(Serialize)]
@@ -226,6 +229,7 @@ pub struct Submitted {
     pub upload_ms: u128,
     pub finalization_ms: u128,
     pub withdrawal: Option<crate::payments::WithdrawalReceipt>,
+    pub user_fee_charged: Option<u64>,
 }
 
 impl Chain {
@@ -253,6 +257,7 @@ impl Chain {
             rpc,
             network,
             sponsor_budget: None,
+            user_fees: None,
         })
     }
 
@@ -305,24 +310,159 @@ impl Chain {
         Ok(())
     }
 
+    pub fn with_user_fees(
+        mut self,
+        payer: Pubkey,
+        maximum: u64,
+        operation: &WalletOperation,
+    ) -> Result<Self> {
+        if self.sponsor_budget.is_some() {
+            return Err("fee modes cannot be combined".into());
+        }
+        self.user_fees = Some((payer, maximum, operation.staging.clone()));
+        Ok(self)
+    }
+
+    pub fn recovery_user_limit(
+        &self,
+        operation: &WalletOperation,
+        payer: Pubkey,
+    ) -> Result<Option<u64>> {
+        let recovery: StagingRecovery =
+            serde_json::from_slice(&read_private(&operation.staging, 4096)?)?;
+        if recovery.network != self.network {
+            return Err("staging recovery network mismatch".into());
+        }
+        if let Some(a) = recovery.user_fee {
+            a.validate()?;
+            if recovery.sponsor != payer.to_string() || recovery.sponsor_request_id.is_some() {
+                return Err("user fee recovery authority or mode mismatch".into());
+            }
+            return Ok(Some(a.maximum));
+        }
+        Ok(None)
+    }
+
+    fn transaction_fee(&self, tx: &Transaction) -> Result<u64> {
+        let response: solana_rpc_client_api::response::Response<Option<u64>> = self.rpc.send(
+            solana_rpc_client_api::request::RpcRequest::GetFeeForMessage,
+            serde_json::json!([
+                base64::engine::general_purpose::STANDARD.encode(tx.message.serialize()),
+                CommitmentConfig::confirmed()
+            ]),
+        )?;
+        response
+            .value
+            .ok_or_else(|| "fee unavailable for this blockhash".into())
+    }
+
+    pub fn withdrawal_fee_quote(
+        &self,
+        payer: Pubkey,
+        recipient: Pubkey,
+    ) -> Result<crate::fees::Quote> {
+        self.minimum_withdrawal(payer)?; // An ordinary public account must pay the fees.
+        let bytes = vec![0; 9254]; // Fixed NPAY0002 two-action shape; no proof is sent.
+        let buffer = Pubkey::new_unique();
+        let rent = self
+            .rpc
+            .get_minimum_balance_for_rent_exemption(ACCOUNT_BYTES)?;
+        let markers = self
+            .rpc
+            .get_minimum_balance_for_rent_exemption(
+                native_payment_program::nullifiers::MARKER_BYTES,
+            )?
+            .checked_mul(2)
+            .ok_or("rent overflow")?;
+        let hash = self
+            .rpc
+            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?
+            .0;
+        let mut batches = vec![vec![
+            system::create_account(&payer, &buffer, rent, ACCOUNT_BYTES as u64, &id()),
+            instructions::initialize(buffer, payer, bytes.len() as u32, payload_digest(&bytes), 1),
+            crate::upload::first_write(buffer, payer, &bytes),
+        ]];
+        batches.extend(crate::upload::remaining(buffer, payer, &bytes));
+        batches.push(vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            instructions::finalize_to(buffer, payer, [[1; 32], [2; 32]], recipient),
+        ]);
+        let fee = |ix: &[Instruction]| -> Result<u64> {
+            let mut tx = Transaction::new_with_payer(ix, Some(&payer));
+            tx.message.recent_blockhash = hash;
+            self.transaction_fee(&tx)
+        };
+        let normal_fees = batches.iter().try_fold(0u64, |sum, batch| -> Result<u64> {
+            sum.checked_add(fee(batch)?)
+                .ok_or_else(|| "fee overflow".into())
+        })?;
+        let close_fee = fee(&[instructions::close(buffer, payer)])?;
+        let reserve = close_fee
+            .checked_mul(2)
+            .filter(|v| *v > 0)
+            .ok_or("invalid cleanup fee")?;
+        let maximum = rent
+            .checked_add(markers)
+            .and_then(|n| n.checked_add(normal_fees))
+            .and_then(|n| n.checked_add(reserve))
+            .ok_or("fee quote overflow")?;
+        let remaining = self.rpc.get_minimum_balance_for_rent_exemption(0)?;
+        let balance = self.public_balance(payer)?;
+        let required = maximum.checked_add(remaining).ok_or("fee quote overflow")?;
+        Ok(crate::fees::Quote {
+            fee_address: payer.to_string(),
+            public_balance: balance,
+            refundable_staging_rent: rent,
+            permanent_nullifier_rent: markers,
+            transaction_fees: normal_fees.checked_add(close_fee).ok_or("fee overflow")?,
+            cleanup_reserve: reserve,
+            maximum_gross_debit: maximum,
+            minimum_remaining_balance: remaining,
+            funding_required: required,
+            funding_shortfall: required.saturating_sub(balance),
+        })
+    }
+
     fn charge_sponsor(&self, tx: &Transaction, native_debit: u64) -> Result<()> {
-        if let Some(budget) = &self.sponsor_budget {
-            // Initialization/finalization use a confirmed recent blockhash. A
-            // finalized-bank fee lookup can reject a perfectly live hash.
-            let response: solana_rpc_client_api::response::Response<Option<u64>> = self.rpc.send(
-                solana_rpc_client_api::request::RpcRequest::GetFeeForMessage,
-                serde_json::json!([
-                    base64::engine::general_purpose::STANDARD.encode(tx.message.serialize()),
-                    CommitmentConfig::confirmed()
-                ]),
-            )?;
-            let fee = response
-                .value
-                .ok_or("sponsor fee unavailable for this blockhash")?;
-            budget.charge(
-                fee.checked_add(native_debit)
-                    .ok_or("sponsor debit overflow")?,
-            )?;
+        if self.user_fees.is_some() && self.sponsor_budget.is_some() {
+            return Err("fee modes cannot be combined".into());
+        }
+        if self.sponsor_budget.is_some() || self.user_fees.is_some() {
+            let debit = self
+                .transaction_fee(tx)?
+                .checked_add(native_debit)
+                .ok_or("fee debit overflow")?;
+            if let Some(budget) = &self.sponsor_budget {
+                budget.charge(debit)?;
+            }
+            if let Some((payer, maximum, path)) = &self.user_fees {
+                let mut record: StagingRecovery =
+                    serde_json::from_slice(&read_private(path, 4096)?)?;
+                if record.network != self.network
+                    || record.sponsor != payer.to_string()
+                    || record.sponsor_request_id.is_some()
+                    || tx.message.account_keys.first() != Some(payer)
+                {
+                    return Err("user fee journal or signing authority mismatch".into());
+                }
+                let authorization = record
+                    .user_fee
+                    .as_mut()
+                    .ok_or("missing original user fee authorization")?;
+                if authorization.maximum != *maximum {
+                    return Err("user fee limit cannot change during recovery".into());
+                }
+                let cleanup = tx.message.instructions.len() == 1
+                    && tx.message.instructions[0].data == [4]
+                    && tx
+                        .message
+                        .account_keys
+                        .get(tx.message.instructions[0].program_id_index as usize)
+                        == Some(&id());
+                authorization.charge(debit, cleanup)?;
+                crate::sponsor::replace(path, &serde_json::to_vec_pretty(&record)?)?;
+            }
         }
         Ok(())
     }
@@ -773,6 +913,34 @@ impl Chain {
                     .into(),
             );
         }
+        let user_fee = if let Some((payer, maximum, _)) = &self.user_fees {
+            if self.sponsor_budget.is_some()
+                || *payer != sponsor.pubkey()
+                || payment.context.withdrawal_recipient.is_none()
+            {
+                return Err("user-paid mode requires a recipient-bound withdrawal and the user's fee signer".into());
+            }
+            let quote = self.withdrawal_fee_quote(
+                *payer,
+                Pubkey::new_from_array(payment.context.withdrawal_recipient.unwrap()),
+            )?;
+            if *maximum < quote.maximum_gross_debit {
+                return Err("user fee debit cap is below the current withdrawal quote".into());
+            }
+            if self.public_balance(*payer)?
+                < maximum
+                    .checked_add(quote.minimum_remaining_balance)
+                    .ok_or("fee funding overflow")?
+            {
+                return Err("user fee account needs more public native coins for the authorized cap and minimum balance".into());
+            }
+            Some(crate::fees::Authorization::new(
+                *maximum,
+                quote.cleanup_reserve,
+            )?)
+        } else {
+            None
+        };
         let expiry = payment.context.expires_at;
         let buffer = Keypair::new();
         let (blockhash, last_valid_block_height) = self
@@ -816,6 +984,7 @@ impl Chain {
                 expiry,
                 payload_len: bytes.len() as u32,
                 payload_digest: payload_digest(bytes),
+                user_fee,
                 sponsor_request_id: self
                     .sponsor_budget
                     .as_ref()
@@ -912,6 +1081,14 @@ impl Chain {
             )
             .and_then(|signature| self.wait_closed(&buffer.pubkey(), &signature))
             .is_ok();
+        let user_fee_charged = if self.user_fees.is_some() {
+            read_private(&operation.staging, 4096)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<StagingRecovery>(&raw).ok())
+                .and_then(|r| r.user_fee.map(|a| a.charged))
+        } else {
+            None
+        };
         if reclaimed {
             // Payment acceptance must remain a success even if local cleanup fails.
             let _ = fs::remove_file(&operation.staging);
@@ -924,6 +1101,7 @@ impl Chain {
             upload_ms,
             finalization_ms,
             withdrawal: crate::payments::withdrawal_receipt(&payment),
+            user_fee_charged,
         })
     }
 
@@ -987,6 +1165,9 @@ impl Chain {
             serde_json::from_slice(&read_private(&operation.staging, 4096)?)?;
         if recovery.network != self.network || recovery.sponsor != sponsor.pubkey().to_string() {
             return Err("staging recovery network or sponsor mismatch".into());
+        }
+        if recovery.user_fee.is_some() != self.user_fees.is_some() {
+            return Err("recovery must use the original recorded fee mode".into());
         }
         let buffer = Pubkey::from_str(&recovery.staging_account)?;
         let initialization = Signature::from_str(&recovery.initialize_signature)?;
@@ -1104,6 +1285,7 @@ mod recovery_tests {
             ),
             network,
             sponsor_budget: Some(budget),
+            user_fees: None,
         };
         let tx = Transaction::new_signed_with_payer(
             &[system::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1)],
@@ -1157,6 +1339,7 @@ mod recovery_tests {
         let chain = Chain {
             rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
             sponsor_budget: None,
+            user_fees: None,
             network,
         };
         (wallet, checkpoint, chain)
@@ -1350,6 +1533,7 @@ mod recovery_tests {
             payload_len: 10,
             payload_digest: [7; 32],
             sponsor_request_id: None,
+            user_fee: None,
         };
         write_private_new(&operation.staging, &serde_json::to_vec(&recovery).unwrap()).unwrap();
         network
@@ -1364,8 +1548,88 @@ mod recovery_tests {
         Chain {
             rpc: RpcClient::new_mock_with_mocks_map(url, mocks),
             sponsor_budget: None,
+            user_fees: None,
             network,
         }
+    }
+
+    #[test]
+    fn user_fee_charges_are_durable_and_original_cap_survives_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let payer = Keypair::new();
+        let network = fixture(&operation, &payer, 100);
+        let mut record: StagingRecovery =
+            serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+        record.user_fee = Some(crate::fees::Authorization::new(100, 10).unwrap());
+        crate::sponsor::replace(&operation.staging, &serde_json::to_vec(&record).unwrap()).unwrap();
+        let mocks = MocksMap::from_iter(std::iter::repeat_n(
+            (
+                RpcRequest::GetFeeForMessage,
+                json!({"context":{"slot":34},"value":7}),
+            ),
+            4,
+        ));
+        let chain = Chain {
+            rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
+            network: network.clone(),
+            sponsor_budget: None,
+            user_fees: Some((payer.pubkey(), 100, operation.staging.clone())),
+        };
+        let tx = Transaction::new_with_payer(
+            &[instructions::seal(Pubkey::new_unique(), payer.pubkey())],
+            Some(&payer.pubkey()),
+        );
+        chain.charge_sponsor(&tx, 80).unwrap();
+        assert!(chain.charge_sponsor(&tx, 0).is_err());
+        let restored: StagingRecovery =
+            serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+        assert_eq!(restored.user_fee.unwrap().charged, 87);
+        assert_eq!(
+            chain
+                .recovery_user_limit(&operation, payer.pubkey())
+                .unwrap(),
+            Some(100)
+        );
+        assert!(chain
+            .recovery_user_limit(&operation, Keypair::new().pubkey())
+            .is_err());
+        let close = Transaction::new_with_payer(
+            &[instructions::close(Pubkey::new_unique(), payer.pubkey())],
+            Some(&payer.pubkey()),
+        );
+        chain.charge_sponsor(&close, 0).unwrap();
+        let restored: StagingRecovery =
+            serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+        assert_eq!(restored.user_fee.unwrap().charged, 94);
+        let other = chain
+            .with_user_fees(payer.pubkey(), 101, &operation)
+            .unwrap();
+        assert!(other.charge_sponsor(&close, 0).is_err());
+    }
+
+    #[test]
+    fn user_paid_recovery_cannot_silently_bypass_its_recorded_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+        let payer = Keypair::new();
+        let network = fixture(&operation, &payer, 100);
+        let mut record: StagingRecovery =
+            serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+        record.user_fee = Some(crate::fees::Authorization::new(100, 10).unwrap());
+        crate::sponsor::replace(&operation.staging, &serde_json::to_vec(&record).unwrap()).unwrap();
+        let chain = Chain {
+            rpc: RpcClient::new_mock("succeeds"),
+            network,
+            sponsor_budget: None,
+            user_fees: None,
+        };
+        assert!(chain
+            .reclaim(&payer, &operation)
+            .unwrap_err()
+            .to_string()
+            .contains("original recorded fee mode"));
+        assert!(operation.staging.exists());
     }
 
     #[test]

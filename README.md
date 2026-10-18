@@ -6,6 +6,8 @@ The selected architecture is an [independent privacy L1 with its own native coin
 
 Fresh local rehearsals support [recipient-bound native withdrawals](docs/withdrawal-runbook.md): the user chooses a public account independently from the fee sponsor, with the default signing authority recoverable from the encrypted wallet seed. Existing genesis, historical payment bytes and sponsor policies remain preserved.
 
+[User-paid withdrawals](docs/user-paid-fees-runbook.md) can use a fee authority recovered from the encrypted seed, with an explicit gross-debit cap and crash recovery. They work without operator sponsor credentials once the public fee account has native coins for fees and refundable upload rent.
+
 This repository starts from upstream Agave source and a new development history. Networking and consensus are retained while a separate payment module is evaluated. Public transfers remain supported in the minimal design; privacy is an additional native capability, not a claim about every transaction or application.
 
 See development status for the current prototype stage, completed components and production gaps.

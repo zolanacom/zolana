@@ -120,6 +120,21 @@ impl WalletKey {
         solana_keypair::Keypair::new_from_array(*secret)
     }
 
+    /// A separate fee authority keeps the existing recipient-bound protocol
+    /// unchanged and prevents withdrawal credits from masking fee expenditure.
+    pub fn fee_keypair(&self) -> solana_keypair::Keypair {
+        let mut hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"NPayFeeKeyV1!!!!")
+            .key(&self.seed[..])
+            .to_state();
+        hash.update(&self.network.network);
+        hash.update(self.network.genesis_hash.as_bytes());
+        let secret =
+            Zeroizing::new(<[u8; 32]>::try_from(hash.finalize().as_bytes()).expect("32 bytes"));
+        solana_keypair::Keypair::new_from_array(*secret)
+    }
+
     pub(crate) fn scan_cache_key(&self) -> Zeroizing<[u8; 32]> {
         let mut hash = blake2b_simd::Params::new()
             .hash_length(32)
@@ -333,6 +348,12 @@ mod tests {
             .unwrap();
         let restored = WalletKey::open(&path, b"public authority test password", &network).unwrap();
         let key = restored.public_keypair();
+        let fee = restored.fee_keypair();
+        assert_eq!(fee.pubkey(), wallet.fee_keypair().pubkey());
+        assert_ne!(fee.pubkey(), key.pubkey());
+        assert!(fee
+            .sign_message(b"user paid fees")
+            .verify(fee.pubkey().as_ref(), b"user paid fees"));
         assert_eq!(key.pubkey(), wallet.public_keypair().pubkey());
         assert!(key
             .sign_message(b"user-controlled native account")
@@ -340,6 +361,7 @@ mod tests {
         let mut other = restored;
         other.network.network[0] ^= 1;
         assert_ne!(other.public_keypair().pubkey(), key.pubkey());
+        assert_ne!(other.fee_keypair().pubkey(), fee.pubkey());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 mod archive;
 mod cache;
+pub mod fees;
 pub mod history;
 pub mod keys;
 pub mod operation;

@@ -31,9 +31,7 @@ class WalletApp:
         if config.get("pool_format") != "NPOOL003" or (config.get("fixture_keys_are_public") is not True and not self.private_setup):
             raise ValueError("wallet UI requires a local NPOOL003 fixture or rehearsal")
         self.sponsor_password_file = None
-        if self.private_setup:
-            if sponsor_password_file is None:
-                raise ValueError("rehearsal wallet requires an operator sponsor password file")
+        if self.private_setup and sponsor_password_file is not None:
             path = Path(sponsor_password_file).absolute()
             with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as secret:
                 metadata = os.fstat(secret.fileno())
@@ -60,7 +58,7 @@ class WalletApp:
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
                 "network": "Local testnet rehearsal" if self.private_setup else "Local test network", "solana_funding_available": False,
-                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount}
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -81,8 +79,10 @@ class WalletApp:
     def action(self, request):
         action = request.get("action")
         password = request.get("password")
-        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fund", "send", "withdraw", "resolve", "reclaim"}:
+        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fees", "fund", "send", "withdraw", "resolve", "reclaim"}:
             raise ValueError("Unknown wallet action.")
+        if action != "withdraw" and ("fee_mode" in request or "max_fee_debit" in request):
+            raise ValueError("Fee selection is only supported for withdrawals.")
         if action == "create":
             return self.cli("init", password, ["--backup", str(self.backup)])
         if action == "restore":
@@ -101,13 +101,33 @@ class WalletApp:
                 os.fsync(saved.fileno())
             self.ack.touch(mode=0o600)
             return result
-        if action == "balance":
-            return self.cli("balance", password)
+        if action in {"balance", "fees"}:
+            return self.cli(action, password)
         if action in {"fund", "send", "withdraw", "resolve", "reclaim"}:
             if not self.ack.exists():
                 raise ValueError("Save and confirm your encrypted recovery file before making payments.")
+            user_paid = action == "withdraw" and request.get("fee_mode", "sponsor" if (not self.private_setup or self.sponsor_password_file is not None) else "user") == "user"
+            if action == "withdraw" and request.get("fee_mode", "user") not in ("user", "sponsor"):
+                raise ValueError("Choose user-paid or sponsored fees.")
+            if action == "reclaim":
+                stage = Path(str(self.wallet) + ".staging.json")
+                if stage.exists():
+                    record = json.loads(stage.read_text())
+                    if not isinstance(record, dict):
+                        raise ValueError("Invalid staging recovery record; keep it for recovery.")
+                    if record.get("user_fee") is not None:
+                        return self.cli("reclaim", password)
+            if action == "resolve":
+                return self.cli("resolve", password)
+            if self.private_setup and self.sponsor_password_file is None and not user_paid:
+                raise ValueError("Operator sponsorship is unavailable. Use your funded fee account for withdrawals.")
             sponsor = ["--sponsor", str(self.root / "sponsor.keypair.json")]
-            if self.private_setup:
+            if user_paid:
+                cap = request.get("max_fee_debit")
+                if type(cap) is not int or not 1 <= cap <= 1_000_000_000_000:
+                    raise ValueError("Review and authorize a bounded fee debit first.")
+                sponsor = ["--fee-payer", "user", "--max-fee-debit", str(cap)]
+            elif self.private_setup:
                 sponsor = ["--sponsor-password-file", str(self.sponsor_password_file)]
                 if action in {"fund", "send", "withdraw"}:
                     sponsor += ["--sponsor-request-id", secrets.token_hex(16)]

@@ -15,7 +15,7 @@ The runner creates separate random private operator passwords under ignored `.lo
 
 The wallet's `balance` response includes `public_address`, `public_balance` and `minimum_public_withdrawal`. In the UI, select **Withdraw publicly**, check the public destination and amount, review the public disclosure, then confirm. The default destination is controlled by the same encrypted recovery seed. The first withdrawal must cover that account's minimum balance; an already funded account can receive smaller amounts. These are this chain's test units, not SOL.
 
-CLI withdrawal uses the same guarded sponsor and durable allowance as a send:
+Withdrawals can also use [user-paid fees](user-paid-fees-runbook.md) without operator credentials. The following older example selects the guarded development sponsor and its durable allowance:
 
 ```sh
 target/debug/native-wallet withdraw \

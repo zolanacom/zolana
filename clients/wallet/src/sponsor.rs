@@ -260,7 +260,7 @@ impl Budget {
         replace(&self.path, &serde_json::to_vec_pretty(&*ledger)?)
     }
 }
-fn replace(path: &Path, raw: &[u8]) -> Result<()> {
+pub(crate) fn replace(path: &Path, raw: &[u8]) -> Result<()> {
     let temp = path.with_extension(format!("reservation-{:032x}.tmp", rand::random::<u128>()));
     let result = (|| {
         let mut file = fs::OpenOptions::new()

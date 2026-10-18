@@ -821,6 +821,57 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if command == "fund-user-fee-check" {
+        let wallet_path = PathBuf::from(args.next().ok_or("expected encrypted wallet")?);
+        let password_path = PathBuf::from(args.next().ok_or("expected user password file")?);
+        let cold_path = PathBuf::from(args.next().ok_or("expected cold rehearsal password file")?);
+        let url = args.next().ok_or("expected local RPC")?;
+        if args.next().is_some() {
+            return Err("unexpected funding option".into());
+        }
+        let network = native_wallet::keys::Network::load(&root.join("network.json"))?;
+        let config: Value = serde_json::from_slice(&fs::read(root.join("network.json"))?)?;
+        if config["key_mode"] != "local-testnet-rehearsal-v1" {
+            return Err("funding acceptance requires a private local rehearsal".into());
+        }
+        let rpc = client(&url, &config)?;
+        let user_password = native_wallet::keys::read_password(&password_path)?;
+        let wallet = native_wallet::keys::WalletKey::open(&wallet_path, &user_password, &network)?;
+        let recipient = wallet.fee_keypair().pubkey();
+        if rpc.get_balance(&recipient)? != 0 {
+            return Err("fee acceptance account is already funded; never repeat funding".into());
+        }
+        let cold_password = native_wallet::keys::read_password(&cold_path)?;
+        let mut roles = native_wallet::operator::open(
+            &root.join("operator-recovery.enc.json"),
+            &network,
+            &cold_password,
+        )?;
+        let treasury = roles.remove("treasury").ok_or("missing treasury")?;
+        let tx = Transaction::new_signed_with_payer(
+            &[system::transfer(
+                &treasury.pubkey(),
+                &recipient,
+                300_000_000,
+            )],
+            Some(&treasury.pubkey()),
+            &[&treasury],
+            rpc.get_latest_blockhash()?,
+        );
+        let signature = rpc.send_transaction_with_config(
+            &tx,
+            RpcSendTransactionConfig {
+                max_retries: Some(0),
+                preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+                ..Default::default()
+            },
+        )?;
+        println!(
+            "{}",
+            json!({"signature":signature.to_string(),"fee_address":recipient.to_string(),"amount":300_000_000,"local_test_funding_only":true})
+        );
+        return Ok(());
+    }
     if command == "owner-transfer-check" {
         // Acceptance utility only: one bounded public transfer signed directly
         // by a restored user's seed. No operator keys or retryable wallet flow.

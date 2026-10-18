@@ -33,7 +33,10 @@ async function work(label, action) {
   busy = true; message(label);
   screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = true);
   try { await action(); } catch (error) { message(error.message || 'The local wallet is unavailable. Check that the local network is running.', 'error'); }
-  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); touch(); }
+  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); applyAvailability(); touch(); }
+}
+function applyAvailability() {
+  if (session.operator_sponsor_available === false) ['send','fund'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
 }
 function lock() { if (busy) return; password = ''; address = ''; balance = null; receipt = null; publicAddress = ''; publicBalance = null; minimumPublicWithdrawal = null; welcome(); }
 function touch() { clearTimeout(idle); if (password) idle = setTimeout(lock, 15 * 60 * 1000); }
@@ -108,12 +111,12 @@ function recovery() {
   on('continue', 'click', () => { if (required && (!downloaded || !document.querySelector('#saved').checked)) return message('Save your recovery file or encrypted text and confirm that you have saved it.', 'error'); work('Opening your wallet…', async () => { if (required) await api('ack-backup'); await dashboard(); }); });
 }
 function renderDashboard() {
-  setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">Add ${Number(session.faucet_amount || 100).toLocaleString()} test units</button>${session.recipient_withdrawals ? '<button class="secondary" id="withdraw">Withdraw publicly</button><p class="hint" id="public-balance"></p>' : ''}<p class="hint small">Fees are paid by the local test sponsor. Solana funding is coming later.</p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
+  setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">Add ${Number(session.faucet_amount || 100).toLocaleString()} test units</button>${session.recipient_withdrawals ? '<button class="secondary" id="withdraw">Withdraw publicly</button><p class="hint" id="public-balance"></p>' : ''}<p class="hint small">Withdrawals can use your own funded fee account. Solana funding is coming later.</p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
   on('lock', 'click', lock); on('receive', 'click', receive); on('send', 'click', send);
   if (session.recipient_withdrawals) { on('withdraw', 'click', () => withdraw()); document.querySelector('#public-balance').textContent = `Public account: ${publicBalance === null ? '—' : publicBalance} test units on this chain.`; }
   on('refresh', 'click', () => work('Verifying finalized payment history…', dashboard));
   on('backup', 'click', recovery);
-  on('fund', 'click', () => payment('fund'));
+  on('fund', 'click', () => payment('fund')); applyAvailability();
   if (receipt) {
     const element = document.querySelector('#receipt'); element.className = 'receipt';
     const heading = document.createElement('strong'); heading.textContent = receipt.withdrawal ? 'Withdrawal finalized' : 'Payment finalized'; element.append(heading, document.createElement('br'));
@@ -149,24 +152,45 @@ function send(draft = {}) {
 }
 function withdraw(draft = {}) {
   if (session.pending || session.staging) return renderDashboard();
-  setScreen(`<h2>Withdraw publicly</h2><p class="caption">Move private funds to a public account on this chain.</p><form id="withdraw-form"><label for="recipient">Public destination address</label><textarea id="recipient" required rows="2" maxlength="44" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><p class="hint">The default account is controlled by your recovery seed. This sends this chain's native coin, not SOL on Solana.</p><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><p class="hint" id="withdraw-minimum"></p><button class="primary">Review withdrawal</button></form><button class="text-button back" id="back">Back to wallet</button>`);
+  if (draft.fee_mode === 'sponsor') return renderWithdrawal(draft, null);
+  return work('Checking your fee account and upload rent…', async () => renderWithdrawal(draft, await api('fees')));
+}
+function renderWithdrawal(draft, quote) {
+  const ownFees = draft.fee_mode !== 'sponsor';
+  if (session.pending || session.staging) return renderDashboard();
+  setScreen(`<h2>Withdraw publicly</h2><p class="caption">Move private funds to a public account on this chain.</p><form id="withdraw-form"><label for="recipient">Public destination address</label><textarea id="recipient" required rows="2" maxlength="44" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><p class="hint">The default account is controlled by your recovery seed. This sends this chain's native coin, not SOL on Solana.</p><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><p class="hint" id="withdraw-minimum"></p><div id="fee-details"></div><button class="primary">Review withdrawal</button></form><button class="text-button back" id="back">Back to wallet</button>`);
   document.querySelector('#recipient').value = draft.recipient || publicAddress;
   document.querySelector('#amount').value = draft.amount || '';
-  document.querySelector('#withdraw-minimum').textContent = minimumPublicWithdrawal > 1 ? `Your public account needs at least ${minimumPublicWithdrawal} units for its first withdrawal. The sponsor pays fees and protocol rent.` : 'The sponsor pays fees and protocol rent; your destination receives the full withdrawal amount.';
+  document.querySelector('#withdraw-minimum').textContent = (minimumPublicWithdrawal > 1 ? `Your public account needs at least ${minimumPublicWithdrawal} units for its first withdrawal. ` : 'Your destination receives the full withdrawal amount. ') + (ownFees ? 'You pay fees and rent separately.' : 'The sponsor pays fees and rent.');
+  const fees = document.querySelector('#fee-details');
+  if (ownFees) {
+    const address = document.createElement('p'); address.className = 'address'; address.id = 'fee-address'; address.textContent = quote.fee_address;
+    const details = document.createElement('p'); details.className = 'hint'; details.id = 'fee-quote';
+    details.textContent = `You pay fees from this seed-controlled fee account. Balance: ${quote.public_balance}. Refundable upload rent: ${quote.refundable_staging_rent}. Permanent nullifier rent: ${quote.permanent_nullifier_rent}. Estimated transaction fees: ${quote.transaction_fees}. Maximum gross debit authorized: ${quote.maximum_gross_debit}. Keep ${quote.minimum_remaining_balance} units in the account. ${quote.funding_shortfall ? `Fund at least ${quote.funding_shortfall} more native units on this chain before continuing.` : 'The fee account is funded.'}`;
+    fees.append(details, address);
+    const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'secondary'; refresh.textContent = 'Refresh fee balance';
+    refresh.onclick = () => withdraw({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:'user'}); fees.append(refresh);
+  }
+  if (session.operator_sponsor_available) {
+    const mode = document.createElement('button'); mode.type = 'button'; mode.className = 'secondary'; mode.textContent = ownFees ? 'Use test sponsor' : 'Pay my own fees';
+    mode.onclick = () => withdraw({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:ownFees?'sponsor':'user'}); fees.append(mode);
+  }
   on('back', 'click', renderDashboard);
   on('withdraw-form', 'submit', event => {
     event.preventDefault();
     const recipient = document.querySelector('#recipient').value.trim(), amount = Number(document.querySelector('#amount').value);
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient) || !Number.isSafeInteger(amount) || amount < 1 || amount > balance) return message('Enter a public address and a whole amount within your private balance.', 'error');
     if (recipient === publicAddress && amount < minimumPublicWithdrawal) return message(`Withdraw at least ${minimumPublicWithdrawal} units to create this public account.`, 'error');
-    review(recipient, amount, 'withdraw');
+    if (ownFees && quote.funding_shortfall) return message('Fund the fee address with public native coins, then refresh its balance. Upload rent is returned after cleanup.', 'error');
+    review(recipient, amount, 'withdraw', {fee_mode:ownFees?'user':'sponsor',max_fee_debit:ownFees?quote.maximum_gross_debit:undefined});
   });
 }
-function review(recipient, amount, action = 'send') {
+function review(recipient, amount, action = 'send', fees = {}) {
   const withdrawing = action === 'withdraw';
-  setScreen(`<h2>${withdrawing ? 'Review public withdrawal' : 'Review payment'}</h2><div class="balance" id="review-amount"></div><p class="hint">To</p><p class="address" id="review-address"></p><p class="hint">${withdrawing ? 'The amount and destination become public on this chain. The sponsor pays fees and rent, and receives none of your withdrawal.' : 'The local test sponsor pays the network fees.'}</p><button class="primary" id="confirm-send">${withdrawing ? 'Withdraw publicly' : 'Send payment'}</button><button class="secondary" id="back">${withdrawing ? 'Edit withdrawal' : 'Edit payment'}</button>`);
+  setScreen(`<h2>${withdrawing ? 'Review public withdrawal' : 'Review payment'}</h2><div class="balance" id="review-amount"></div><p class="hint">To</p><p class="address" id="review-address"></p><p class="hint" id="review-fees"></p><button class="primary" id="confirm-send">${withdrawing ? 'Withdraw publicly' : 'Send payment'}</button><button class="secondary" id="back">${withdrawing ? 'Edit withdrawal' : 'Edit payment'}</button>`);
+  document.querySelector('#review-fees').textContent = withdrawing ? 'The amount and destination become public on this chain. ' + (fees.fee_mode === 'user' ? `You authorize up to ${fees.max_fee_debit} units of gross debit from your seed-controlled fee account, including refundable upload rent. No operator sponsor is used.` : 'The sponsor pays fees and rent, and receives none of your withdrawal.') : 'The local test sponsor pays the network fees.';
   document.querySelector('#review-amount').textContent = `${amount} test units`; document.querySelector('#review-address').textContent = recipient;
-  on('back', 'click', () => withdrawing ? withdraw({ recipient, amount }) : send({ recipient, amount })); on('confirm-send', 'click', () => payment(action, { recipient, amount }));
+  on('back', 'click', () => withdrawing ? withdraw({ recipient, amount, ...fees }) : send({ recipient, amount })); on('confirm-send', 'click', () => payment(action, { recipient, amount, ...fees }));
 }
 
 async function payment(action, extra = {}) {

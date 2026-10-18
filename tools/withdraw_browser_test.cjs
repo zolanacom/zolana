@@ -38,12 +38,14 @@ async function run() {
     await page.setViewportSize({width,height:width===1600?900:844});
     await layout(page,'withdraw-funded-'+width);
     await page.getByRole('button',{name:'Withdraw publicly',exact:true}).tap();
+    await page.getByRole('button',{name:'Use test sponsor',exact:true}).tap();
     assert.equal(await page.getByLabel('Public destination address',{exact:true}).inputValue(),public_address);
     await layout(page,'withdraw-form-'+width);
     await page.getByRole('button',{name:'Back to wallet',exact:true}).tap();
   }
   await page.setViewportSize({width:390,height:844});
   await page.getByRole('button',{name:'Withdraw publicly',exact:true}).tap();
+  await page.getByRole('button',{name:'Use test sponsor',exact:true}).tap();
   await page.getByLabel('Amount in test units',{exact:true}).fill('1');
   await page.getByRole('button',{name:'Review withdrawal',exact:true}).tap();
   assert.match(await page.locator('#notice').innerText(),/at least/);

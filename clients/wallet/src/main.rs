@@ -15,7 +15,7 @@ fn run() -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
         println!(
-            "native-wallet init|restore|address|balance|deposit|send|withdraw|resolve|reclaim|archive"
+            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive"
         );
         println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
@@ -25,6 +25,8 @@ fn run() -> Result<()> {
         println!("rehearsal reclaim: --sponsor-password-file; reuses the saved original reservation for cleanup only.");
         println!("deposit/send: --to <npriv1-address> (deposit defaults to this wallet)");
         println!("withdraw: --to <public-address> (defaults to your seed-recoverable public account on this chain); fee sponsor receives no withdrawal value.");
+        println!("fees: show the user fee address, refundable rent, gross-debit quote and funding shortfall; no sponsor needed.");
+        println!("withdraw --fee-payer user --max-fee-debit <native-units>: sign with your seed-derived fee authority; never loads operator keys. Fund its public fee address first.");
         println!("withdraw-legacy: disposable fixture compatibility only; credits the sponsor. Never enabled for guarded rehearsal keys.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
@@ -37,6 +39,7 @@ fn run() -> Result<()> {
         "restore",
         "address",
         "balance",
+        "fees",
         "deposit",
         "send",
         "withdraw",
@@ -63,6 +66,8 @@ fn run() -> Result<()> {
             "--history",
             "--sponsor-password-file",
             "--sponsor-request-id",
+            "--fee-payer",
+            "--max-fee-debit",
         ]
         .contains(&flag.as_str())
         {
@@ -72,6 +77,30 @@ fn run() -> Result<()> {
         if args.insert(flag, value).is_some() {
             return Err("duplicate option".into());
         }
+    }
+    let user_paid = match args.get("--fee-payer").map(String::as_str) {
+        None | Some("sponsor") => false,
+        Some("user") if command == "withdraw" => true,
+        _ => return Err("--fee-payer must select user or sponsor for a withdrawal".into()),
+    };
+    if args.contains_key("--fee-payer") && command != "withdraw" {
+        return Err(
+            "fee selection is only for withdraw; reclaim uses the original recorded payer".into(),
+        );
+    }
+    if user_paid
+        && [
+            "--sponsor",
+            "--sponsor-password-file",
+            "--sponsor-request-id",
+        ]
+        .iter()
+        .any(|flag| args.contains_key(*flag))
+    {
+        return Err("user-paid fees cannot be combined with operator sponsor options".into());
+    }
+    if args.contains_key("--max-fee-debit") && !user_paid {
+        return Err("--max-fee-debit requires user-paid withdrawal fees".into());
     }
     if command == "withdraw-legacy" && args.contains_key("--to") {
         return Err("legacy fixture withdrawal pays the sponsor; no destination override".into());
@@ -126,7 +155,7 @@ fn run() -> Result<()> {
         wallet.save(path, &password)?;
         println!(
             "{}",
-            json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"encrypted_seed_backup_created":true})
+            json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"fee_address":wallet.fee_keypair().pubkey().to_string(),"encrypted_seed_backup_created":true})
         );
         return Ok(());
     }
@@ -143,7 +172,7 @@ fn run() -> Result<()> {
     if command == "address" || command == "restore" {
         println!(
             "{}",
-            json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"restored_seed_only":command=="restore"})
+            json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"fee_address":wallet.fee_keypair().pubkey().to_string(),"restored_seed_only":command=="restore"})
         );
         return Ok(());
     }
@@ -154,7 +183,33 @@ fn run() -> Result<()> {
         println!("{}", chain.resolve(&wallet, &operation)?);
         return Ok(());
     }
+    if command == "fees" {
+        println!(
+            "{}",
+            serde_json::to_string(&chain.withdrawal_fee_quote(
+                wallet.fee_keypair().pubkey(),
+                wallet.public_keypair().pubkey()
+            )?)?
+        );
+        return Ok(());
+    }
     if command == "reclaim" {
+        let payer = wallet.fee_keypair();
+        if let Some(limit) = chain.recovery_user_limit(&operation, payer.pubkey())? {
+            if [
+                "--sponsor",
+                "--sponsor-password-file",
+                "--sponsor-request-id",
+            ]
+            .iter()
+            .any(|flag| args.contains_key(*flag))
+            {
+                return Err("user-paid recovery never accepts operator sponsor options".into());
+            }
+            chain = chain.with_user_fees(payer.pubkey(), limit, &operation)?;
+            println!("{}", chain.reclaim(&payer, &operation)?);
+            return Ok(());
+        }
         let sponsor = sponsor_for(&args, private_setup, &network)?;
         if private_setup {
             let staged: serde_json::Value = serde_json::from_slice(&read_private(
@@ -190,11 +245,15 @@ fn run() -> Result<()> {
         let public = wallet.public_keypair().pubkey();
         println!(
             "{}",
-            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan,"public_address":public.to_string(),"public_balance":chain.public_balance(public)?,"minimum_public_withdrawal":chain.minimum_withdrawal(public)?})
+            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan,"public_address":public.to_string(),"public_balance":chain.public_balance(public)?,"minimum_public_withdrawal":chain.minimum_withdrawal(public)?,"fee_address":wallet.fee_keypair().pubkey().to_string(),"fee_balance":chain.public_balance(wallet.fee_keypair().pubkey())?})
         );
         return Ok(());
     }
-    let sponsor = sponsor_for(&args, private_setup, &network)?;
+    let sponsor = if user_paid {
+        wallet.fee_keypair()
+    } else {
+        sponsor_for(&args, private_setup, &network)?
+    };
     let amount = required("--amount")?.parse::<u64>()?;
     let own_address = wallet.address_text();
     let payment = match command.as_str() {
@@ -234,7 +293,27 @@ fn run() -> Result<()> {
         _ => return Err("unknown wallet command; use --help".into()),
     };
     payments::validate(&wallet, &synced.state, &payment)?;
-    if private_setup {
+    if user_paid {
+        let maximum = required("--max-fee-debit")?.parse::<u64>()?;
+        let recipient = match payment {
+            Payment::WithdrawTo { recipient, .. } => {
+                solana_pubkey::Pubkey::new_from_array(recipient)
+            }
+            _ => return Err("user fee mode only supports recipient-bound withdrawals".into()),
+        };
+        let quote = chain.withdrawal_fee_quote(sponsor.pubkey(), recipient)?;
+        if maximum < quote.maximum_gross_debit {
+            return Err("user fee debit cap is below the current withdrawal quote".into());
+        }
+        if quote.public_balance
+            < maximum
+                .checked_add(quote.minimum_remaining_balance)
+                .ok_or("fee funding overflow")?
+        {
+            return Err(format!("fund user fee address {} with enough public native coins: cap plus minimum requires {}", quote.fee_address, maximum + quote.minimum_remaining_balance).into());
+        }
+        chain = chain.with_user_fees(sponsor.pubkey(), maximum, &operation)?;
+    } else if private_setup {
         chain = chain.with_sponsor_budget(reserve_sponsor(
             &args,
             &network,

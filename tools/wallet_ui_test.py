@@ -19,8 +19,11 @@ class WalletUiTests(unittest.TestCase):
             config = {"pool_format": "NPOOL003", "fixture_keys_are_public": False,
                       "key_mode": "local-testnet-rehearsal-v1"}
             with patch("wallet_ui.PROJECT", project), patch("wallet_ui.load", return_value=config):
-                with self.assertRaisesRegex(ValueError, "operator"):
-                    WalletApp(root)
+                independent = WalletApp(root)
+                self.assertFalse(independent.status()["operator_sponsor_available"])
+                independent.ack.touch()
+                with self.assertRaisesRegex(ValueError, "Operator sponsorship"):
+                    independent.action({"action": "fund", "password": "local-test-password"})
                 secret.chmod(0o644)
                 with self.assertRaisesRegex(ValueError, "owner-only"):
                     WalletApp(root, sponsor_password_file=secret)
@@ -136,3 +139,32 @@ class WalletUiTests(unittest.TestCase):
                 for command in ["resolve", "reclaim", "address", "restore"]:
                     app.cli(command, "local-test-password")
                     self.assertNotIn("--history", run.call_args.args[0])
+
+    def test_user_paid_withdrawal_and_recovery_never_load_operator_options(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            app.private_setup = True
+            app.withdrawal_enabled = True
+            app.ack.touch()
+            request = {"action": "withdraw", "password": "local-test-password", "amount": 1000000, "fee_mode": "user", "max_fee_debit": 150000000}
+            with patch.object(app, "cli", return_value={}) as cli:
+                for cap in [True, 0, -1, "150000000", 1.5, 10**20]:
+                    with self.assertRaises(ValueError):
+                        app.action({**request, "max_fee_debit": cap})
+                for mode in [[], {}, True, "external"]:
+                    with self.assertRaises(ValueError):
+                        app.action({**request, "fee_mode": mode})
+                for action in ["send", "fund", "reclaim"]:
+                    with self.assertRaisesRegex(ValueError, "only supported for withdrawals"):
+                        app.action({**request, "action": action})
+                cli.assert_not_called()
+                app.action({**request, "sponsor_password_file": "attacker", "sponsor_request_id": "attacker"})
+                extra = cli.call_args.args[2]
+                self.assertEqual(extra[:4], ["--fee-payer", "user", "--max-fee-debit", "150000000"])
+                self.assertNotIn("--sponsor-password-file", extra)
+                self.assertNotIn("--sponsor-request-id", extra)
+                Path(str(app.wallet) + ".staging.json").write_text(json.dumps({"user_fee": {"maximum": 150000000}}))
+                app.action({"action": "reclaim", "password": "local-test-password"})
+                self.assertEqual(cli.call_args.args, ("reclaim", "local-test-password"))
+                app.action({"action": "fees", "password": "local-test-password"})
+                self.assertEqual(cli.call_args.args, ("fees", "local-test-password"))
