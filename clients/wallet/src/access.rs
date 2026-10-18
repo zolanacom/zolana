@@ -251,6 +251,12 @@ struct Bucket {
 }
 impl Bucket {
     fn take(&mut self, period: u64, limit: u64) -> Result<()> {
+        self.take_units(period, limit, 1)
+    }
+    fn take_units(&mut self, period: u64, limit: u64, units: u64) -> Result<()> {
+        if !(1..=16).contains(&units) {
+            return Err("invalid request units".into());
+        }
         if period < self.period {
             return Err("clock moved backwards; preserve admission state".into());
         }
@@ -258,10 +264,14 @@ impl Bucket {
             self.period = period;
             self.count = 0;
         }
-        if self.count >= limit {
+        if self
+            .count
+            .checked_add(units)
+            .is_none_or(|count| count > limit)
+        {
             return Err("request quota exhausted".into());
         }
-        self.count += 1;
+        self.count += units;
         Ok(())
     }
 }
@@ -585,24 +595,33 @@ pub fn authorize(root: &Path, proof: Proof) -> Result<Value> {
     authorize_at(root, proof, now()?)
 }
 fn authorize_at(root: &Path, proof: Proof, time: u64) -> Result<Value> {
+    authorize_units_at(root, proof, time, 1)
+}
+pub fn authorize_units(root: &Path, proof: Proof, units: u64) -> Result<Value> {
+    authorize_units_at(root, proof, now()?, units)
+}
+fn authorize_units_at(root: &Path, proof: Proof, time: u64, units: u64) -> Result<Value> {
     let _lock = lock(root)?;
     let mut state = load(root)?;
     let time = clock(&mut state, time)?;
     proof.verify(&state.policy, "rpc", b"", time)?;
     let i = member_index(&state, &proof.fee_address).ok_or("invitation required")?;
     active(&state.invitations[i], time)?;
-    state.global_rpc.take(time / 60, 6000)?;
+    state.global_rpc.take_units(time / 60, 6000, units)?;
     let limit = state.policy.rpc_per_minute;
     state.invitations[i]
         .member
         .as_mut()
         .ok_or("missing member")?
         .rpc
-        .take(time / 60, limit)?;
+        .take_units(time / 60, limit, units)?;
     save(root, &state)?;
     Ok(json!({"authorized":true}))
 }
 pub fn edge(root: &Path, channel: &str, peer: &str) -> Result<Value> {
+    edge_units(root, channel, peer, 1)
+}
+pub fn edge_units(root: &Path, channel: &str, peer: &str, units: u64) -> Result<Value> {
     let _lock = lock(root)?;
     let mut state = load(root)?;
     let time = clock(&mut state, now()?)?;
@@ -633,9 +652,11 @@ pub fn edge(root: &Path, channel: &str, peer: &str) -> Result<Value> {
             });
             state.edge.len() - 1
         };
-        state.edge[index]
-            .bucket
-            .take(time / 60, if name == "global" { limit * 2 } else { limit })?;
+        state.edge[index].bucket.take_units(
+            time / 60,
+            if name == "global" { limit * 2 } else { limit },
+            units,
+        )?;
     }
     save(root, &state)?;
     Ok(json!({"allowed":true}))
@@ -710,6 +731,47 @@ mod tests {
             proof,
         }
     }
+    #[test]
+    fn block_units_are_durable_bounded_and_cannot_bypass_limits_or_revocation() {
+        let (_dir, root, profile) = fixture(1, 1, 20);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let code = token(&root, "invite", 3600, None);
+        let time = now().unwrap();
+        join(&root, joined(&wallet, &profile, Some(code), time)).unwrap();
+        let proof = || Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        authorize_units_at(&root, proof(), time, 16).unwrap();
+        let original = fs::read(root.join(STATE)).unwrap();
+        for units in [0, 5, 17, u64::MAX] {
+            assert!(authorize_units_at(&root, proof(), time, units).is_err());
+            assert_eq!(fs::read(root.join(STATE)).unwrap(), original);
+        }
+        authorize_units_at(&root, proof(), time, 4).unwrap();
+        assert_eq!(load(&root).unwrap().global_rpc.count, 20);
+        assert_eq!(
+            load(&root).unwrap().invitations[0]
+                .member
+                .as_ref()
+                .unwrap()
+                .rpc
+                .count,
+            20
+        );
+        assert!(authorize_units_at(&root, proof(), time, 1).is_err());
+        edge_units(&root, "rpc", "127.0.0.1", 1).unwrap();
+        edge_units(&root, "rpc", "127.0.0.1", 15).unwrap();
+        assert!(load(&root)
+            .unwrap()
+            .edge
+            .iter()
+            .all(|e| e.bucket.count == 16));
+        let original = fs::read(root.join(STATE)).unwrap();
+        assert!(edge_units(&root, "rpc", "127.0.0.1", 17).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), original);
+        let id = load(&root).unwrap().invitations[0].id.clone();
+        revoke(&root, &id).unwrap();
+        assert!(authorize_units_at(&root, proof(), time + 60, 16).is_err());
+    }
+
     #[test]
     fn redemption_binds_once_resumes_after_missing_claim_commit_and_never_exports_raw_codes() {
         let (_dir, root, profile) = fixture(2, 2, 5);

@@ -91,8 +91,8 @@ def ready(timeout=120):
     raise RuntimeError('service validators not ready')
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False):
-    if ack_test or package_test or browser_test:os.nice(10)
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False):
+    if ack_test or package_test or browser_test or restore_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
     children=[None,None];shutdown=threading.Event();ingress=None
@@ -100,10 +100,10 @@ def supervise(ack_test=False,package_test=False,browser_test=False):
     signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
     try:
         test_deadline=None
-        if ack_test or package_test or browser_test:
+        if ack_test or package_test or browser_test or restore_test:
             from service_tls import private_bytes
-            session_name='browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
@@ -124,7 +124,7 @@ def supervise(ack_test=False,package_test=False,browser_test=False):
         if (ROOT/'ingress-setup.json').exists():
             from service_ingress import Ingress
             if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':
-                ingress=Ingress(browser_test=True) if browser_test else Ingress(package_test=True) if package_test else Ingress(ack_test=True) if ack_test else Ingress()
+                ingress=Ingress(restore_test=True) if restore_test else Ingress(browser_test=True) if browser_test else Ingress(package_test=True) if package_test else Ingress(ack_test=True) if ack_test else Ingress()
         while not shutdown.wait(1):
             if any(p.poll() is not None for p in children):raise RuntimeError('owned validator exited; restart the coordinated service group')
             if ingress is not None and not ingress.healthy():raise RuntimeError('wallet ingress worker exited; restart original service group')
@@ -247,7 +247,7 @@ def test_finish():
 
 if __name__=='__main__':
     action=sys.argv[1] if len(sys.argv)>=2 else ''
-    if action in ('client-export','ack-arm','browser-ack-arm','browser-close-checkpoint'):
+    if action in ('client-export','ack-arm','browser-ack-arm','browser-close-checkpoint','restore-ack-arm'):
         if len(sys.argv)!=3 or (action=='client-export' and sys.argv[2] not in ('alice','bob')):raise ValueError('unexpected service arguments')
     elif len(sys.argv)!=2:raise ValueError('unexpected service arguments')
     if action=='init':output=initialize()
@@ -255,6 +255,7 @@ if __name__=='__main__':
     elif action=='run-ack-test':output=supervise(ack_test=True)
     elif action=='run-package-test':output=supervise(package_test=True)
     elif action=='run-browser-test':output=supervise(browser_test=True)
+    elif action=='run-restore-test':output=supervise(restore_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':ready(timeout=4);output={'slots':slots(),'native_state':canonical(),'uid':os.getuid()}
@@ -274,6 +275,10 @@ if __name__=='__main__':
         from service_ingress import browser_test_paths,arm_ack_gate,ack_checkpoint
         browser_test_paths()
         output=arm_ack_gate(sys.argv[2]) if action=='browser-ack-arm' else ack_checkpoint()
+    elif action in ('restore-ack-arm','restore-ack-checkpoint'):
+        from service_ingress import restore_test_paths,arm_ack_gate,ack_checkpoint
+        restore_test_paths()
+        output=arm_ack_gate(sys.argv[2]) if action=='restore-ack-arm' else ack_checkpoint()
     elif action=='browser-close-checkpoint':
         from service_ingress import browser_close_checkpoint
         output=browser_close_checkpoint(sys.argv[2])

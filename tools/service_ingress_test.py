@@ -108,6 +108,11 @@ class ServiceIngressTests(unittest.TestCase):
         self.assertEqual(original_log.read_bytes(),b'{"attempts":[]}')
         self.assertEqual(app.ACK_BROADCASTS,app.ROOT/'browser-ack-broadcasts-024.json')
 
+    def test_restore_fault_namespace_keeps_all_previous_browser_evidence_separate(self):
+        app=self.app;app.restore_test_paths()
+        self.assertEqual(app.ACK_GATE,app.ROOT/'restore-ack-test-025.json')
+        self.assertEqual(app.ACK_BROADCASTS,app.ROOT/'restore-ack-broadcasts-025.json')
+
     def test_browser_recovery_cleanup_rejects_failed_payments_and_other_programs(self):
         app=self.app;app.load.return_value={'program':'native'}
         instruction={'programIdIndex':0,'accounts':[1,2],'data':'5'}

@@ -24,6 +24,7 @@ fn run() -> Result<()> {
             "--rpc-limit",
             "--channel",
             "--peer",
+            "--units",
         ]
         .contains(&flag.as_str())
         {
@@ -58,7 +59,16 @@ fn run() -> Result<()> {
             options.get("--bind-fee").cloned(),
         )?,
         "invite-revoke" => access::revoke(root, get("--invite-id")?)?,
-        "edge" => access::edge(root, get("--channel")?, get("--peer")?)?,
+        "edge" => access::edge_units(
+            root,
+            get("--channel")?,
+            get("--peer")?,
+            options
+                .get("--units")
+                .map(|s| s.parse())
+                .transpose()?
+                .unwrap_or(1),
+        )?,
         "accept" | "join" | "access-status" | "authorize" => {
             let raw = std::fs::read(get("--request-file")?)?;
             if raw.len() > 4096 {
@@ -70,7 +80,15 @@ fn run() -> Result<()> {
                 "access-status" => {
                     access::status(root, serde_json::from_slice::<access::Status>(&raw)?.proof)?
                 }
-                _ => access::authorize(root, serde_json::from_slice(&raw)?)?,
+                _ => access::authorize_units(
+                    root,
+                    serde_json::from_slice(&raw)?,
+                    options
+                        .get("--units")
+                        .map(|s| s.parse())
+                        .transpose()?
+                        .unwrap_or(1),
+                )?,
             }
         }
         "init" | "tick" => {

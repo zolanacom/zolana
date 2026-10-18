@@ -48,6 +48,7 @@ pub struct Chain {
     network: Network,
     sponsor_budget: Option<crate::sponsor::Budget>,
     user_fees: Option<(Pubkey, u64, std::path::PathBuf)>,
+    history_batches: bool,
 }
 
 pub struct Synced {
@@ -65,6 +66,10 @@ pub struct ScanStats {
     pub cache_saved: bool,
     pub blocks_fetched: usize,
     pub payments_verified: usize,
+    pub block_rpc_requests: usize,
+    pub fetch_ms: u128,
+    pub replay_ms: u128,
+    pub setup_ms: u128,
     pub from_slot: u64,
     pub cache_reset: Option<String>,
     pub history_blocks_read: usize,
@@ -294,6 +299,7 @@ impl Chain {
         operator: Option<native_rpc_access::Credential>,
         ca: Option<&str>,
     ) -> Result<Self> {
+        let history_batches = access.is_some();
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(proof) = access {
             headers.insert("X-Testnet-Access", proof.parse()?);
@@ -331,6 +337,7 @@ impl Chain {
             network,
             sponsor_budget: None,
             user_fees: None,
+            history_batches,
         })
     }
 
@@ -670,6 +677,46 @@ impl Chain {
         self.scan_source(wallets, candidate, None, None)
     }
 
+    fn fetch_history_blocks(&self, slots: &[u64]) -> Result<Vec<HistoryBlock>> {
+        use solana_rpc_client_api::request::RpcRequest;
+        use solana_transaction_status_client_types::UiConfirmedBlock;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Block {
+            slot: u64,
+            block: UiConfirmedBlock,
+        }
+        if slots.is_empty() || slots.len() > 16 {
+            return Err("invalid history request size".into());
+        }
+        if self.history_batches {
+            let blocks: Vec<Block> = self.rpc.send(RpcRequest::Custom { method: "getWalletHistoryBlocks" }, serde_json::json!([slots]))
+                .map_err(|error| format!("cannot read complete finalized history batch; an updated invited gateway is required: {error}"))?;
+            if blocks.len() != slots.len()
+                || blocks
+                    .iter()
+                    .zip(slots)
+                    .any(|(block, slot)| block.slot != *slot)
+            {
+                return Err(
+                    "history batch omitted, reordered or substituted a requested block".into(),
+                );
+            }
+            blocks
+                .into_iter()
+                .map(|block| HistoryBlock::from_rpc(block.slot, block.block))
+                .collect()
+        } else {
+            slots.iter().map(|slot| {
+                let block = self.rpc.get_block_with_config(*slot, RpcBlockConfig {
+                    encoding: Some(UiTransactionEncoding::Base64), transaction_details: Some(TransactionDetails::Full),
+                    rewards: Some(false), commitment: Some(CommitmentConfig::finalized()), max_supported_transaction_version: Some(0),
+                }).map_err(|error| format!("cannot read finalized block {slot}; complete archive history or retained recovery history is required: {error}"))?;
+                HistoryBlock::from_rpc(*slot, block)
+            }).collect()
+        }
+    }
+
     fn scan_source(
         &self,
         wallets: &[&WalletKey],
@@ -704,6 +751,7 @@ impl Chain {
         if writer.is_some() && history.is_some_and(|history| history.tip() > target) {
             return Err("RPC is behind retained history; refusing archive rollback".into());
         }
+        let setup_started = Instant::now();
         // Batched full scans share one verifier key with the primary replay.
         let shared_key = (wallets.len() > 1).then(|| {
             std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
@@ -807,19 +855,34 @@ impl Chain {
                 result.apply_block(block)?;
             }
         }
+        result.scan.setup_ms = setup_started.elapsed().as_millis();
         let mut start = result.slot.checked_add(1).ok_or("history slot overflow")?;
         while start <= target {
             let end = start.saturating_add(9999).min(target);
-            let blocks = self.rpc.get_blocks(start, Some(end))?;
-            for slot in blocks.into_iter().filter(|slot| *slot != 0) {
-                result.scan.blocks_fetched += 1;
-                let block = self.rpc.get_block_with_config(slot, RpcBlockConfig {
-                    encoding: Some(UiTransactionEncoding::Base64), transaction_details: Some(TransactionDetails::Full),
-                    rewards: Some(false), commitment: Some(CommitmentConfig::finalized()), max_supported_transaction_version: Some(0),
-                }).map_err(|error| format!("cannot read finalized block {slot}; complete archive history or retained recovery history is required: {error}"))?;
-                let compact = result.apply_block(HistoryBlock::from_rpc(slot, block)?)?;
-                if let Some(writer) = &mut writer {
-                    writer.push(compact)?;
+            let blocks: Vec<_> = self
+                .rpc
+                .get_blocks(start, Some(end))?
+                .into_iter()
+                .filter(|slot| *slot != 0)
+                .collect();
+            if blocks.iter().any(|slot| *slot < start || *slot > end)
+                || blocks.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err("invalid finalized block range".into());
+            }
+            for slots in blocks.chunks(if self.history_batches { 16 } else { 1 }) {
+                let fetched_at = Instant::now();
+                let batch = self.fetch_history_blocks(slots)?;
+                result.scan.fetch_ms += fetched_at.elapsed().as_millis();
+                result.scan.block_rpc_requests += 1;
+                for block in batch {
+                    result.scan.blocks_fetched += 1;
+                    let replay_at = Instant::now();
+                    let compact = result.apply_block(block)?;
+                    result.scan.replay_ms += replay_at.elapsed().as_millis();
+                    if let Some(writer) = &mut writer {
+                        writer.push(compact)?;
+                    }
                 }
             }
             if end == target {
@@ -1420,6 +1483,7 @@ mod recovery_tests {
             network,
             sponsor_budget: Some(budget),
             user_fees: None,
+            history_batches: false,
         };
         let tx = Transaction::new_signed_with_payer(
             &[system::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1)],
@@ -1474,6 +1538,7 @@ mod recovery_tests {
             rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
             sponsor_budget: None,
             user_fees: None,
+            history_batches: false,
             network,
         };
         (wallet, checkpoint, chain)
@@ -1483,6 +1548,59 @@ mod recovery_tests {
         json!({"blockhash":bs58::encode([slot as u8;32]).into_string(),
             "previousBlockhash":bs58::encode([parent as u8;32]).into_string(),
             "parentSlot":parent,"blockHeight":slot,"blockTime":null,"transactions":[],"rewards":[]})
+    }
+
+    #[test]
+    fn history_batches_require_every_requested_block_in_order_and_full_continuity() {
+        for mode in 0..6 {
+            let (wallet, _, mut chain) = cached_fixture(2, vec![], vec![1, 2]);
+            chain.history_batches = true;
+            let mut first = block(1, 0);
+            if mode == 4 {
+                first.as_object_mut().unwrap().remove("transactions");
+            }
+            let mut response = vec![
+                json!({"slot":1,"block":first}),
+                json!({"slot":2,"block":block(2, if mode == 3 { 0 } else { 1 })}),
+            ];
+            if mode == 1 {
+                response.pop();
+            }
+            if mode == 2 {
+                response.reverse();
+            }
+            if mode == 5 {
+                response[1]["slot"] = json!(3);
+            }
+            let pool = Replay::new(&wallet, 1000).unwrap().state.pool.encode();
+            chain.rpc = RpcClient::new_mock_with_mocks_map(
+                "succeeds",
+                MocksMap::from_iter([
+                    (
+                        RpcRequest::GetAccountInfo,
+                        json!({"context":{"slot":2},"value":{
+                    "lamports":1000,"owner":id().to_string(),"executable":false,"rentEpoch":0,
+                    "data":[bs58::encode(pool).into_string(),"base58"]}}),
+                    ),
+                    (RpcRequest::GetBlocks, json!([1, 2])),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletHistoryBlocks",
+                        },
+                        json!(response),
+                    ),
+                ]),
+            );
+            let result = chain.scan(&[&wallet], None);
+            if mode == 0 {
+                let result = result.unwrap();
+                assert_eq!(result.slot, 2);
+                assert_eq!(result.scan.blocks_fetched, 2);
+                assert_eq!(result.scan.block_rpc_requests, 1);
+            } else {
+                assert!(result.is_err(), "invalid batch mode {mode} accepted");
+            }
+        }
     }
 
     #[test]
@@ -1748,6 +1866,7 @@ mod recovery_tests {
             rpc: RpcClient::new_mock_with_mocks_map(url, mocks),
             sponsor_budget: None,
             user_fees: None,
+            history_batches: false,
             network,
         }
     }
@@ -1774,6 +1893,7 @@ mod recovery_tests {
             network: network.clone(),
             sponsor_budget: None,
             user_fees: Some((payer.pubkey(), 100, operation.staging.clone())),
+            history_batches: false,
         };
         let tx = Transaction::new_with_payer(
             &[instructions::seal(Pubkey::new_unique(), payer.pubkey())],
@@ -1822,6 +1942,7 @@ mod recovery_tests {
             network,
             sponsor_budget: None,
             user_fees: None,
+            history_batches: false,
         };
         assert!(chain
             .reclaim(&payer, &operation)

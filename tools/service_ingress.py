@@ -112,6 +112,13 @@ def browser_test_paths():
     ACK_BROADCASTS=ROOT/'browser-ack-broadcasts-024.json'
 
 
+def restore_test_paths():
+    """Keep first-restore acceptance separate from earlier crash evidence."""
+    global ACK_GATE,ACK_BROADCASTS
+    ACK_GATE=ROOT/'restore-ack-test-025.json'
+    ACK_BROADCASTS=ROOT/'restore-ack-broadcasts-025.json'
+
+
 def arm_ack_gate(target):
     signature(target)
     if os.path.lexists(ACK_GATE):raise ValueError('acknowledgement experiment already started; retain its original record')
@@ -208,12 +215,13 @@ class PackageRecoveryGateway(Gateway):
 
 
 class Ingress:
-    def __init__(self,ack_test=False,package_test=False,browser_test=False):
+    def __init__(self,ack_test=False,package_test=False,browser_test=False,restore_test=False):
         check_ready();self.services=[];self.threads=[];self.worker=None;self.faucet=None
         try:
-            if browser_test:browser_test_paths()
+            if restore_test:restore_test_paths()
+            elif browser_test:browser_test_paths()
             self.faucet=Faucet(FAUCET_ROOT,PASSWORD,binary=FAUCET)
-            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test or browser_test else Gateway)(self.faucet)
+            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test or browser_test or restore_test else Gateway)(self.faucet)
             self.gateway=gateway
             for port,handler,app,endpoint in [(FAUCET_PORT,FaucetHandler,self.faucet,gateway.info['faucet_audience']),
                 (RPC_PORT,GatewayHandler,gateway,gateway.info['rpc_audience'])]:

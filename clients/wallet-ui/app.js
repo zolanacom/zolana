@@ -1,5 +1,6 @@
 const screen = document.querySelector('#screen');
 const notice = document.querySelector('#notice');
+let progressTimer, progressLabel = '', progressStarted = 0;
 let session = {}, password = '', address = '', balance = null, receipt = null, publicAddress = '', publicBalance = null, feeBalance = null, minimumPublicWithdrawal = null, busy = false, idle, grant = null, grantPoll, grantStarted = 0;
 
 function message(text = '', kind = '') {
@@ -29,12 +30,22 @@ async function api(action, extra = {}) {
   if (!response.ok) throw new Error(body.error || 'The wallet could not complete this operation.');
   return body.result;
 }
+function progress(label) {
+  clearInterval(progressTimer);
+  progressLabel = label; progressStarted = Date.now(); message(label);
+  // Elapsed time is real; no invented percentage or completion estimate.
+  progressTimer = setInterval(() => {
+    if (!busy) return;
+    const seconds = Math.floor((Date.now() - progressStarted) / 1000);
+    if (seconds >= 5) message(`${progressLabel} ${seconds}s elapsed. Keep this tab open.`);
+  }, 5000);
+}
 async function work(label, action, activity = true) {
   if (busy) return;
-  busy = true; message(label);
+  busy = true; progress(label);
   screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = true);
   try { await action(); } catch (error) { message(error.message || 'The local wallet is unavailable. Check that the local network is running.', 'error'); }
-  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); applyAvailability(); if (activity) touch(); }
+  finally { clearInterval(progressTimer); busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); applyAvailability(); if (activity) touch(); }
 }
 function applyAvailability() {
   if (session.operator_sponsor_available === false) {
@@ -54,7 +65,7 @@ document.addEventListener('pointerdown', touch); document.addEventListener('keyd
 function welcome() {
   if (session.exists) {
     setScreen(`<h2>Welcome back.</h2><p class="caption">Unlock your private wallet.</p><form id="unlock-form"><label for="password">Wallet password</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button class="primary">Unlock wallet</button></form><p class="hint">Your encrypted wallet stays on this device.</p>`);
-    on('unlock-form', 'submit', event => { event.preventDefault(); password = document.querySelector('#password').value; work('Unlocking your wallet…', async () => { const result = await api('unlock'); address = result.address; if (session.needs_backup) recovery(); else await dashboard(); }); });
+    on('unlock-form', 'submit', event => { event.preventDefault(); password = document.querySelector('#password').value; work('Unlocking your wallet and checking saved access…', async () => { const result = await api('unlock'); address = result.address; if (session.needs_backup) recovery(); else await dashboard(); }); });
     return;
   }
   setScreen(`<h2>Create your private wallet</h2><p class="caption">Keep your recovery file. Only you can unlock it.</p><form id="create-form"><label for="password">Wallet password</label><input id="password" type="password" autocomplete="new-password" required minlength="12"><label for="confirm">Confirm password</label><input id="confirm" type="password" autocomplete="new-password" required minlength="12"><button class="primary">Create wallet</button></form><button class="secondary" id="restore">Restore a wallet</button><p class="hint">Your password stays on this device.</p>`);
@@ -85,7 +96,7 @@ function restore() {
     const text = document.querySelector('#recovery-text').value.trim();
     if (paste ? !text || new TextEncoder().encode(text).length > 4096 : !file || file.size > 4096) return message('Use a complete encrypted recovery file smaller than 4 KiB.', 'error');
     password = document.querySelector('#password').value;
-    work('Restoring and verifying your wallet…', async () => {
+    work('Restoring your encrypted wallet and checking saved access…', async () => {
       let backup;
       try { backup = JSON.parse(paste ? text : await file.text()); }
       catch { throw new Error('The recovery text is not valid JSON. Copy the complete encrypted recovery file and try again.'); }
@@ -178,6 +189,7 @@ function inviteAccess() {
   on('check-access','click',()=>work('Checking this wallet’s saved access…',async()=> {
     const result=await api('access-status');
     if (!result.admitted) { inviteAccess(); return message('This wallet has no active invitation access. Check your code or contact the test operator.','error'); }
+    progress('Access confirmed. Checking your existing test grant…');
     grant=await api('test-coins'); grantStarted=Date.now(); await dashboard();
   }));
   on('invite-receive','click',receive); on('invite-backup','click',recovery); on('invite-lock','click',lock);
@@ -185,6 +197,7 @@ function inviteAccess() {
 async function dashboard() {
   if (session.invite_required && !session.testnet_admitted) return inviteAccess();
   try {
+    progress('Verifying finalized payment history… Your first sync checks the full history; later refreshes use your verified checkpoint.');
     const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; feeBalance = result.fee_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null;
   } catch (error) { if (session.invite_required && !session.testnet_admitted) inviteAccess(); else renderDashboard(); throw error; }
   renderDashboard();

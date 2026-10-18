@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from testnet_gateway import Handler
+from testnet_gateway import Handler, Gateway, history_slots
 from wallet_ui import WalletApp
 
 
@@ -15,14 +15,16 @@ class GatewayTests(unittest.TestCase):
     def request(self, body, access=None, headers=None, limit=False):
         calls=[]
         class Faucet:
-            def ingress(self, channel, peer):
-                calls.append(('ingress',channel,peer))
+            def ingress(self, channel, peer, units=1):
+                calls.append(('ingress',channel,peer) if units == 1 else ('ingress',channel,peer,units))
                 if limit: raise ValueError('request quota exhausted')
-            def command(self, command, data):
-                calls.append((command,data))
+            def command(self, command, data, extra=()):
+                calls.append((command,data) if not extra else (command,data,extra))
                 if data!={'signature':'valid'}: raise ValueError('invalid proof')
         class App:
             faucet=Faucet()
+            def history_blocks(self, request, slots):
+                calls.append(('history',slots)); return json.dumps({'result':slots}).encode()
             def forward(self, raw):
                 calls.append(('forward',json.loads(raw)))
                 return b'{"jsonrpc":"2.0","id":1,"result":"genuine-upstream"}'
@@ -65,6 +67,36 @@ class GatewayTests(unittest.TestCase):
         for header in ['?', 'x'*3073, base64.urlsafe_b64encode(b'{}').decode()]:
             code,_,calls=self.request(dict(genesis,method='getBalance'),header)
             self.assertEqual(code,403); self.assertFalse(any(c[0]=='forward' for c in calls))
+
+    def test_history_reads_are_bounded_read_only_and_charged_per_block(self):
+        request=dict(jsonrpc='2.0',id=1,method='getWalletHistoryBlocks',params=[list(range(1,17))])
+        header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
+        code,body,calls=self.request(request,header)
+        self.assertEqual(code,200); self.assertEqual(body['result'],list(range(1,17)))
+        self.assertEqual(calls[1],('ingress','rpc','127.0.0.1',15))
+        self.assertEqual(calls[2],('authorize',{'signature':'valid'},['--units','16']))
+        self.assertEqual([c[0] for c in calls],['ingress','ingress','authorize','history'])
+        for params in [None,[],[[]],[[0]],[[True]],[[1,1]],[[2,1]],[[2**64]],[[1.0]],[list(range(1,18))],[[1],{'commitment':'processed'}]]:
+            code,_,calls=self.request(dict(request,params=params),header)
+            self.assertEqual(code,403);self.assertFalse(any(c[0] in ('forward','history') for c in calls))
+        code,_,calls=self.request(request,None)
+        self.assertEqual(code,403);self.assertFalse(any(c[0]=='history' for c in calls))
+
+    def test_history_aggregation_fixes_encoding_finality_and_refuses_missing_or_oversized_blocks(self):
+        gateway=object.__new__(Gateway);queries=[]
+        def forward(raw):
+            query=json.loads(raw);queries.append(query)
+            return json.dumps({'jsonrpc':'2.0','id':query['id'],'result':{'transactions':[]}}).encode()
+        gateway.forward=forward
+        request=dict(id='same',method='getWalletHistoryBlocks')
+        result=json.loads(gateway.history_blocks(request,[1,3]))
+        self.assertEqual(result['id'],'same');self.assertEqual([b['slot'] for b in result['result']],[1,3])
+        for query in queries:
+            self.assertEqual(query['method'],'getBlock')
+            self.assertEqual(query['params'][1],dict(encoding='base64',transactionDetails='full',rewards=False,commitment='finalized',maxSupportedTransactionVersion=0))
+        for response in [{'id':1,'result':None},{'id':2,'result':{}},{'id':1,'error':{'code':-1}},{'id':1,'result':{'data':'x'*(16*1024*1024)}}]:
+            gateway.forward=lambda raw:json.dumps(response).encode()
+            with self.assertRaises(ValueError):gateway.history_blocks(request,[1])
 
 
 class InvitedWalletTests(unittest.TestCase):

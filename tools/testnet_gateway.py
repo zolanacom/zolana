@@ -5,6 +5,7 @@ import base64
 from http.server import BaseHTTPRequestHandler
 import json
 import subprocess
+import time
 from pathlib import Path
 import urllib.error
 import urllib.parse
@@ -12,6 +13,7 @@ import urllib.request
 from test_faucet import BoundedServer, Faucet
 
 METHODS = {
+    "getWalletHistoryBlocks",
     "getGenesisHash", "getHealth", "getVersion", "getAccountInfo", "getMultipleAccounts",
     "getBlocks", "getBlock", "getBlockHeight", "getSlot", "getEpochInfo", "getBalance",
     "getSignaturesForAddress", "getSignatureStatuses", "getTransaction", "getLatestBlockhash",
@@ -55,6 +57,35 @@ class Gateway:
                 raise ValueError("RPC response exceeds gateway limit")
             return body
 
+    def history_blocks(self, request, slots):
+        # Read-only aggregation, never arbitrary JSON-RPC batches. Every full
+        # finalized block is returned; clients still authenticate continuity and
+        # replay every payment proof. The aggregate has the ordinary response cap.
+        items, total = [], 0
+        for slot in slots:
+            raw = json.dumps({"jsonrpc": "2.0", "id": slot, "method": "getBlock", "params": [slot, {
+                "encoding": "base64", "transactionDetails": "full", "rewards": False,
+                "commitment": "finalized", "maxSupportedTransactionVersion": 0}]}).encode()
+            response = json.loads(self.forward(raw))
+            if response.get("id") != slot or response.get("error") is not None or not isinstance(response.get("result"), dict):
+                raise ValueError("complete finalized history is unavailable")
+            item = json.dumps({"slot": slot, "block": response["result"]}, separators=(",", ":")).encode()
+            total += len(item) + 1
+            if total > 16 * 1024 * 1024 - 256:
+                raise ValueError("RPC response exceeds gateway limit")
+            items.append(item)
+        return json.dumps({"jsonrpc": "2.0", "id": request["id"]}).encode()[:-1] + b',"result":[' + b','.join(items) + b']}'
+
+
+def history_slots(request):
+    params = request.get("params")
+    if not isinstance(params, list) or len(params) != 1 or not isinstance(params[0], list):
+        raise ValueError("invalid history request")
+    slots = params[0]
+    if not 1 <= len(slots) <= 16 or any(type(slot) is not int or not 1 <= slot <= 2**64 - 1 for slot in slots) or any(a >= b for a, b in zip(slots, slots[1:])):
+        raise ValueError("invalid history block range")
+    return slots
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -76,12 +107,18 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(request, dict) or set(request) - {"jsonrpc", "id", "method", "params"} or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str) or request["method"] not in METHODS or type(request.get("id")) not in (str, int) or len(str(request["id"])) > 64 or (request.get("params") is not None and not isinstance(request["params"], list)):
                 raise ValueError("RPC method or envelope denied")
             if request["method"] != "getGenesisHash":
+                slots = history_slots(request) if request["method"] == "getWalletHistoryBlocks" else None
+                if slots and len(slots) > 1:
+                    self.server.app.faucet.ingress("rpc", self.client_address[0], len(slots) - 1)
                 header = self.headers.get("X-Testnet-Access", "")
                 if not 1 <= len(header) <= 3072:
                     raise ValueError("invitation required")
                 proof = json.loads(base64.b64decode(header + "=" * (-len(header) % 4), altchars=b"-_", validate=True))
-                self.server.app.faucet.command("authorize", proof)
-            data = self.server.app.forward(raw)
+                if slots:
+                    self.server.app.faucet.command("authorize", proof, extra=["--units", str(len(slots))])
+                else:
+                    self.server.app.faucet.command("authorize", proof)
+            data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
         except (ValueError, RecursionError, OSError, urllib.error.URLError, subprocess.SubprocessError) as error:
             code = 429 if "quota exhausted" in str(error) else 403
             data = json.dumps({"error": "request_limit" if code == 429 else "access_denied"}).encode()
@@ -90,6 +127,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if code == 429:
+            # The native HTTP sender honors this bounded delay. Retrying a
+            # read does not reset durable quotas or spin against the gateway.
+            self.send_header("Retry-After", str(61 - int(time.time()) % 60))
         self.end_headers()
         try:
             self.wfile.write(data)
