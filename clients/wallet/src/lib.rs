@@ -1,6 +1,7 @@
 //! Experimental local wallet. RPC consensus is trusted; keys never leave this process.
 #![forbid(unsafe_code)]
 
+pub mod access;
 mod archive;
 mod cache;
 pub mod connection;

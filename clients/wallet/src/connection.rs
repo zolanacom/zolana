@@ -67,6 +67,8 @@ pub struct TesterProfile {
     pub rpc: Endpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet: Option<Endpoint>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invite_required: bool,
 }
 
 impl TesterProfile {
@@ -103,6 +105,9 @@ impl TesterProfile {
         {
             return Err("invalid or incompatible tester profile".into());
         }
+        if self.invite_required && self.faucet.is_none() {
+            return Err("invited profile requires a pinned admission endpoint".into());
+        }
         self.network().validate()?;
         self.rpc.validate()?;
         if let Some(endpoint) = &self.faucet {
@@ -128,6 +133,7 @@ mod tests {
             pool: native_payment_program::pool_address().to_string(),
             pool_format: "NPOOL003".into(),
             recipient_withdrawals: true,
+            invite_required: false,
             faucet: None,
             rpc: Endpoint {
                 transport: "https".into(),

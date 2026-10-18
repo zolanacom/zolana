@@ -1,5 +1,5 @@
 use native_wallet::{
-    faucet,
+    access, faucet,
     keys::{read_password, read_password_input},
     Result,
 };
@@ -15,6 +15,14 @@ fn run() -> Result<()> {
             "--password-file",
             "--max-claims",
             "--request-file",
+            "--output",
+            "--expires-in",
+            "--bind-fee",
+            "--invite-id",
+            "--daily-admissions",
+            "--rpc-limit",
+            "--channel",
+            "--peer",
         ]
         .contains(&flag.as_str())
         {
@@ -34,28 +42,54 @@ fn run() -> Result<()> {
             .ok_or_else(|| format!("missing {name}").into())
     };
     let root = Path::new(get("--root")?);
-    let result = if command == "accept" {
-        let raw = std::fs::read(get("--request-file")?)?;
-        if raw.len() > 2048 {
-            return Err("claim exceeds limit".into());
+    let result = match command.as_str() {
+        "access-init" => access::initialize(
+            root,
+            Path::new(get("--profile")?),
+            get("--daily-admissions")?.parse()?,
+            get("--rpc-limit")?.parse()?,
+        )?,
+        "access-info" => access::info(root)?,
+        "invite-issue" => access::issue(
+            root,
+            Path::new(get("--output")?),
+            get("--expires-in")?.parse()?,
+            options.get("--bind-fee").cloned(),
+        )?,
+        "invite-revoke" => access::revoke(root, get("--invite-id")?)?,
+        "edge" => access::edge(root, get("--channel")?, get("--peer")?)?,
+        "accept" | "join" | "access-status" | "authorize" => {
+            let raw = std::fs::read(get("--request-file")?)?;
+            if raw.len() > 4096 {
+                return Err("access request exceeds limit".into());
+            }
+            match command.as_str() {
+                "accept" => faucet::accept(root, serde_json::from_slice(&raw)?)?,
+                "join" => access::join(root, serde_json::from_slice(&raw)?)?,
+                "access-status" => {
+                    access::status(root, serde_json::from_slice::<access::Status>(&raw)?.proof)?
+                }
+                _ => access::authorize(root, serde_json::from_slice(&raw)?)?,
+            }
         }
-        faucet::accept(root, serde_json::from_slice(&raw)?)?
-    } else {
-        let p = if get("--password-file")? == "-" {
-            read_password_input(std::io::stdin().lock())?
-        } else {
-            read_password(Path::new(get("--password-file")?))?
-        };
-        match command.as_str() {
-            "init" => faucet::initialize(
-                root,
-                Path::new(get("--profile")?),
-                &p,
-                get("--max-claims")?.parse()?,
-            )?,
-            "tick" => faucet::tick(root, &p)?,
-            _ => return Err("unknown faucet command".into()),
+        "init" | "tick" => {
+            let p = if get("--password-file")? == "-" {
+                read_password_input(std::io::stdin().lock())?
+            } else {
+                read_password(Path::new(get("--password-file")?))?
+            };
+            if command == "init" {
+                faucet::initialize(
+                    root,
+                    Path::new(get("--profile")?),
+                    &p,
+                    get("--max-claims")?.parse()?,
+                )?
+            } else {
+                faucet::tick(root, &p)?
+            }
         }
+        _ => return Err("unknown faucet command".into()),
     };
     println!("{}", result);
     Ok(())

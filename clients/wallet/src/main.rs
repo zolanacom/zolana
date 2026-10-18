@@ -15,7 +15,7 @@ fn run() -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
         println!(
-            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive|check|profile|test-coins"
+            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive|check|profile|test-coins|join|access-status"
         );
         println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
@@ -32,6 +32,8 @@ fn run() -> Result<()> {
         println!("withdraw-legacy: disposable fixture compatibility only; credits the sponsor. Never enabled for guarded rehearsal keys.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
         println!("test-coins: request/check the same signed one-time private test-coin and public-gas grant through a pinned profile faucet; no sponsor options.");
+        println!("join: invited profiles only; --invitation-file <owner-only code/export file> admits this seed-derived fee authority once and queues its fixed grant. access-status checks the same wallet's durable admission.");
+        println!("Invited check validates only the public genesis handshake. Unlock an admitted wallet for authenticated pool/history access. RPC access proofs expire after ten minutes; a new command signs a fresh proof.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
         println!("archive: --network --rpc --history <directory>; public collector needs no wallet/password/sponsor");
         println!("balance/deposit/send/withdraw: optional --history <directory> supplies retained verified ciphertext history");
@@ -52,6 +54,8 @@ fn run() -> Result<()> {
         "check",
         "profile",
         "test-coins",
+        "join",
+        "access-status",
         "withdraw-legacy",
     ]
     .contains(&command.as_str())
@@ -75,6 +79,7 @@ fn run() -> Result<()> {
             "--fee-payer",
             "--max-fee-debit",
             "--payment",
+            "--invitation-file",
         ]
         .contains(&flag.as_str())
         {
@@ -178,6 +183,20 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
+    if args.contains_key("--invitation-file") && command != "join" {
+        return Err("invitation input is only supported for join".into());
+    }
+    if command == "check" && tester.as_ref().is_some_and(|p| p.invite_required) {
+        let _gateway = connect()?;
+        println!(
+            "{}",
+            json!({"invite_required":true,"wallet_unlock_required":true,"genesis_hash":network.genesis_hash})
+        );
+        return Ok(());
+    }
+    if command == "archive" && tester.as_ref().is_some_and(|p| p.invite_required) {
+        return Err("use an operator archive profile or an invited wallet balance scan".into());
+    }
     if command == "check" {
         println!("{}", connect()?.health()?);
         return Ok(());
@@ -233,6 +252,31 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
+    if matches!(command.as_str(), "join" | "access-status") {
+        let profile = tester.as_ref().ok_or("invited public profile required")?;
+        if !profile.invite_required {
+            return Err("this profile does not require an invitation".into());
+        }
+        let result = if command == "join" {
+            let raw = read_private(Path::new(required("--invitation-file")?), 512)?;
+            let token = if raw.first() == Some(&b'{') {
+                serde_json::from_slice::<serde_json::Value>(&raw)?["invitation"]
+                    .as_str()
+                    .ok_or("invalid invitation file")?
+                    .to_owned()
+            } else {
+                std::str::from_utf8(&raw)?.trim().to_owned()
+            };
+            if token.len() != 51 || !token.starts_with("invite1_") {
+                return Err("enter a valid invitation code".into());
+            }
+            native_wallet::access::request_join(profile, &wallet, Some(token))?
+        } else {
+            native_wallet::access::request_status(profile, &wallet)?
+        };
+        println!("{}", result);
+        return Ok(());
+    }
     if command == "test-coins" {
         let profile = tester
             .as_ref()
@@ -242,7 +286,10 @@ fn run() -> Result<()> {
     }
     // Hold the OS lock from before sync/proving until all submission/recovery work ends.
     let operation = WalletOperation::acquire(path)?;
-    let mut chain = connect()?;
+    let mut chain = match &tester {
+        Some(profile) if profile.invite_required => Chain::connect_invited(profile, &wallet)?,
+        _ => connect()?,
+    };
     if command == "resolve" {
         println!("{}", chain.resolve(&wallet, &operation)?);
         return Ok(());

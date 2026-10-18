@@ -83,6 +83,9 @@ impl Claim {
 
 pub fn request(profile: &TesterProfile, wallet: &WalletKey) -> Result<Value> {
     profile.validate()?;
+    if profile.invite_required {
+        return crate::access::request_join(profile, wallet, None);
+    }
     let endpoint = profile
         .faucet
         .as_ref()
@@ -138,6 +141,8 @@ struct Policy {
     source_fee_address: String,
     source_private_address: String,
     max_claims: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    invite_required: bool,
     private_amount: u64,
     gas_amount: u64,
     max_attempts: u8,
@@ -231,6 +236,11 @@ pub fn initialize(
         return Err("use a new faucet directory and 1..100 lifetime claims".into());
     }
     let profile = TesterProfile::load(profile_path)?;
+    if profile.invite_required {
+        return Err(
+            "faucet source profile must use separate operator RPC without invitation access".into(),
+        );
+    }
     fs::create_dir(root)?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
@@ -243,6 +253,7 @@ pub fn initialize(
         source_fee_address: wallet.fee_keypair().pubkey().to_string(),
         source_private_address: wallet.address_text(),
         max_claims,
+        invite_required: false,
         private_amount: PRIVATE_GRANT,
         gas_amount: GAS_GRANT,
         max_attempts: ATTEMPTS,
@@ -297,8 +308,14 @@ fn status(root: &Path, claim: &Claim) -> Result<Value> {
 /// Atomically reserve a lifetime slot before starting any funding operation.
 pub fn accept(root: &Path, claim: Claim) -> Result<Value> {
     let _lock = WalletOperation::acquire(&root.join("claims.json"))?;
+    accept_unlocked(root, claim)
+}
+pub(crate) fn accept_unlocked(root: &Path, claim: Claim) -> Result<Value> {
     let (_, mut ledger) = load(root)?;
     claim.validate(&ledger.policy.network)?;
+    if ledger.policy.invite_required {
+        crate::access::require_member(root, &claim)?;
+    }
     if claim.fee_address == ledger.policy.source_fee_address
         || claim.private_address == ledger.policy.source_private_address
     {
@@ -338,6 +355,26 @@ pub fn accept(root: &Path, claim: Claim) -> Result<Value> {
     status(root, &claim)
 }
 
+pub(crate) fn access_context(root: &Path) -> Result<(Network, usize, bool)> {
+    let (_, ledger) = load(root)?;
+    Ok((
+        ledger.policy.network,
+        ledger.policy.max_claims,
+        ledger.policy.invite_required,
+    ))
+}
+pub(crate) fn enable_invites(root: &Path) -> Result<()> {
+    let (_, mut ledger) = load(root)?;
+    if !ledger.claims.is_empty() || ledger.policy.invite_required {
+        return Err(
+            "invite setup requires an unused faucet; never reset existing claims or admission"
+                .into(),
+        );
+    }
+    ledger.policy.invite_required = true;
+    save(&root.join("claims.json"), &ledger)
+}
+
 /// One serialized worker; all RPC uncertainty retains the original identities.
 pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
     let _worker = WalletOperation::acquire(&root.join("worker"))?;
@@ -363,7 +400,7 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
             continue;
         }
         if !p.gas_done {
-            gas(&chain, &payer, claim, &mut p, &path)?;
+            gas(&chain.rpc, &payer, claim, &mut p, &path)?;
             if !p.gas_done {
                 return status(root, claim);
             }
@@ -457,8 +494,13 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
         json!({"idle":true,"reserved_claims":ledger.claims.len(),"max_claims":ledger.policy.max_claims}),
     )
 }
-fn gas(chain: &Chain, payer: &Keypair, claim: &Claim, p: &mut Progress, path: &Path) -> Result<()> {
-    let rpc = &chain.rpc;
+fn gas(
+    rpc: &solana_rpc_client::rpc_client::RpcClient,
+    payer: &Keypair,
+    claim: &Claim,
+    p: &mut Progress,
+    path: &Path,
+) -> Result<()> {
     let recipient: Pubkey = claim.fee_address.parse()?;
     if p.gas.is_none() {
         if p.gas_attempts >= ATTEMPTS {
@@ -513,6 +555,9 @@ fn gas(chain: &Chain, payer: &Keypair, claim: &Claim, p: &mut Progress, path: &P
             save(path, p)?;
             return Ok(());
         }
+        // The original identity is already observed. Wait for canonical finality
+        // or disappearance on a later tick instead of racing preflight with it.
+        return Ok(());
     }
     if rpc.get_block_height_with_commitment(CommitmentConfig::finalized())?
         > gas.last_valid_block_height
@@ -547,6 +592,58 @@ fn gas(chain: &Chain, payer: &Keypair, claim: &Claim, p: &mut Progress, path: &P
 mod tests {
     use super::*;
     #[test]
+    fn observed_gas_waits_for_finality_without_resending_or_resigning() {
+        use solana_rpc_client::{mock_sender::Mocks, rpc_client::RpcClient};
+        use solana_rpc_client_api::request::RpcRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claim.json");
+        let payer = Keypair::new();
+        let wallet = WalletKey::generate(Network {
+            network: [7; 32],
+            genesis_hash: bs58::encode([9; 32]).into_string(),
+        })
+        .unwrap();
+        let claim = Claim::signed(&wallet).unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[solana_system_interface::instruction::transfer(
+                &payer.pubkey(),
+                &claim.fee_address.parse().unwrap(),
+                GAS_GRANT,
+            )],
+            Some(&payer.pubkey()),
+            &[&payer],
+            bs58::encode([8; 32]).into_string().parse().unwrap(),
+        );
+        let mut p = Progress {
+            gas_attempts: 1,
+            gas: Some(Gas {
+                transaction: bincode::serialize(&tx).unwrap(),
+                last_valid_block_height: 100,
+            }),
+            ..Progress::default()
+        };
+        save(&path, &p).unwrap();
+        let original = fs::read(&path).unwrap();
+        for commitment in ["processed", "confirmed", "finalized"] {
+            let mocks = Mocks::from_iter([(
+                RpcRequest::GetSignatureStatuses,
+                json!({"context":{"slot":5},"value":[{"slot":4,"confirmations":if commitment=="finalized" {None} else {Some(1)},"err":null,"status":{"Ok":null},"confirmationStatus":commitment}]}),
+            )]);
+            // Any unconfigured RPC call fails decoding, including block-height or submit.
+            let rpc = RpcClient::new_mock_with_mocks("fails", mocks);
+            gas(&rpc, &payer, &claim, &mut p, &path).unwrap();
+            assert_eq!(p.gas_attempts, 1);
+            assert_eq!(
+                p.gas.as_ref().unwrap().transaction,
+                bincode::serialize(&tx).unwrap()
+            );
+            assert_eq!(p.gas_done, commitment == "finalized");
+            if commitment != "finalized" {
+                assert_eq!(fs::read(&path).unwrap(), original);
+            }
+        }
+    }
+    #[test]
     fn lifetime_reservations_survive_restart_reject_redirection_and_missing_records() {
         let temp = tempfile::tempdir().unwrap();
         let profile = TesterProfile {
@@ -563,6 +660,7 @@ mod tests {
                 transport: "loopback-http".into(),
                 url: "http://127.0.0.1:18899".into(),
             },
+            invite_required: false,
             faucet: None,
         };
         let profile_path = temp.path().join("profile.json");
@@ -611,6 +709,7 @@ mod tests {
                 transport: "loopback-http".into(),
                 url: "http://127.0.0.1:18899".into(),
             },
+            invite_required: false,
             faucet: None,
         };
         let path = temp.path().join("profile.json");

@@ -14,9 +14,9 @@ function setScreen(html) {
   if (matchMedia('(max-width: 760px)').matches) window.scrollTo(0, 0);
   screen.querySelectorAll('input[type=password]').forEach(input => {
     const wrapper = document.createElement('div'); wrapper.className = 'password-field'; input.before(wrapper); wrapper.append(input);
-    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'reveal'; toggle.setAttribute('aria-label', `Show ${input.id === 'confirm' ? 'confirm password' : 'password'}`);
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'reveal'; toggle.setAttribute('aria-label', `Show ${input.id === 'invitation' ? 'invitation code' : input.id === 'confirm' ? 'confirm password' : 'password'}`);
     toggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
-    toggle.addEventListener('click', () => { input.type = input.type === 'password' ? 'text' : 'password'; toggle.setAttribute('aria-pressed', String(input.type === 'text')); toggle.setAttribute('aria-label', `${input.type === 'text' ? 'Hide' : 'Show'} ${input.id === 'confirm' ? 'confirm password' : 'password'}`); }); wrapper.append(toggle);
+    toggle.addEventListener('click', () => { input.type = input.type === 'password' ? 'text' : 'password'; toggle.setAttribute('aria-pressed', String(input.type === 'text')); toggle.setAttribute('aria-label', `${input.type === 'text' ? 'Hide' : 'Show'} ${input.id === 'invitation' ? 'invitation code' : input.id === 'confirm' ? 'confirm password' : 'password'}`); }); wrapper.append(toggle);
   });
 }
 function on(id, event, callback) { document.getElementById(id).addEventListener(event, callback); }
@@ -90,8 +90,8 @@ function restore() {
       try { backup = JSON.parse(paste ? text : await file.text()); }
       catch { throw new Error('The recovery text is not valid JSON. Copy the complete encrypted recovery file and try again.'); }
       address = (await api('restore', { backup })).address;
-      balance = null; renderDashboard();
-      try { await dashboard(); message('Wallet restored. Your balance is verified.', 'success'); }
+      balance = null;
+      try { await dashboard(); message(session.invite_required && !session.testnet_admitted ? 'Wallet restored. Check its invitation access to continue.' : 'Wallet restored. Your balance is verified.', 'success'); }
       catch { message('Wallet restored. Balance verification is unavailable; refresh when the local network is ready.', 'error'); }
     });
   });
@@ -167,17 +167,33 @@ function scheduleGrantCheck() {
     }, false);
   }, 8000);
 }
+function inviteAccess() {
+  setScreen(`<h2>Join the private testnet</h2><p class="caption">Enter your invitation once. Access stays with this wallet when you restore it.</p><form id="invite-form"><label for="invitation">Invitation code</label><input id="invitation" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="60" required><button class="primary">Join testnet + get test coins</button></form><p class="hint">One invitation admits one wallet and includes private test coins plus public gas. Test units have no monetary value. Invitations can expire or be revoked.</p><button class="secondary" id="check-access">Check existing access</button><div class="row"><button class="text-button" id="invite-receive">Receiving address</button><button class="text-button" id="invite-backup">Recovery file</button></div><button class="text-button" id="invite-lock">Lock wallet</button>`);
+  on('invite-form','submit',event => {
+    event.preventDefault(); const invitation=document.getElementById('invitation').value.trim();
+    work('Checking your invitation…',async()=> {
+      grant=await api('join',{invitation}); grantStarted=Date.now(); await dashboard();
+    });
+  });
+  on('check-access','click',()=>work('Checking this wallet’s saved access…',async()=> {
+    const result=await api('access-status');
+    if (!result.admitted) { inviteAccess(); return message('This wallet has no active invitation access. Check your code or contact the test operator.','error'); }
+    grant=await api('test-coins'); grantStarted=Date.now(); await dashboard();
+  }));
+  on('invite-receive','click',receive); on('invite-backup','click',recovery); on('invite-lock','click',lock);
+}
 async function dashboard() {
+  if (session.invite_required && !session.testnet_admitted) return inviteAccess();
   try {
     const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; feeBalance = result.fee_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null;
-  } catch (error) { renderDashboard(); throw error; }
+  } catch (error) { if (session.invite_required && !session.testnet_admitted) inviteAccess(); else renderDashboard(); throw error; }
   renderDashboard();
 }
 function receive() {
   setScreen(`<h2>Receive privately</h2><p class="caption">Share this address with someone using this local network.</p><p class="address" id="address"></p><button class="primary" id="copy">Copy receiving address</button><button class="secondary" id="back">Back to wallet</button><p class="hint">This is a private address for this chain. It cannot receive SOL or USDC from Solana.</p>`);
   document.querySelector('#address').textContent = address;
   on('copy', 'click', async () => { try { await navigator.clipboard.writeText(address); message('Receiving address copied.', 'success'); } catch { message('Select the address above and copy it.'); } });
-  on('back', 'click', renderDashboard);
+  on('back', 'click', () => session.invite_required && !session.testnet_admitted ? inviteAccess() : renderDashboard());
 }
 function send(draft = {}) {
   if (session.pending || session.staging) return renderDashboard();

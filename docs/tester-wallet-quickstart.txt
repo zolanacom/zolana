@@ -15,7 +15,9 @@ this archive is for local rehearsal, not an installer ready for distribution.
      sh start-wallet.command --verify
      sh start-wallet.command --check
    The second command checks the configured RPC, genesis, native pool and
-   withdrawal activation without opening your wallet. Loopback profiles need
+   withdrawal activation without opening your wallet. For invited profiles it
+   checks only genesis; pool/history access needs an admitted, unlocked wallet.
+   Loopback profiles need
    a separately running local test network. HTTPS profiles need the configured
    testnet RPC; endpoints and genesis are fixed in wallet-profile.json.
 3. Run:
@@ -44,6 +46,12 @@ saving and confirming your recovery file. One grant supplies 1,000,000 private
 test units and 150,000,000 public gas units. The wallet checks finalization
 for a few minutes; Check coins + gas resumes the same claim after a restart.
 Restoring your seed reuses the original grant; it cannot request a second one.
+If invitation access is enabled, the first screen after backup is Join the
+private testnet. Enter your operator invitation once to admit this wallet and
+queue the same fixed grant. Restoring your seed restores access without another
+code; Check existing access can retry a saved admission. Codes/access can expire
+or be revoked. Access proofs and codes are credentials: keep them out of URLs,
+screenshots and bug reports. Limits survive restarts; wait when a quota is hit.
 Profiles without a faucet still require separately provisioned test balances.
 Faucet capacity and funds are finite; there is no automatic refill.
 

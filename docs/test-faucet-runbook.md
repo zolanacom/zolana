@@ -2,6 +2,8 @@
 
 Build with `CARGO_BUILD_JOBS=2 sh tools/dev.sh build --offline --locked -p native-wallet -p native-localnet`. Keep all ceremonies, validators, keys and testing local; this runbook does not publish anything.
 
+For invitation-gated enrollment, also follow the [invited access runbook](invited-testnet-runbook.md) before accepting the first claim. The legacy setup below remains available for preserved fixtures.
+
 1. Export a public wallet profile with the existing package tool. Explicitly add `--faucet http://127.0.0.1:8780` alongside `--transport loopback-http` and the intended loopback RPC. No faucet URL is automatically discovered or copied from an operator config. The bundle contains the client only, never the faucet executable, wallet or credentials.
 2. Prepare a separate owner-only password file (12–1024 bytes), outside the tester package. Run `target/debug/native-faucet init --root .data/new-faucet --profile wallet-profile.json --password-file <private-file> --max-claims 3`. The directory must be new. Save the encrypted recovery file and password separately. Keep the entire data directory backed up; the seed alone does not contain the claim ledger.
 3. Fund the displayed private reservoir address and public fee address through an explicit local operator ceremony. Three grants need 3,000,000 private units, 450,000,000 public gas units, and extra working rent/fees for the faucet's own sends. The acceptance rehearsal provisions 5,000,000 private units and 1,000,000,000 public units. The service never opens a cold vault or automatically replenishes its balance. Do not use the faucet seed in another spending process.

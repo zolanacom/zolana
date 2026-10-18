@@ -32,7 +32,35 @@ class Faucet:
         self.child_lock = threading.Lock()
         self.child = None
 
+    @property
+    def required(self):
+        path = self.root / "claims.json"
+        return path.exists() and json.loads(path.read_bytes())["policy"].get("invite_required") is True
+
+    def command(self, command, data=None, extra=()):
+        args = [str(self.binary), command, "--root", str(self.root), *extra]
+        with tempfile.NamedTemporaryFile(dir=self.root, prefix=".access-") as request:
+            if data is not None:
+                request.write(json.dumps(data, allow_nan=False).encode())
+                request.flush()
+                args += ["--request-file", request.name]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            raise ValueError(result.stderr.strip().removeprefix("Faucet error: "))
+        return json.loads(result.stdout)
+
+    def ingress(self, channel, peer):
+        if self.required:
+            self.command("edge", extra=["--channel", channel, "--peer", peer])
+
+    def access_action(self, path, data):
+        if not self.required or not isinstance(data, dict):
+            raise ValueError("invitation required")
+        return self.command("join" if path == "/join" else "access-status", data)
+
     def accept(self, data):
+        if self.required:
+            raise ValueError("invitation required; legacy claims are disabled")
         # Only the fixed claim schema is accepted; no caller RPC, amount or key paths.
         if not isinstance(data, dict) or set(data) != {"format", "network", "private_address", "fee_address", "signature"}:
             raise ValueError("invalid signed claim")
@@ -109,23 +137,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            if self.path != "/" or self.headers.get("Host") != self.server.authority or self.headers.get("Origin") is not None:
+            if self.path not in ({"/join", "/status"} if self.server.app.required else {"/"}) or self.headers.get("Host") != self.server.authority or self.headers.get("Origin") is not None:
                 raise ValueError("invalid faucet authority or browser origin")
             if self.headers.get("Content-Type") != "application/json" or self.headers.get("Transfer-Encoding") is not None:
                 raise ValueError("use bounded JSON")
+            self.server.app.ingress("faucet", self.client_address[0])
             length = int(self.headers.get("Content-Length", "0"))
-            if not 1 <= length <= 2048:
+            if not 1 <= length <= (4096 if self.server.app.required else 2048):
                 raise ValueError("claim exceeds limit")
-            result = self.server.app.accept(json.loads(self.rfile.read(length)))
+            body = json.loads(self.rfile.read(length))
+            result = self.server.app.access_action(self.path, body) if self.server.app.required else self.server.app.accept(body)
             code = 200
-        except (ValueError, OSError, subprocess.SubprocessError) as error:
+        except (ValueError, RecursionError, OSError, subprocess.SubprocessError) as error:
             text = str(error)
             if "lifetime capacity exhausted" in text:
                 result, code = {"error": "capacity_exhausted"}, 409
-            elif "again in a moment" in text:
+            elif "again in a moment" in text or "quota exhausted" in text:
                 result, code = {"error": "try_later"}, 429
             else:
-                result, code = {"error": "claim_unavailable"}, 400
+                result, code = {"error": "access_denied" if self.server.app.required else "claim_unavailable"}, 403 if self.server.app.required else 400
         data = json.dumps(result).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -143,6 +173,7 @@ def main():
     parser.add_argument("--port", type=int, default=8780)
     args = parser.parse_args()
     app = Faucet(args.root, args.password_file)
+    app.command("access-info")  # Missing/partial admission state fails before listening.
     server = BoundedServer(("127.0.0.1", args.port), Handler)
     server.authority, server.app = f"127.0.0.1:{args.port}", app
     worker = threading.Thread(target=app.work, daemon=True)

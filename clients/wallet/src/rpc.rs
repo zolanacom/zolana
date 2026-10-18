@@ -247,8 +247,24 @@ impl Chain {
         Self::connect_endpoint(&profile.rpc.url, profile.network())
     }
 
+    pub fn connect_invited(
+        profile: &crate::connection::TesterProfile,
+        wallet: &WalletKey,
+    ) -> Result<Self> {
+        profile.validate()?;
+        let proof = crate::access::Proof::signed(wallet, &profile.rpc.url, "rpc", b"")?;
+        Self::connect_authenticated(&profile.rpc.url, profile.network(), Some(proof.header()?))
+    }
     fn connect_endpoint(url: &str, network: Network) -> Result<Self> {
+        Self::connect_authenticated(url, network, None)
+    }
+    fn connect_authenticated(url: &str, network: Network, access: Option<String>) -> Result<Self> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(proof) = access {
+            headers.insert("X-Testnet-Access", proof.parse()?);
+        }
         let http = reqwest::Client::builder()
+            .default_headers(headers)
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))

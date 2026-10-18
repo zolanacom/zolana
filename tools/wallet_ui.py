@@ -27,6 +27,8 @@ class WalletApp:
         self.root = root.resolve()
         self.tester = False
         self.test_faucet = False
+        self.invite_required = False
+        self.admitted = False
         self.network_file = self.root / "network.json"
         self.binary = WALLET
         if not self.root.is_relative_to(PROJECT / ".data"):
@@ -99,6 +101,8 @@ class WalletApp:
         app.withdrawal_enabled = True
         app.faucet_amount = 0
         app.test_faucet = config.get("faucet") is not None
+        app.invite_required = config.get("invite_required") is True
+        app.admitted = False
         app.sponsor_password_file = None
         app.binary = Path(binary).resolve()
         app._storage(profile)
@@ -109,7 +113,7 @@ class WalletApp:
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
                 "network": self.network_label if self.tester else ("Local testnet rehearsal" if self.private_setup else "Local test network"), "solana_funding_available": False,
-                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True, "test_faucet_available": self.test_faucet}
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True, "test_faucet_available": self.test_faucet, "invite_required": self.invite_required, "testnet_admitted": self.admitted}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -130,7 +134,7 @@ class WalletApp:
     def action(self, request):
         action = request.get("action")
         password = request.get("password")
-        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fees", "test-coins", "fund", "send", "withdraw", "resolve", "reclaim"}:
+        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fees", "test-coins", "join", "access-status", "fund", "send", "withdraw", "resolve", "reclaim"}:
             raise ValueError("Unknown wallet action.")
         if action not in {"send", "withdraw"} and ("fee_mode" in request or "max_fee_debit" in request):
             raise ValueError("Fee selection is only supported for sends and withdrawals.")
@@ -153,7 +157,31 @@ class WalletApp:
                 saved.flush()
                 os.fsync(saved.fileno())
             self.ack.touch(mode=0o600)
+            if self.invite_required:
+                try: self.admitted = self.cli("access-status", password).get("admitted") is True
+                except ValueError: self.admitted = False
             return result
+        if action in {"join", "access-status"}:
+            if not self.invite_required:
+                raise ValueError("This profile does not require invitation access.")
+            if action == "join":
+                if not self.ack.exists():
+                    raise ValueError("Save and confirm your recovery file before redeeming an invitation.")
+                code = request.get("invitation")
+                if not isinstance(code, str) or len(code.strip()) != 51 or not code.strip().startswith("invite1_"):
+                    raise ValueError("Enter the invitation code provided for this testnet.")
+                with tempfile.NamedTemporaryFile(dir=self.directory, prefix=".invite-") as invitation:
+                    invitation.write(code.strip().encode()); invitation.flush()
+                    result = self.cli("join", password, ["--invitation-file", invitation.name])
+            else:
+                result = self.cli("access-status", password)
+            self.admitted = result.get("admitted") is True
+            return result
+        if self.invite_required and action in {"balance", "fees", "test-coins", "send", "withdraw", "resolve", "reclaim"}:
+            access = self.cli("access-status", password)
+            self.admitted = access.get("admitted") is True
+            if not self.admitted:
+                raise ValueError("Testnet access is unavailable for this wallet. Check your invitation access; your recovery file and payment records are preserved.")
         if action in {"balance", "fees"}:
             if action == "fees" and "payment" in request:
                 if request["payment"] not in ("send", "withdraw"):
@@ -226,6 +254,9 @@ class WalletApp:
             return {"backup": json.loads(self.backup.read_bytes())}
         if action == "ack-backup":
             self.ack.touch(mode=0o600)
+        if action == "unlock" and self.invite_required:
+            try: self.admitted = self.cli("access-status", password).get("admitted") is True
+            except ValueError: self.admitted = False
         return {**address, **self.status()}
 
 
