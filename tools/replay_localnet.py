@@ -67,6 +67,8 @@ def _replay(root,config,before,index,slot,expected):
             "--accounts-db-foreground-threads", "2", "--accounts-db-background-threads", "1", "--accounts-db-hash-threads", "1",
             "--accounts-index-flush-threads", "1", "--replay-transactions-threads", "2", "--block-production-num-workers", "2",
             "--rocksdb-compaction-threads", "1", "--rocksdb-flush-threads", "1", "--log", str(directory / "validator.log")]
+    if config.get('raw_rpc_isolation') is True:
+        args += ['--native-rpc-access-file',str(root/'rpc-access.key')]
     private_new(directory / "command.json", json.dumps(args).encode())
     env = dict(os.environ, SOLANA_METRICS_CONFIG="", RUST_LOG="warn,solana_runtime::bank=info")
     env.pop("NATIVE_LOCAL_SHRED_FAULT", None)

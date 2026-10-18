@@ -45,12 +45,13 @@ class OfflineReplayTests(unittest.TestCase):
                 plan(Path("unused"), 1)
 
     def test_only_halted_no_voting_child_runs_and_bank_mismatch_fails_closed(self):
-        for mismatch in [False, True]:
-            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as name:
+        for mismatch,isolation in [(False,False),(True,False),(False,True),(True,True)]:
+            with self.subTest(mismatch=mismatch,isolation=isolation), tempfile.TemporaryDirectory() as name:
                 root = Path(name)
                 for index in [0, 1]:
                     (root / f"ledger-{index}").mkdir()
                 config = {"key_mode": "local-testnet-rehearsal-v1", "vote_accounts": ["vote-0", "vote-1"], "genesis_hash": "expected"}
+                if isolation:config["raw_rpc_isolation"]=True
                 before = [state(frozen={"8": "old-bank", "9": "peer-bank"}), state(9)]
                 after = [before[0], {**state(frozen={"8": "old-bank", "9": "wrong-bank" if mismatch else "peer-bank"}), "slot": 9}]
                 child = Mock()
@@ -63,6 +64,10 @@ class OfflineReplayTests(unittest.TestCase):
                     self.assertEqual(args[args.index("--dev-halt-at-slot") + 1], "9")
                     self.assertEqual(args[args.index("--rpc-bind-address") + 1], "127.0.0.1")
                     self.assertNotIn(args[args.index("--rpc-port") + 1], ["18899", "19899"])
+                    if isolation:
+                        self.assertEqual(args[args.index("--native-rpc-access-file")+1],str(root/"rpc-access.key"))
+                    else:self.assertNotIn("--native-rpc-access-file",args)
+                    self.assertEqual(json.loads((Path(args[args.index("--log")+1]).parent/"command.json").read_text()),args)
                     Path(args[args.index("--log") + 1]).write_text("Validator halted")
                     return child
                 with patch("replay_localnet.load", return_value=config), patch("replay_localnet.ledger", side_effect=lambda r,i:r/f"ledger-{i}"), patch("replay_localnet.plan", side_effect=before), patch("replay_localnet.restart_state", side_effect=after), patch("replay_localnet.subprocess.Popen", side_effect=launch):

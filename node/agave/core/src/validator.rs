@@ -1189,7 +1189,9 @@ impl Validator {
                 &config.pubsub_config,
                 None,
             ));
-            let pubsub_service = if !config.rpc_config.full_api {
+            let pubsub_service = if !config.rpc_config.full_api
+                || config.rpc_config.native_rpc_access_file.is_some()
+            {
                 None
             } else {
                 let (trigger, pubsub_service) = PubSubService::new(

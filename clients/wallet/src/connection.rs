@@ -69,6 +69,8 @@ pub struct TesterProfile {
     pub faucet: Option<Endpoint>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub invite_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_tls_ca_pem: Option<String>,
 }
 
 impl TesterProfile {
@@ -108,6 +110,18 @@ impl TesterProfile {
         if self.invite_required && self.faucet.is_none() {
             return Err("invited profile requires a pinned admission endpoint".into());
         }
+        if let Some(pem) = &self.local_tls_ca_pem {
+            if pem.len() > 8192 || pem.contains("PRIVATE KEY") {
+                return Err("invalid local TLS trust certificate".into());
+            }
+            for endpoint in std::iter::once(&self.rpc).chain(self.faucet.iter()) {
+                let url = reqwest::Url::parse(&endpoint.url)?;
+                if endpoint.transport != "https" || url.host_str() != Some("127.0.0.1") {
+                    return Err("local test CA requires HTTPS endpoints on 127.0.0.1".into());
+                }
+            }
+            reqwest::Certificate::from_pem(pem.as_bytes())?;
+        }
         self.network().validate()?;
         self.rpc.validate()?;
         if let Some(endpoint) = &self.faucet {
@@ -134,6 +148,7 @@ mod tests {
             pool_format: "NPOOL003".into(),
             recipient_withdrawals: true,
             invite_required: false,
+            local_tls_ca_pem: None,
             faucet: None,
             rpc: Endpoint {
                 transport: "https".into(),
@@ -143,6 +158,9 @@ mod tests {
         profile.validate().unwrap();
         let mut value = serde_json::to_value(&profile).unwrap();
         value["sponsor"] = "unwanted operator".into();
+        let mut local = profile.clone();
+        local.local_tls_ca_pem = Some("not a certificate".into());
+        assert!(local.validate().is_err());
         assert!(serde_json::from_value::<TesterProfile>(value).is_err());
         for invalid in [
             TesterProfile {

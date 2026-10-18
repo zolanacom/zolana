@@ -863,7 +863,15 @@ fn main() -> Result<()> {
         if config["key_mode"] != "local-testnet-rehearsal-v1" {
             return Err("funding acceptance requires a private local rehearsal".into());
         }
-        let rpc = client(&url, &config)?;
+        let rpc = if config["raw_rpc_isolation"] == true {
+            native_wallet::rpc::Chain::operator_client(
+                &url,
+                network.clone(),
+                &root.join("rpc-access.key"),
+            )?
+        } else {
+            client(&url, &config)?
+        };
         let user_password = native_wallet::keys::read_password(&password_path)?;
         let wallet = native_wallet::keys::WalletKey::open(&wallet_path, &user_password, &network)?;
         let recipient = wallet.fee_keypair().pubkey();

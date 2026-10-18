@@ -16,6 +16,9 @@ impl FromClapArgMatches for JsonRpcConfig {
         };
 
         Ok(JsonRpcConfig {
+            native_rpc_access_file: matches
+                .value_of("native_rpc_access_file")
+                .map(std::path::PathBuf::from),
             enable_rpc_transaction_history: matches.is_present("enable_rpc_transaction_history"),
             enable_extended_tx_metadata_storage: matches
                 .is_present("enable_extended_tx_metadata_storage"),

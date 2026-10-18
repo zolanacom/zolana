@@ -35,13 +35,18 @@ class Gateway:
         parsed = urllib.parse.urlsplit(self.upstream)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or self.upstream == self.info["rpc_audience"]:
             raise ValueError("gateway needs a separate pinned loopback validator RPC")
+        self.operator_headers={}
+        ledger=json.loads((faucet.root/'claims.json').read_bytes())
+        if ledger['policy'].get('operator_rpc'):
+            from service_tls import operator_token
+            self.operator_headers['X-Native-Operator']=operator_token(faucet.root/'rpc-access.key')
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         result = self.forward(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getGenesisHash"}).encode())
         if json.loads(result).get("result") != self.info["network"]["genesis_hash"]:
             raise ValueError("upstream genesis mismatch")
 
     def forward(self, raw):
-        request = urllib.request.Request(self.upstream, raw, {"Content-Type": "application/json"})
+        request = urllib.request.Request(self.upstream, raw, {"Content-Type": "application/json", **self.operator_headers})
         with self.opener.open(request, timeout=15) as response:
             body = response.read(16 * 1024 * 1024 + 1)
             if len(body) > 16 * 1024 * 1024:
@@ -95,14 +100,14 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--password-file", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18898)
+    parser.add_argument("--tls-cert",type=Path)
+    parser.add_argument("--tls-key",type=Path)
     args = parser.parse_args()
     # Reuse the bounded, owner-only operator service interface; no worker starts here.
     faucet = Faucet(args.root, args.password_file)
     app = Gateway(faucet)
-    if app.info["rpc_audience"].startswith("http://") and app.info["rpc_audience"] != f"http://127.0.0.1:{args.port}":
-        raise ValueError("gateway audience and listener differ")
-    server = BoundedServer(("127.0.0.1", args.port), Handler)
-    server.authority, server.app = f"127.0.0.1:{args.port}", app
+    from service_tls import listener
+    server=listener(app.info['rpc_audience'],args.port,Handler,app,args.tls_cert,args.tls_key)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

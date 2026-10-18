@@ -34,6 +34,7 @@ fn run() -> Result<()> {
         println!("test-coins: request/check the same signed one-time private test-coin and public-gas grant through a pinned profile faucet; no sponsor options.");
         println!("join: invited profiles only; --invitation-file <owner-only code/export file> admits this seed-derived fee authority once and queues its fixed grant. access-status checks the same wallet's durable admission.");
         println!("Invited check validates only the public genesis handshake. Unlock an admitted wallet for authenticated pool/history access. RPC access proofs expire after ten minutes; a new command signs a fresh proof.");
+        println!("Operator fixtures only: --rpc-access-file <owner-only-file> authenticates protected loopback raw RPC. Tester profiles reject operator credentials; local HTTPS profiles can include an explicit public local test CA.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
         println!("archive: --network --rpc --history <directory>; public collector needs no wallet/password/sponsor");
         println!("balance/deposit/send/withdraw: optional --history <directory> supplies retained verified ciphertext history");
@@ -80,6 +81,7 @@ fn run() -> Result<()> {
             "--max-fee-debit",
             "--payment",
             "--invitation-file",
+            "--rpc-access-file",
         ]
         .contains(&flag.as_str())
         {
@@ -142,6 +144,7 @@ fn run() -> Result<()> {
             "--sponsor",
             "--sponsor-password-file",
             "--sponsor-request-id",
+            "--rpc-access-file",
         ]
         .iter()
         .any(|flag| args.contains_key(*flag))
@@ -170,6 +173,11 @@ fn run() -> Result<()> {
     }
     let connect = || match &tester {
         Some(profile) => Chain::connect_profile(profile),
+        None if args.contains_key("--rpc-access-file") => Chain::connect_operator(
+            required("--rpc")?,
+            network.clone(),
+            Path::new(required("--rpc-access-file")?),
+        ),
         None => Chain::connect(required("--rpc")?, network.clone()),
     };
     if command == "profile" {

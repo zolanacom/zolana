@@ -244,7 +244,13 @@ impl Chain {
 
     pub fn connect_profile(profile: &crate::connection::TesterProfile) -> Result<Self> {
         profile.validate()?;
-        Self::connect_endpoint(&profile.rpc.url, profile.network())
+        Self::connect_authenticated(
+            &profile.rpc.url,
+            profile.network(),
+            None,
+            None,
+            profile.local_tls_ca_pem.as_deref(),
+        )
     }
 
     pub fn connect_invited(
@@ -253,22 +259,57 @@ impl Chain {
     ) -> Result<Self> {
         profile.validate()?;
         let proof = crate::access::Proof::signed(wallet, &profile.rpc.url, "rpc", b"")?;
-        Self::connect_authenticated(&profile.rpc.url, profile.network(), Some(proof.header()?))
+        Self::connect_authenticated(
+            &profile.rpc.url,
+            profile.network(),
+            Some(proof.header()?),
+            None,
+            profile.local_tls_ca_pem.as_deref(),
+        )
     }
     fn connect_endpoint(url: &str, network: Network) -> Result<Self> {
-        Self::connect_authenticated(url, network, None)
+        Self::connect_authenticated(url, network, None, None, None)
     }
-    fn connect_authenticated(url: &str, network: Network, access: Option<String>) -> Result<Self> {
+    pub fn connect_operator(url: &str, network: Network, credential: &Path) -> Result<Self> {
+        crate::connection::Endpoint {
+            transport: "loopback-http".into(),
+            url: url.into(),
+        }
+        .validate()?;
+        Self::connect_authenticated(
+            url,
+            network,
+            None,
+            Some(native_rpc_access::read_token(credential)?),
+            None,
+        )
+    }
+    pub fn operator_client(url: &str, network: Network, credential: &Path) -> Result<RpcClient> {
+        Ok(Self::connect_operator(url, network, credential)?.rpc)
+    }
+    fn connect_authenticated(
+        url: &str,
+        network: Network,
+        access: Option<String>,
+        operator: Option<String>,
+        ca: Option<&str>,
+    ) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(proof) = access {
             headers.insert("X-Testnet-Access", proof.parse()?);
         }
-        let http = reqwest::Client::builder()
+        if let Some(token) = operator {
+            headers.insert(native_rpc_access::HEADER, token.parse()?);
+        }
+        let mut http = reqwest::Client::builder()
             .default_headers(headers)
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(15))
-            .build()?;
+            .timeout(Duration::from_secs(15));
+        if let Some(pem) = ca {
+            http = http.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
+        }
+        let http = http.build()?;
         let rpc = RpcClient::new_sender(
             HttpSender::new_with_client(url, http),
             RpcClientConfig::with_commitment(CommitmentConfig::finalized()),

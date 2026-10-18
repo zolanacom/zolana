@@ -60,6 +60,11 @@ The seed/password never leave the local wallet. The faucet sees the private
 receiving and public fee addresses together. Its test grants have no monetary
 value; the public gas transfer reveals a funding relationship. Remote profiles use
 normal certificate-validated HTTPS, no redirects and no proxy auto-discovery.
+Local HTTPS profiles may carry a public local test CA. This adds trust only
+inside this wallet; certificate expiry and hostname verification remain enabled.
+No CA/server private key or raw-RPC operator credential is in the package. If a
+certificate expires or verification fails, keep the original wallet and contact
+the local operator; do not disable TLS checks.
 The RPC/validator consensus is trusted; this is not a light client. Shielded
 contents are private; public fees, funding/withdrawal amounts and timing are
 visible. This prototype is unaudited; physical phone/Safari and remote hosting

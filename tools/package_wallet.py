@@ -72,6 +72,7 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--rpc", required=True)
     parser.add_argument("--transport", choices=["loopback-http", "https"], required=True)
+    parser.add_argument("--local-tls-ca",type=Path,help="public local test CA only; HTTPS loopback endpoints required")
     parser.add_argument("--invite-only", action="store_true", help="require admission through the pinned faucet and RPC gateway")
     parser.add_argument("--faucet", help="explicit test faucet endpoint; uses the selected transport")
     parser.add_argument("--output", type=Path, required=True)
@@ -84,6 +85,8 @@ def main():
         profile["faucet"] = {"transport": args.transport, "url": args.faucet}
     if args.invite_only:
         profile["invite_required"] = True
+    if args.local_tls_ca:
+        profile["local_tls_ca_pem"]=args.local_tls_ca.read_text()
     # Validate with the same parser used at every wallet invocation, offline.
     import tempfile
     with tempfile.TemporaryDirectory() as directory:

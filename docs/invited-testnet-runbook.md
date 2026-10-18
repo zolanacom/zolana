@@ -1,6 +1,6 @@
 # Local invitation admission rehearsal
 
-Keep raw validator RPC and gossip on operator-loopback. The gateway and faucet below are also loopback-only. External TLS, firewall routing, independent validator hosting and operational release review remain deployment work; no external hosting or invitations are created by this procedure.
+Keep raw validator RPC and gossip on operator-loopback. The gateway and faucet below are also loopback-only. The [local TLS/isolation runbook](tls-rpc-isolation-runbook.md) adds HTTPS and raw RPC capabilities. Public TLS, firewall routing, independent validator hosting and operational release review remain deployment work; no external hosting or invitations are created by this procedure.
 
 Use a **new** pre-funded faucet root following the [test distribution runbook](test-faucet-runbook.md). Its source profile points directly to operator RPC, has `invite_required` omitted/false, and uses a dedicated reservoir seed. Never point the worker at its own invited gateway. Preserve that source profile and all original budgets/journals.
 

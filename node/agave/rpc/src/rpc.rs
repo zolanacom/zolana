@@ -161,6 +161,8 @@ fn is_finalized(
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonRpcConfig {
+    /// Operator capability for every raw HTTP route; disables raw pubsub.
+    pub native_rpc_access_file: Option<std::path::PathBuf>,
     pub enable_rpc_transaction_history: bool,
     pub enable_extended_tx_metadata_storage: bool,
     pub faucet_addr: Option<SocketAddr>,
@@ -182,6 +184,7 @@ pub struct JsonRpcConfig {
 impl Default for JsonRpcConfig {
     fn default() -> Self {
         Self {
+            native_rpc_access_file: None,
             enable_rpc_transaction_history: Default::default(),
             enable_extended_tx_metadata_storage: Default::default(),
             faucet_addr: Option::default(),

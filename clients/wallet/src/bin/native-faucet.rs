@@ -15,6 +15,7 @@ fn run() -> Result<()> {
             "--password-file",
             "--max-claims",
             "--request-file",
+            "--rpc-access-file",
             "--output",
             "--expires-in",
             "--bind-fee",
@@ -79,11 +80,12 @@ fn run() -> Result<()> {
                 read_password(Path::new(get("--password-file")?))?
             };
             if command == "init" {
-                faucet::initialize(
+                faucet::initialize_with_rpc(
                     root,
                     Path::new(get("--profile")?),
                     &p,
                     get("--max-claims")?.parse()?,
+                    options.get("--rpc-access-file").map(Path::new),
                 )?
             } else {
                 faucet::tick(root, &p)?

@@ -4483,6 +4483,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-rpc-access"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "subtle",
+ "tempfile",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4537,6 +4546,7 @@ dependencies = [
  "libc",
  "native-payment-program",
  "native-payments",
+ "native-rpc-access",
  "orchard",
  "pbkdf2 0.11.0",
  "rand 0.10.3",
@@ -8706,6 +8716,7 @@ dependencies = [
  "jsonrpc-pubsub",
  "libc",
  "log",
+ "native-rpc-access",
  "rayon",
  "regex",
  "serde",

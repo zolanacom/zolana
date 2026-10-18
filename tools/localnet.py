@@ -17,16 +17,27 @@ import urllib.request
 PROJECT = Path(__file__).resolve().parents[1]
 VALIDATOR = PROJECT / "target/debug/agave-validator"
 LAB = PROJECT / "target/debug/native-localnet"
+RPC_CREDENTIALS = {}
+
 LOG_FILTER = "warn,solana_runtime::snapshot_bank_utils=info,solana_runtime::bank=info"
 
 
+class NoRpcRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_):
+        return None
+
+
 def rpc(port, method, params=None):
+    headers={"Content-Type":"application/json"}
+    if port in RPC_CREDENTIALS:
+        from service_tls import operator_token
+        headers["X-Native-Operator"]=operator_token(RPC_CREDENTIALS[port])
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}",
         json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}).encode(),
-        {"Content-Type": "application/json"},
+        headers,
     )
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRpcRedirect()).open(request, timeout=5) as response:
         result = json.load(response)
     if "error" in result:
         raise RuntimeError(result["error"])
@@ -41,6 +52,10 @@ def load(root):
                 root.is_symlink() or not root.resolve().is_relative_to(PROJECT / ".data") or
                 root.stat().st_mode & 0o077):
             raise RuntimeError("not a disposable fixture or owner-only local testnet rehearsal")
+    from rpc_isolation import validate as validate_rpc_policy
+    credential=validate_rpc_policy(root,config)
+    if credential:
+        for i in [0,1]: RPC_CREDENTIALS[port(i)]=credential
     return config
 
 
@@ -147,6 +162,8 @@ def start(root, index, archive=False, coordinated=False, faults=False):
         "--accounts-index-flush-threads", "1", "--replay-transactions-threads", "2",
         "--block-production-num-workers", "2", "--rocksdb-compaction-threads", "1",
         "--rocksdb-flush-threads", "1", "--log", str(root / f"validator-{index}.log")]
+    if config.get("raw_rpc_isolation") is True:
+        args += ["--native-rpc-access-file",str(root/"rpc-access.key")]
     if has_tower:
         args += ["--require-tower"]
     elif index == 0:

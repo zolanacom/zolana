@@ -143,6 +143,8 @@ struct Policy {
     max_claims: usize,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     invite_required: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    operator_rpc: bool,
     private_amount: u64,
     gas_amount: u64,
     max_attempts: u8,
@@ -232,6 +234,16 @@ pub fn initialize(
     password: &[u8],
     max_claims: usize,
 ) -> Result<Value> {
+    initialize_with_rpc(root, profile_path, password, max_claims, None)
+}
+pub fn initialize_with_rpc(
+    root: &Path,
+    profile_path: &Path,
+    password: &[u8],
+    max_claims: usize,
+    credential: Option<&Path>,
+) -> Result<Value> {
+    let token = credential.map(native_rpc_access::read_token).transpose()?;
     if root.exists() || !(1..=100).contains(&max_claims) {
         return Err("use a new faucet directory and 1..100 lifetime claims".into());
     }
@@ -244,6 +256,9 @@ pub fn initialize(
     fs::create_dir(root)?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    if let Some(token) = &token {
+        write_private_new(&root.join("rpc-access.key"), token.as_bytes())?;
+    }
     let wallet = WalletKey::generate(profile.network())?;
     wallet.save(&root.join("wallet.enc.json"), password)?;
     wallet.save(&root.join("recovery.enc.json"), password)?;
@@ -254,6 +269,7 @@ pub fn initialize(
         source_private_address: wallet.address_text(),
         max_claims,
         invite_required: false,
+        operator_rpc: token.is_some(),
         private_amount: PRIVATE_GRANT,
         gas_amount: GAS_GRANT,
         max_attempts: ATTEMPTS,
@@ -387,7 +403,18 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
     {
         return Err("faucet seed differs from original ledger".into());
     }
-    let chain = Chain::connect_profile(&profile)?;
+    let connect = || {
+        if ledger.policy.operator_rpc {
+            Chain::connect_operator(
+                &profile.rpc.url,
+                profile.network(),
+                &root.join("rpc-access.key"),
+            )
+        } else {
+            Chain::connect_profile(&profile)
+        }
+    };
+    let chain = connect()?;
     chain.health()?;
     for claim in &ledger.claims {
         let id = claim.id();
@@ -405,11 +432,7 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
                 return status(root, claim);
             }
         }
-        let mut chain = Chain::connect_profile(&profile)?.with_user_fees(
-            payer.pubkey(),
-            PAYMENT_CAP,
-            &operation,
-        )?;
+        let mut chain = connect()?.with_user_fees(payer.pubkey(), PAYMENT_CAP, &operation)?;
         if operation.pending.exists() {
             chain.resolve(&wallet, &operation)?;
         }
@@ -422,11 +445,7 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
             let cap = chain
                 .recovery_user_limit(&operation, payer.pubkey())?
                 .ok_or("faucet stage has no original fee cap")?;
-            chain = Chain::connect_profile(&profile)?.with_user_fees(
-                payer.pubkey(),
-                cap,
-                &operation,
-            )?;
+            chain = connect()?.with_user_fees(payer.pubkey(), cap, &operation)?;
             chain.reclaim(&payer, &operation)?;
             if !accepted {
                 p.submission_started = false;
@@ -661,6 +680,7 @@ mod tests {
                 url: "http://127.0.0.1:18899".into(),
             },
             invite_required: false,
+            local_tls_ca_pem: None,
             faucet: None,
         };
         let profile_path = temp.path().join("profile.json");
@@ -710,6 +730,7 @@ mod tests {
                 url: "http://127.0.0.1:18899".into(),
             },
             invite_required: false,
+            local_tls_ca_pem: None,
             faucet: None,
         };
         let path = temp.path().join("profile.json");

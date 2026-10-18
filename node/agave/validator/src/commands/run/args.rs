@@ -975,6 +975,11 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("native_rpc_access_file")
+            .long("native-rpc-access-file").takes_value(true).value_name("PRIVATE_FILE")
+            .help("Require an operator capability on all loopback raw HTTP routes and disable raw WebSockets"),
+    )
+    .arg(
         Arg::with_name("rpc_bind_address")
             .long("rpc-bind-address")
             .value_name("HOST")

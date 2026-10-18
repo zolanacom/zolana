@@ -146,10 +146,14 @@ fn join_body(claim: &Claim, invitation: Option<&str>) -> Result<Vec<u8>> {
 fn post(profile: &TesterProfile, suffix: &str, body: Vec<u8>) -> Result<Value> {
     profile.validate()?;
     let endpoint = profile.faucet.as_ref().ok_or("no admission endpoint")?;
-    let response = reqwest::blocking::Client::builder()
+    let mut client = reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(20));
+    if let Some(pem) = &profile.local_tls_ca_pem {
+        client = client.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
+    }
+    let response = client
         .build()?
         .post(format!("{}{suffix}", endpoint.url.trim_end_matches('/')))
         .header("Content-Type", "application/json")
@@ -666,6 +670,7 @@ mod tests {
                 url: "http://127.0.0.1:8780".into(),
             }),
             invite_required: false,
+            local_tls_ca_pem: None,
         };
         let file = dir.path().join("profile.json");
         fs::write(&file, serde_json::to_vec(&profile).unwrap()).unwrap();

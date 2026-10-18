@@ -125,6 +125,7 @@ pub struct JsonRpcService {
 }
 
 struct RpcRequestMiddleware {
+    operator_token: Option<String>,
     ledger_path: PathBuf,
     full_snapshot_archive_path_regex: Regex,
     incremental_snapshot_archive_path_regex: Regex,
@@ -141,6 +142,7 @@ impl RpcRequestMiddleware {
         health: Arc<RpcHealth>,
     ) -> Self {
         Self {
+            operator_token: None,
             ledger_path,
             full_snapshot_archive_path_regex: Regex::new(
                 snapshot_utils::FULL_SNAPSHOT_ARCHIVE_FILENAME_REGEX,
@@ -342,6 +344,29 @@ impl RpcRequestMiddleware {
 
 impl RequestMiddleware for RpcRequestMiddleware {
     fn on_request(&self, request: hyper::Request<hyper::Body>) -> RequestMiddlewareAction {
+        if let Some(token) = &self.operator_token {
+            let values = request.headers().get_all(native_rpc_access::HEADER);
+            let mut values = values.iter();
+            let accepted = values
+                .next()
+                .is_some_and(|v| native_rpc_access::token_matches(token, v.as_bytes()))
+                && values.next().is_none();
+            if !accepted
+                || request.uri().query().is_some()
+                || request.headers().contains_key("origin")
+            {
+                return RequestMiddlewareAction::Respond {
+                    should_validate_hosts: true,
+                    response: Box::pin(async {
+                        Ok(hyper::Response::builder()
+                            .status(hyper::StatusCode::FORBIDDEN)
+                            .header("Cache-Control", "no-store")
+                            .body(hyper::Body::empty())
+                            .unwrap())
+                    }),
+                };
+            }
+        }
         trace!("request uri: {}", request.uri());
 
         if let Some(ref snapshot_config) = self.snapshot_config {
@@ -716,6 +741,17 @@ impl JsonRpcService {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         runtime: Arc<TokioRuntime>,
     ) -> Result<Self, String> {
+        let operator_token = if let Some(path) = &config.native_rpc_access_file {
+            if !rpc_addr.ip().is_loopback() {
+                return Err("protected raw RPC requires loopback binding".into());
+            }
+            Some(
+                native_rpc_access::read_token(path)
+                    .map_err(|_| "raw RPC credential unavailable or invalid".to_string())?,
+            )
+        } else {
+            None
+        };
         info!("rpc bound to {rpc_addr:?}");
         info!("rpc configuration: {config:?}");
         let rpc_niceness_adj = config.rpc_niceness_adj;
@@ -838,12 +874,13 @@ impl JsonRpcService {
                     io.extend_with(rpc_full::FullImpl.to_delegate());
                 }
 
-                let request_middleware = RpcRequestMiddleware::new(
+                let mut request_middleware = RpcRequestMiddleware::new(
                     ledger_path,
                     snapshot_config,
                     bank_forks.clone(),
                     health.clone(),
                 );
+                request_middleware.operator_token = operator_token;
                 let server = ServerBuilder::with_meta_extractor(
                     io,
                     move |req: &hyper::Request<hyper::Body>| {

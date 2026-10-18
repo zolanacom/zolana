@@ -171,11 +171,14 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--password-file", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8780)
+    parser.add_argument("--tls-cert",type=Path)
+    parser.add_argument("--tls-key",type=Path)
     args = parser.parse_args()
     app = Faucet(args.root, args.password_file)
-    app.command("access-info")  # Missing/partial admission state fails before listening.
-    server = BoundedServer(("127.0.0.1", args.port), Handler)
-    server.authority, server.app = f"127.0.0.1:{args.port}", app
+    info=app.command("access-info")  # Missing/partial admission state fails before listening.
+    from service_tls import listener
+    endpoint=info['faucet_audience'] if info.get('invite_required') else f'http://127.0.0.1:{args.port}'
+    server=listener(endpoint,args.port,Handler,app,args.tls_cert,args.tls_key)
     worker = threading.Thread(target=app.work, daemon=True)
     worker.start()
     try:
