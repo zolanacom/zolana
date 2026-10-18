@@ -4528,6 +4528,7 @@ name = "native-wallet"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bincode",
  "blake2b_simd",
  "bs58",
  "chacha20poly1305",

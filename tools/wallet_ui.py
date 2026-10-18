@@ -26,6 +26,7 @@ class WalletApp:
     def __init__(self, root, profile="default", rpc_index=0, sponsor_password_file=None):
         self.root = root.resolve()
         self.tester = False
+        self.test_faucet = False
         self.network_file = self.root / "network.json"
         self.binary = WALLET
         if not self.root.is_relative_to(PROJECT / ".data"):
@@ -97,6 +98,7 @@ class WalletApp:
         app.private_setup = True
         app.withdrawal_enabled = True
         app.faucet_amount = 0
+        app.test_faucet = config.get("faucet") is not None
         app.sponsor_password_file = None
         app.binary = Path(binary).resolve()
         app._storage(profile)
@@ -107,7 +109,7 @@ class WalletApp:
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
                 "network": self.network_label if self.tester else ("Local testnet rehearsal" if self.private_setup else "Local test network"), "solana_funding_available": False,
-                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True}
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True, "test_faucet_available": self.test_faucet}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -128,7 +130,7 @@ class WalletApp:
     def action(self, request):
         action = request.get("action")
         password = request.get("password")
-        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fees", "fund", "send", "withdraw", "resolve", "reclaim"}:
+        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fees", "test-coins", "fund", "send", "withdraw", "resolve", "reclaim"}:
             raise ValueError("Unknown wallet action.")
         if action not in {"send", "withdraw"} and ("fee_mode" in request or "max_fee_debit" in request):
             raise ValueError("Fee selection is only supported for sends and withdrawals.")
@@ -158,6 +160,14 @@ class WalletApp:
                     raise ValueError("Choose a send or withdrawal fee quote.")
                 return self.cli("fees", password, ["--payment", request["payment"]])
             return self.cli(action, password)
+        if action == "test-coins":
+            if not self.ack.exists():
+                raise ValueError("Save and confirm your encrypted recovery file before requesting test coins.")
+            if not self.test_faucet:
+                raise ValueError("This profile has no test faucet.")
+            if self.status()["pending"] or self.status()["staging"]:
+                raise ValueError("Resolve the previous payment before requesting test coins.")
+            return self.cli("test-coins", password)
         if action in {"fund", "send", "withdraw", "resolve", "reclaim"}:
             if not self.ack.exists():
                 raise ValueError("Save and confirm your encrypted recovery file before making payments.")

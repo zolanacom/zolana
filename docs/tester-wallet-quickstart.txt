@@ -39,11 +39,18 @@ sends privately and withdraws with user-paid fees after its separate public fee
 account has test coins, including upfront refundable upload rent. Send shows
 the fee address, public funding shortfall and gross debit cap before you confirm.
 Private value is separate from gas; the recipient receives the full amount.
-Ask the test operator to provision test balances/gas separately; automatic
-test-coin requests and a public faucet are not implemented.
+If this profile configures a test faucet, select Get test coins + gas after
+saving and confirming your recovery file. One grant supplies 1,000,000 private
+test units and 150,000,000 public gas units. The wallet checks finalization
+for a few minutes; Check coins + gas resumes the same claim after a restart.
+Restoring your seed reuses the original grant; it cannot request a second one.
+Profiles without a faucet still require separately provisioned test balances.
+Faucet capacity and funds are finite; there is no automatic refill.
 
-The wallet service and browser use your password locally. Only RPC traffic
-leaves the device; the seed/password are not sent to RPC. Remote profiles use
+The wallet service and browser use your password locally. RPC and, when requested, a signed public faucet claim leave the device.
+The seed/password never leave the local wallet. The faucet sees the private
+receiving and public fee addresses together. Its test grants have no monetary
+value; the public gas transfer reveals a funding relationship. Remote profiles use
 normal certificate-validated HTTPS, no redirects and no proxy auto-discovery.
 The RPC/validator consensus is trusted; this is not a light client. Shielded
 contents are private; public fees, funding/withdrawal amounts and timing are

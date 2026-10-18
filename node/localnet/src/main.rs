@@ -52,6 +52,21 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+// Slot numbers can skip; an absent range is not an unverified ledger tail.
+// Only one metadata child of the frozen checkpoint is allowed.
+fn restart_child_parent(
+    tip: u64,
+    parent: u64,
+    intermediate: bool,
+    dead: bool,
+    duplicate: bool,
+) -> Result<u64> {
+    if parent >= tip || intermediate || dead || duplicate {
+        return Err("complex/dead/duplicate restart tail; manual ledger repair required".into());
+    }
+    Ok(parent)
+}
+
 // Primary RocksDB access rejects inspection while a validator owns the ledger.
 // No slots, hashes, or tower lockouts are altered by this inspection.
 fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Result<()> {
@@ -74,21 +89,23 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
     let slot = if blockstore.get_bank_hash(highest_stored_slot).is_some() {
         highest_stored_slot
     } else {
-        // A shutdown may leave exactly one adjacent partial slot. Keep its
+        // A shutdown may leave one partial child after skipped slots. Keep its
         // shreds: upstream next_leader_slot skips slots with existing shreds.
         // Never rewind/delete it, and refuse more complex tails or forks.
         let meta = blockstore
             .meta(highest_stored_slot)?
             .ok_or("missing tip metadata")?;
-        let parent = highest_stored_slot.checked_sub(1).ok_or("invalid tip")?;
-        if meta.parent_slot != Some(parent)
-            || blockstore.is_dead(highest_stored_slot)
-            || blockstore.has_duplicate_shreds_in_slot(highest_stored_slot)
-        {
-            return Err(
-                "complex/dead/duplicate restart tail; manual ledger repair required".into(),
-            );
-        }
+        let parent = meta.parent_slot.ok_or("restart child has no parent")?;
+        let intermediate = blockstore
+            .slot_meta_iterator(parent.saturating_add(1))?
+            .any(|(slot, _)| slot < highest_stored_slot);
+        let parent = restart_child_parent(
+            highest_stored_slot,
+            parent,
+            intermediate,
+            blockstore.is_dead(highest_stored_slot),
+            blockstore.has_duplicate_shreds_in_slot(highest_stored_slot),
+        )?;
         if meta.is_full() {
             if !replay_plan {
                 return Err("restart requires verified replay of a fully received unfrozen child; run the local tail replay helper while both validators are stopped".into());
@@ -825,7 +842,15 @@ fn main() -> Result<()> {
     if command == "replay-user-send-check" {
         return user_send_lab::replay(&root, &args.collect::<Vec<_>>());
     }
-    if command == "fund-user-fee-check" {
+    if matches!(
+        command.as_str(),
+        "fund-user-fee-check" | "fund-faucet-check"
+    ) {
+        let grant = if command == "fund-faucet-check" {
+            1_000_000_000
+        } else {
+            300_000_000
+        };
         let wallet_path = PathBuf::from(args.next().ok_or("expected encrypted wallet")?);
         let password_path = PathBuf::from(args.next().ok_or("expected user password file")?);
         let cold_path = PathBuf::from(args.next().ok_or("expected cold rehearsal password file")?);
@@ -853,11 +878,7 @@ fn main() -> Result<()> {
         )?;
         let treasury = roles.remove("treasury").ok_or("missing treasury")?;
         let tx = Transaction::new_signed_with_payer(
-            &[system::transfer(
-                &treasury.pubkey(),
-                &recipient,
-                300_000_000,
-            )],
+            &[system::transfer(&treasury.pubkey(), &recipient, grant)],
             Some(&treasury.pubkey()),
             &[&treasury],
             rpc.get_latest_blockhash()?,
@@ -872,7 +893,7 @@ fn main() -> Result<()> {
         )?;
         println!(
             "{}",
-            json!({"signature":signature.to_string(),"fee_address":recipient.to_string(),"amount":300_000_000,"local_test_funding_only":true})
+            json!({"signature":signature.to_string(),"fee_address":recipient.to_string(),"amount":grant,"local_test_funding_only":true})
         );
         return Ok(());
     }
@@ -1001,5 +1022,24 @@ fn main() -> Result<()> {
         "recovery-check" => recovery_check(&root, &rpc, &peer),
         "replay-check" => replay_check(&root, &rpc, &peer),
         _ => Err("unknown localnet command".into()),
+    }
+}
+
+#[cfg(test)]
+mod restart_tail_tests {
+    use super::*;
+    #[test]
+    fn skipped_slot_child_keeps_parent_and_rejects_complex_or_invalid_tails() {
+        assert_eq!(restart_child_parent(12, 8, false, false, false).unwrap(), 8);
+        assert_eq!(restart_child_parent(9, 8, false, false, false).unwrap(), 8);
+        for (tip, parent, intermediate, dead, duplicate) in [
+            (12, 8, true, false, false),
+            (12, 8, false, true, false),
+            (12, 8, false, false, true),
+            (8, 8, false, false, false),
+            (7, 8, false, false, false),
+        ] {
+            assert!(restart_child_parent(tip, parent, intermediate, dead, duplicate).is_err());
+        }
     }
 }

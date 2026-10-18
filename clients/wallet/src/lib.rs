@@ -4,6 +4,7 @@
 mod archive;
 mod cache;
 pub mod connection;
+pub mod faucet;
 pub mod fees;
 pub mod history;
 pub mod keys;

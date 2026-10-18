@@ -15,7 +15,7 @@ fn run() -> Result<()> {
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
         println!(
-            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive|check|profile"
+            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive|check|profile|test-coins"
         );
         println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
         println!("init/restore: --backup <encrypted-seed-backup.json>");
@@ -31,6 +31,7 @@ fn run() -> Result<()> {
         println!("fees --payment send|withdraw: quote the exact payment shape; default withdraw for compatibility.");
         println!("withdraw-legacy: disposable fixture compatibility only; credits the sponsor. Never enabled for guarded rehearsal keys.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
+        println!("test-coins: request/check the same signed one-time private test-coin and public-gas grant through a pinned profile faucet; no sponsor options.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
         println!("archive: --network --rpc --history <directory>; public collector needs no wallet/password/sponsor");
         println!("balance/deposit/send/withdraw: optional --history <directory> supplies retained verified ciphertext history");
@@ -50,6 +51,7 @@ fn run() -> Result<()> {
         "archive",
         "check",
         "profile",
+        "test-coins",
         "withdraw-legacy",
     ]
     .contains(&command.as_str())
@@ -229,6 +231,13 @@ fn run() -> Result<()> {
             "{}",
             json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"fee_address":wallet.fee_keypair().pubkey().to_string(),"restored_seed_only":command=="restore"})
         );
+        return Ok(());
+    }
+    if command == "test-coins" {
+        let profile = tester
+            .as_ref()
+            .ok_or("test-coins requires a pinned tester profile")?;
+        println!("{}", native_wallet::faucet::request(profile, &wallet)?);
         return Ok(());
     }
     // Hold the OS lock from before sync/proving until all submission/recovery work ends.

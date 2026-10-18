@@ -8,6 +8,7 @@ use std::{
 
 pub struct WalletOperation {
     _lock: File,
+    receipt: Option<PathBuf>,
     pub(crate) pending: PathBuf,
     pub(crate) staging: PathBuf,
     pub(crate) scan_cache: PathBuf,
@@ -33,10 +34,23 @@ impl WalletOperation {
         })?;
         Ok(Self {
             _lock: file,
+            receipt: None,
             pending: suffix("pending.json"),
             staging: suffix("staging.json"),
             scan_cache: suffix("scan-cache"),
         })
+    }
+
+    /// Faucet workers retain canonical outcomes before clearing a pending identity.
+    pub fn with_durable_receipt(mut self, path: &Path) -> Self {
+        self.receipt = Some(path.to_owned());
+        self
+    }
+    pub(crate) fn record_outcome(&self, value: &serde_json::Value) -> Result<()> {
+        if let Some(path) = &self.receipt {
+            crate::sponsor::replace(path, &serde_json::to_vec(value)?)?;
+        }
+        Ok(())
     }
 
     pub fn ensure_resolved(&self) -> Result<()> {

@@ -65,6 +65,8 @@ pub struct TesterProfile {
     pub pool_format: String,
     pub recipient_withdrawals: bool,
     pub rpc: Endpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faucet: Option<Endpoint>,
 }
 
 impl TesterProfile {
@@ -102,7 +104,11 @@ impl TesterProfile {
             return Err("invalid or incompatible tester profile".into());
         }
         self.network().validate()?;
-        self.rpc.validate()
+        self.rpc.validate()?;
+        if let Some(endpoint) = &self.faucet {
+            endpoint.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -122,6 +128,7 @@ mod tests {
             pool: native_payment_program::pool_address().to_string(),
             pool_format: "NPOOL003".into(),
             recipient_withdrawals: true,
+            faucet: None,
             rpc: Endpoint {
                 transport: "https".into(),
                 url: "https://rpc.example.invalid".into(),
@@ -146,6 +153,13 @@ mod tests {
             },
             TesterProfile {
                 recipient_withdrawals: false,
+                ..profile.clone()
+            },
+            TesterProfile {
+                faucet: Some(Endpoint {
+                    transport: "https".into(),
+                    url: "http://untrusted.invalid".into(),
+                }),
                 ..profile.clone()
             },
             TesterProfile {

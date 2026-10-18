@@ -1,12 +1,13 @@
 const screen = document.querySelector('#screen');
 const notice = document.querySelector('#notice');
-let session = {}, password = '', address = '', balance = null, receipt = null, publicAddress = '', publicBalance = null, minimumPublicWithdrawal = null, busy = false, idle;
+let session = {}, password = '', address = '', balance = null, receipt = null, publicAddress = '', publicBalance = null, feeBalance = null, minimumPublicWithdrawal = null, busy = false, idle, grant = null, grantPoll, grantStarted = 0;
 
 function message(text = '', kind = '') {
   notice.textContent = text; notice.className = kind;
   if (kind === 'error') notice.scrollIntoView({ block: 'nearest' });
 }
 function setScreen(html) {
+  clearTimeout(grantPoll);
   screen.innerHTML = html; message();
   const heading = screen.querySelector('h2');
   if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
@@ -28,25 +29,25 @@ async function api(action, extra = {}) {
   if (!response.ok) throw new Error(body.error || 'The wallet could not complete this operation.');
   return body.result;
 }
-async function work(label, action) {
+async function work(label, action, activity = true) {
   if (busy) return;
   busy = true; message(label);
   screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = true);
   try { await action(); } catch (error) { message(error.message || 'The local wallet is unavailable. Check that the local network is running.', 'error'); }
-  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); applyAvailability(); touch(); }
+  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); applyAvailability(); if (activity) touch(); }
 }
 function applyAvailability() {
   if (session.operator_sponsor_available === false) {
-    const fundButton = document.getElementById('fund'); if (fundButton) fundButton.disabled = true;
+    const fundButton = document.getElementById('fund'); if (fundButton) fundButton.disabled = !session.test_faucet_available || session.pending || session.staging;
     const sendButton = document.getElementById('send'); if (sendButton && session.user_paid_sends !== true) sendButton.disabled = true;
     const fund = document.getElementById('fund');
     if (fund && !document.getElementById('availability-note')) {
       const note = document.createElement('p'); note.id = 'availability-note'; note.className = 'hint';
-      note.textContent = 'Send privately or withdraw using your funded fee account. Request test coins from the test operator; automatic funding is not enabled yet.'; fund.after(note);
+      note.textContent = session.test_faucet_available ? 'One free test grant includes private coins and public gas for your own sends. Test units have no monetary value. The faucet sees your receiving and fee addresses together.' : 'Send privately or withdraw using your funded fee account. This profile has no automatic test funding.'; fund.after(note);
     }
   }
 }
-function lock() { if (busy) return; password = ''; address = ''; balance = null; receipt = null; publicAddress = ''; publicBalance = null; minimumPublicWithdrawal = null; welcome(); }
+function lock() { if (busy) return; password = ''; address = ''; balance = null; receipt = null; publicAddress = ''; publicBalance = null; feeBalance = null; minimumPublicWithdrawal = null; grant = null; grantStarted = 0; welcome(); }
 function touch() { clearTimeout(idle); if (password) idle = setTimeout(lock, 15 * 60 * 1000); }
 document.addEventListener('pointerdown', touch); document.addEventListener('keydown', touch);
 
@@ -119,12 +120,21 @@ function recovery() {
   on('continue', 'click', () => { if (required && (!downloaded || !document.querySelector('#saved').checked)) return message('Save your recovery file or encrypted text and confirm that you have saved it.', 'error'); work('Opening your wallet…', async () => { if (required) await api('ack-backup'); await dashboard(); }); });
 }
 function renderDashboard() {
-  setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">Add ${Number(session.faucet_amount || 100).toLocaleString()} test units</button>${session.recipient_withdrawals ? '<button class="secondary" id="withdraw">Withdraw publicly</button><p class="hint" id="public-balance"></p>' : ''}<p class="hint small">Withdrawals can use your own funded fee account. Solana funding is coming later.</p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
+  setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><p class="hint" id="gas-balance"></p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">${session.test_faucet_available ? 'Get test coins + gas' : `Add ${Number(session.faucet_amount || 100).toLocaleString()} test units`}</button>${session.recipient_withdrawals ? '<button class="secondary" id="withdraw">Withdraw publicly</button><p class="hint" id="public-balance"></p>' : ''}<p class="hint small">Withdrawals can use your own funded fee account. Solana funding is coming later.</p><p class="hint" id="grant-status" role="status"></p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
+  document.querySelector('#gas-balance').textContent = `Public gas balance: ${feeBalance === null ? '—' : feeBalance} test units. Used for fees and refundable upload rent.`;
   on('lock', 'click', lock); on('receive', 'click', receive); on('send', 'click', send);
-  if (session.recipient_withdrawals) { on('withdraw', 'click', () => withdraw()); document.querySelector('#public-balance').textContent = `Public account: ${publicBalance === null ? '—' : publicBalance} test units on this chain.`; }
+  if (session.recipient_withdrawals) { on('withdraw', 'click', () => withdraw()); document.querySelector('#public-balance').textContent = `Withdrawal account: ${publicBalance === null ? '—' : publicBalance} test units on this chain.`; }
   on('refresh', 'click', () => work('Verifying finalized payment history…', dashboard));
   on('backup', 'click', recovery);
-  on('fund', 'click', () => payment('fund')); applyAvailability();
+  on('fund', 'click', () => session.test_faucet_available ? work('Requesting your test coins and gas…', async () => {
+    grantStarted = Date.now(); grant = await api('test-coins');
+    await dashboard();
+  }) : payment('fund')); applyAvailability();
+  if (grant) {
+    document.getElementById('grant-status').textContent = grant.state === 'ready' ? 'Your one-time test grant finalized. Wallet balances are verified separately from chain history.' : grant.state === 'needs_attention' ? 'Your original grant is saved, but the faucet needs operator recovery. Checking again will not create a second grant.' : 'Your original grant is saved. Gas and private coins are being finalized. We’ll check automatically for a few minutes. Closing this wallet is safe; check the same grant when you return.';
+    if (session.test_faucet_available) document.getElementById('fund').textContent = grant.state === 'ready' ? 'Check test grant' : 'Check coins + gas';
+  }
+  scheduleGrantCheck();
   if (receipt) {
     const element = document.querySelector('#receipt'); element.className = 'receipt';
     const heading = document.createElement('strong'); heading.textContent = receipt.withdrawal ? 'Withdrawal finalized' : 'Payment finalized'; element.append(heading, document.createElement('br'));
@@ -146,9 +156,20 @@ function renderDashboard() {
     controls.append(description, button);
   }
 }
+function scheduleGrantCheck() {
+  clearTimeout(grantPoll);
+  if (!password || !session.test_faucet_available || !grant || !['queued','funding'].includes(grant.state) || Date.now() - grantStarted > 180000) return;
+  grantPoll = setTimeout(() => {
+    if (!document.getElementById('grant-status') || !password) return;
+    if (busy) return scheduleGrantCheck();
+    work('Checking your saved test grant…', async () => {
+      grant = await api('test-coins'); await dashboard();
+    }, false);
+  }, 8000);
+}
 async function dashboard() {
   try {
-    const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null;
+    const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; feeBalance = result.fee_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null;
   } catch (error) { renderDashboard(); throw error; }
   renderDashboard();
 }

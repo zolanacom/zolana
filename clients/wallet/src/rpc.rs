@@ -44,7 +44,7 @@ use std::{
 };
 
 pub struct Chain {
-    rpc: RpcClient,
+    pub(crate) rpc: RpcClient,
     network: Network,
     sponsor_budget: Option<crate::sponsor::Budget>,
     user_fees: Option<(Pubkey, u64, std::path::PathBuf)>,
@@ -893,6 +893,7 @@ impl Chain {
             )
             .into());
         }
+        operation.record_outcome(&serde_json::json!({"signature":pending.signature,"accepted":accepted,"failed":failed,"expired_without_execution":expired_without_execution}))?;
         fs::remove_file(path)?;
         Ok(
             serde_json::json!({"signature":pending.signature,"accepted":accepted,"failed":failed,
@@ -1126,6 +1127,9 @@ impl Chain {
                     "finalization {signature} remains recorded as pending; run resolve: {error}"
                 )
             })?;
+        operation.record_outcome(
+            &serde_json::json!({"signature":signature.to_string(),"accepted":true}),
+        )?;
         fs::remove_file(pending_path)?;
         let finalization_ms = finalization_started.elapsed().as_millis();
         // Finalization is already durable. Failure to reclaim staging rent must
