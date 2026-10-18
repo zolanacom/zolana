@@ -397,8 +397,20 @@ impl Chain {
         payer: Pubkey,
         recipient: Pubkey,
     ) -> Result<crate::fees::Quote> {
+        self.payment_fee_quote(payer, crate::fees::PaymentKind::Withdraw(recipient))
+    }
+
+    pub fn private_send_fee_quote(&self, payer: Pubkey) -> Result<crate::fees::Quote> {
+        self.payment_fee_quote(payer, crate::fees::PaymentKind::Send)
+    }
+
+    fn payment_fee_quote(
+        &self,
+        payer: Pubkey,
+        kind: crate::fees::PaymentKind,
+    ) -> Result<crate::fees::Quote> {
         self.minimum_withdrawal(payer)?; // An ordinary public account must pay the fees.
-        let bytes = vec![0; 9254]; // Fixed NPAY0002 two-action shape; no proof is sent.
+        let bytes = vec![0; kind.payload_len()]; // Exact two-action shape; no proof or private recipient is sent.
         let buffer = Pubkey::new_unique();
         let rent = self
             .rpc
@@ -422,7 +434,14 @@ impl Chain {
         batches.extend(crate::upload::remaining(buffer, payer, &bytes));
         batches.push(vec![
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-            instructions::finalize_to(buffer, payer, [[1; 32], [2; 32]], recipient),
+            match kind {
+                crate::fees::PaymentKind::Send => {
+                    instructions::finalize(buffer, payer, [[1; 32], [2; 32]])
+                }
+                crate::fees::PaymentKind::Withdraw(recipient) => {
+                    instructions::finalize_to(buffer, payer, [[1; 32], [2; 32]], recipient)
+                }
+            },
         ]);
         let fee = |ix: &[Instruction]| -> Result<u64> {
             let mut tx = Transaction::new_with_payer(ix, Some(&payer));
@@ -447,6 +466,7 @@ impl Chain {
         let balance = self.public_balance(payer)?;
         let required = maximum.checked_add(remaining).ok_or("fee quote overflow")?;
         Ok(crate::fees::Quote {
+            payment: kind.name(),
             fee_address: payer.to_string(),
             public_balance: balance,
             refundable_staging_rent: rent,
@@ -950,18 +970,19 @@ impl Chain {
             );
         }
         let user_fee = if let Some((payer, maximum, _)) = &self.user_fees {
-            if self.sponsor_budget.is_some()
-                || *payer != sponsor.pubkey()
-                || payment.context.withdrawal_recipient.is_none()
-            {
-                return Err("user-paid mode requires a recipient-bound withdrawal and the user's fee signer".into());
+            if self.sponsor_budget.is_some() || *payer != sponsor.pubkey() {
+                return Err(
+                    "user-paid mode requires the user's fee signer and no operator sponsor".into(),
+                );
             }
-            let quote = self.withdrawal_fee_quote(
-                *payer,
-                Pubkey::new_from_array(payment.context.withdrawal_recipient.unwrap()),
-            )?;
+            let kind = crate::fees::PaymentKind::from_context(&payment.context)?;
+            let quote = self.payment_fee_quote(*payer, kind)?;
             if *maximum < quote.maximum_gross_debit {
-                return Err("user fee debit cap is below the current withdrawal quote".into());
+                return Err(format!(
+                    "user fee debit cap is below the current {} quote",
+                    kind.name()
+                )
+                .into());
             }
             if self.public_balance(*payer)?
                 < maximum

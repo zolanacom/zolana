@@ -111,6 +111,7 @@ async function run() {
   await restored.getByLabel('Amount in test units',{exact:true}).fill('7');
   await restored.setViewportSize({width:390,height:420});
   await restored.getByLabel('Amount in test units',{exact:true}).tap();
+  await restored.getByRole('button',{name:'Use test sponsor',exact:true}).click();
   await layout(restored,'keyboard-height-send');
   await restored.getByRole('button',{name:'Review payment',exact:true}).tap();
   await restored.getByRole('button',{name:'Edit payment',exact:true}).tap();

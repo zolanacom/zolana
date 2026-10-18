@@ -154,8 +154,8 @@ class WalletUiTests(unittest.TestCase):
                 for mode in [[], {}, True, "external"]:
                     with self.assertRaises(ValueError):
                         app.action({**request, "fee_mode": mode})
-                for action in ["send", "fund", "reclaim"]:
-                    with self.assertRaisesRegex(ValueError, "only supported for withdrawals"):
+                for action in ["fund", "reclaim"]:
+                    with self.assertRaisesRegex(ValueError, "only supported for sends and withdrawals"):
                         app.action({**request, "action": action})
                 cli.assert_not_called()
                 app.action({**request, "sponsor_password_file": "attacker", "sponsor_request_id": "attacker"})
@@ -168,3 +168,29 @@ class WalletUiTests(unittest.TestCase):
                 self.assertEqual(cli.call_args.args, ("reclaim", "local-test-password"))
                 app.action({"action": "fees", "password": "local-test-password"})
                 self.assertEqual(cli.call_args.args, ("fees", "local-test-password"))
+
+    def test_private_send_fee_quote_and_authorization_are_strict_without_operator(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            app.private_setup = True
+            app.ack.touch()
+            request = {"action":"send", "password":"local-test-password", "amount":10,
+                       "recipient":"npriv1example", "fee_mode":"user", "max_fee_debit":150000000}
+            with patch.object(app,"cli",return_value={}) as cli:
+                app.action(request)
+                self.assertEqual(cli.call_args.args[0],"send")
+                extra = cli.call_args.args[2]
+                self.assertEqual(extra[:4],["--fee-payer","user","--max-fee-debit","150000000"])
+                self.assertNotIn("--sponsor-password-file",extra)
+                for cap in [True,0,-1,1.5,"150000000",10**20]:
+                    with self.assertRaises(ValueError): app.action({**request,"max_fee_debit":cap})
+                for mode in [[],{},True,"external"]:
+                    with self.assertRaises(ValueError): app.action({**request,"fee_mode":mode})
+                with self.assertRaisesRegex(ValueError,"requires user-paid"):
+                    app.action({**request,"fee_mode":"sponsor"})
+                for value in [True,[],{},"deposit","send --rpc external"]:
+                    with self.assertRaises(ValueError): app.action({"action":"fees","payment":value,"password":"local-test-password"})
+                app.action({"action":"fees","payment":"send","password":"local-test-password"})
+                self.assertEqual(cli.call_args.args,("fees","local-test-password",["--payment","send"]))
+                with self.assertRaisesRegex(ValueError,"only supported for fees"):
+                    app.action({**request,"payment":"send"})

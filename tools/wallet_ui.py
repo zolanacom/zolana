@@ -107,7 +107,7 @@ class WalletApp:
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
                 "network": self.network_label if self.tester else ("Local testnet rehearsal" if self.private_setup else "Local test network"), "solana_funding_available": False,
-                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True}
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -130,8 +130,10 @@ class WalletApp:
         password = request.get("password")
         if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fees", "fund", "send", "withdraw", "resolve", "reclaim"}:
             raise ValueError("Unknown wallet action.")
-        if action != "withdraw" and ("fee_mode" in request or "max_fee_debit" in request):
-            raise ValueError("Fee selection is only supported for withdrawals.")
+        if action not in {"send", "withdraw"} and ("fee_mode" in request or "max_fee_debit" in request):
+            raise ValueError("Fee selection is only supported for sends and withdrawals.")
+        if action != "fees" and "payment" in request:
+            raise ValueError("Payment quote selection is only supported for fees.")
         if action == "create":
             return self.cli("init", password, ["--backup", str(self.backup)])
         if action == "restore":
@@ -151,13 +153,19 @@ class WalletApp:
             self.ack.touch(mode=0o600)
             return result
         if action in {"balance", "fees"}:
+            if action == "fees" and "payment" in request:
+                if request["payment"] not in ("send", "withdraw"):
+                    raise ValueError("Choose a send or withdrawal fee quote.")
+                return self.cli("fees", password, ["--payment", request["payment"]])
             return self.cli(action, password)
         if action in {"fund", "send", "withdraw", "resolve", "reclaim"}:
             if not self.ack.exists():
                 raise ValueError("Save and confirm your encrypted recovery file before making payments.")
-            user_paid = action == "withdraw" and request.get("fee_mode", "sponsor" if (not self.private_setup or self.sponsor_password_file is not None) else "user") == "user"
-            if action == "withdraw" and request.get("fee_mode", "user") not in ("user", "sponsor"):
+            user_paid = action in {"send", "withdraw"} and request.get("fee_mode", "sponsor" if (not self.private_setup or self.sponsor_password_file is not None) else "user") == "user"
+            if action in {"send", "withdraw"} and request.get("fee_mode", "user") not in ("user", "sponsor"):
                 raise ValueError("Choose user-paid or sponsored fees.")
+            if action in {"send", "withdraw"} and not user_paid and "max_fee_debit" in request:
+                raise ValueError("A fee debit cap requires user-paid fees.")
             if action == "reclaim":
                 stage = Path(str(self.wallet) + ".staging.json")
                 if stage.exists():
@@ -169,7 +177,7 @@ class WalletApp:
             if action == "resolve":
                 return self.cli("resolve", password)
             if self.private_setup and self.sponsor_password_file is None and not user_paid:
-                raise ValueError("Operator sponsorship is unavailable. Use your funded fee account for withdrawals.")
+                raise ValueError("Operator sponsorship is unavailable. Use your funded fee account for sends or withdrawals.")
             sponsor = ["--sponsor", str(self.root / "sponsor.keypair.json")]
             if user_paid:
                 cap = request.get("max_fee_debit")

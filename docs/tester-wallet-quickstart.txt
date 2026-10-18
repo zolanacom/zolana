@@ -34,11 +34,13 @@ Never delete an unfinished payment's files or start a replacement payment to
 resolve an unknown result. Use Check previous payment, then Recover upload rent.
 The launcher refuses to replace a data directory's pinned profile silently.
 
-This package has no operator sponsor. Private sending and test-coin requests
-are currently unavailable in standalone mode. It can receive native private
-payments and withdraw with user-paid fees after its separate public fee account
-has test coins, including upfront refundable upload rent. Ask the test operator
-to provision test balances/gas separately; no automatic public faucet exists.
+This package has no operator sponsor. It receives native private payments,
+sends privately and withdraws with user-paid fees after its separate public fee
+account has test coins, including upfront refundable upload rent. Send shows
+the fee address, public funding shortfall and gross debit cap before you confirm.
+Private value is separate from gas; the recipient receives the full amount.
+Ask the test operator to provision test balances/gas separately; automatic
+test-coin requests and a public faucet are not implemented.
 
 The wallet service and browser use your password locally. Only RPC traffic
 leaves the device; the seed/password are not sent to RPC. Remote profiles use

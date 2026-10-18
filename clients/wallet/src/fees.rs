@@ -1,6 +1,39 @@
-//! Bounded user authorization for the gross debit of one staged withdrawal.
+//! Bounded user authorization for the gross debit of one staged payment.
 use crate::Result;
+use native_payments::verification::AuthorizationContext;
 use serde::{Deserialize, Serialize};
+use solana_pubkey::Pubkey;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaymentKind {
+    Send,
+    Withdraw(Pubkey),
+}
+impl PaymentKind {
+    pub fn from_context(context: &AuthorizationContext) -> Result<Self> {
+        match (context.public_value_balance, context.withdrawal_recipient) {
+            (0, None) => Ok(Self::Send),
+            (value, Some(recipient)) if value > 0 && recipient != [0; 32] => {
+                Ok(Self::Withdraw(Pubkey::new_from_array(recipient)))
+            }
+            _ => Err(
+                "user-paid fees support private sends and recipient-bound withdrawals only".into(),
+            ),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::Withdraw(_) => "withdraw",
+        }
+    }
+    pub fn payload_len(self) -> usize {
+        match self {
+            Self::Send => 9222,
+            Self::Withdraw(_) => 9254,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +82,7 @@ impl Authorization {
 
 #[derive(Serialize)]
 pub struct Quote {
+    pub payment: &'static str,
     pub fee_address: String,
     pub public_balance: u64,
     pub refundable_staging_rent: u64,
@@ -64,6 +98,45 @@ pub struct Quote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn user_fee_shapes_exclude_deposits_and_legacy_public_withdrawals() {
+        let context = AuthorizationContext {
+            expires_at: 100,
+            public_value_balance: 0,
+            sponsor: [7; 32],
+            withdrawal_recipient: None,
+        };
+        assert_eq!(
+            PaymentKind::from_context(&context).unwrap(),
+            PaymentKind::Send
+        );
+        assert_eq!(PaymentKind::Send.payload_len(), 9222);
+        let withdrawal = AuthorizationContext {
+            public_value_balance: 1,
+            withdrawal_recipient: Some([8; 32]),
+            ..context
+        };
+        assert_eq!(
+            PaymentKind::from_context(&withdrawal)
+                .unwrap()
+                .payload_len(),
+            9254
+        );
+        for (value, recipient) in [
+            (-1, None),
+            (1, None),
+            (0, Some([8; 32])),
+            (-1, Some([8; 32])),
+            (1, Some([0; 32])),
+        ] {
+            assert!(PaymentKind::from_context(&AuthorizationContext {
+                public_value_balance: value,
+                withdrawal_recipient: recipient,
+                ..context
+            })
+            .is_err());
+        }
+    }
     #[test]
     fn durable_cap_reserves_cleanup_and_never_refunds_or_resets_on_recovery() {
         let mut a = Authorization::new(100, 10).unwrap();

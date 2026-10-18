@@ -2,6 +2,7 @@
 mod fault_lab;
 mod key_setup;
 mod load_lab;
+mod user_send_lab;
 // Exercise the exact validator fault guard in a first-party workspace target.
 #[cfg(test)]
 #[allow(dead_code)]
@@ -821,6 +822,9 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if command == "replay-user-send-check" {
+        return user_send_lab::replay(&root, &args.collect::<Vec<_>>());
+    }
     if command == "fund-user-fee-check" {
         let wallet_path = PathBuf::from(args.next().ok_or("expected encrypted wallet")?);
         let password_path = PathBuf::from(args.next().ok_or("expected user password file")?);

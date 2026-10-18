@@ -37,11 +37,12 @@ async function work(label, action) {
 }
 function applyAvailability() {
   if (session.operator_sponsor_available === false) {
-    ['send','fund'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+    const fundButton = document.getElementById('fund'); if (fundButton) fundButton.disabled = true;
+    const sendButton = document.getElementById('send'); if (sendButton && session.user_paid_sends !== true) sendButton.disabled = true;
     const fund = document.getElementById('fund');
     if (fund && !document.getElementById('availability-note')) {
       const note = document.createElement('p'); note.id = 'availability-note'; note.className = 'hint';
-      note.textContent = 'This build supports receiving and user-paid withdrawals. Private sending and test coin requests are not enabled yet.'; fund.after(note);
+      note.textContent = 'Send privately or withdraw using your funded fee account. Request test coins from the test operator; automatic funding is not enabled yet.'; fund.after(note);
     }
   }
 }
@@ -136,7 +137,12 @@ function renderDashboard() {
     const controls = document.querySelector('#recovery-controls');
     const description = document.createElement('p'); description.className = 'hint'; description.textContent = session.pending ? 'A previous payment needs a status check before you send again.' : 'An interrupted upload needs cleanup before you send again.';
     const button = document.createElement('button'); button.className = 'secondary'; button.textContent = session.pending ? 'Check previous payment' : 'Recover upload rent';
-    button.addEventListener('click', () => work('Checking finalized recovery state…', async () => { const result = await api(session.pending ? 'resolve' : 'reclaim'); if (result.accepted) receipt = { ...result, staging_rent_reclaimed: !result.staging_recovery_required }; await dashboard(); message(result.accepted ? 'The previous payment finalized. Recover its upload rent if prompted.' : 'Recovery step completed.', 'success'); }));
+    button.addEventListener('click', () => work('Checking finalized recovery state…', async () => {
+      const result = await api(session.pending ? 'resolve' : 'reclaim');
+      if (result.accepted) receipt = { ...result, staging_rent_reclaimed: !result.staging_recovery_required };
+      else if (result.recovery_cleared && !session.staging && receipt?.staging_account === result.staging_account) receipt = { ...receipt, staging_rent_reclaimed: true };
+      await dashboard(); message(result.accepted ? 'The previous payment finalized. Recover its upload rent if prompted.' : 'Recovery step completed.', 'success');
+    }));
     controls.append(description, button);
   }
 }
@@ -154,11 +160,24 @@ function receive() {
 }
 function send(draft = {}) {
   if (session.pending || session.staging) return renderDashboard();
-  setScreen(`<h2>Send privately</h2><p class="caption">Pay a private address on this local network.</p><form id="send-form"><label for="recipient">Recipient address</label><textarea id="recipient" required rows="3" maxlength="140" placeholder="npriv1…" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><button class="primary">Review payment</button></form><button class="text-button back" id="back">Back to wallet</button>`);
+  if (draft.fee_mode === 'sponsor') return renderSend(draft, null);
+  return work('Checking your fee account and upload rent…', async () => renderSend(draft, await api('fees', {payment:'send'})));
+}
+function renderSend(draft, quote) {
+  if (session.pending || session.staging) return renderDashboard();
+  const ownFees = draft.fee_mode !== 'sponsor';
+  if (ownFees && quote.payment !== 'send') throw new Error('The fee quote does not match a private send. Refresh before continuing.');
+  setScreen(`<h2>Send privately</h2><p class="caption">Pay a private address on this network.</p><form id="send-form"><label for="recipient">Recipient address</label><textarea id="recipient" required rows="3" maxlength="140" placeholder="npriv1…" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><div id="fee-details"></div><button class="primary">Review payment</button></form><button class="text-button back" id="back">Back to wallet</button>`);
   document.querySelector('#recipient').value = draft.recipient || '';
   document.querySelector('#amount').value = draft.amount || '';
+  feeDetails(draft, quote, send);
   on('back', 'click', renderDashboard);
-  on('send-form', 'submit', event => { event.preventDefault(); const recipient = document.querySelector('#recipient').value.trim(), amount = Number(document.querySelector('#amount').value); if (!recipient.startsWith('npriv1') || !Number.isSafeInteger(amount) || amount < 1 || amount > balance) return message('Enter a private receiving address and an amount within your balance.', 'error'); review(recipient, amount); });
+  on('send-form', 'submit', event => {
+    event.preventDefault(); const recipient = document.querySelector('#recipient').value.trim(), amount = Number(document.querySelector('#amount').value);
+    if (!recipient.startsWith('npriv1') || !Number.isSafeInteger(amount) || amount < 1 || amount > balance) return message('Enter a private receiving address and an amount within your balance.', 'error');
+    if (ownFees && quote.funding_shortfall) return message('Fund the fee address with public native coins, then refresh its balance. Upload rent is returned after cleanup.', 'error');
+    review(recipient, amount, 'send', {fee_mode:ownFees?'user':'sponsor',max_fee_debit:ownFees?quote.maximum_gross_debit:undefined});
+  });
 }
 function withdraw(draft = {}) {
   if (session.pending || session.staging) return renderDashboard();
@@ -168,23 +187,12 @@ function withdraw(draft = {}) {
 function renderWithdrawal(draft, quote) {
   const ownFees = draft.fee_mode !== 'sponsor';
   if (session.pending || session.staging) return renderDashboard();
+  if (ownFees && quote.payment !== 'withdraw') throw new Error('The fee quote does not match a withdrawal. Refresh before continuing.');
   setScreen(`<h2>Withdraw publicly</h2><p class="caption">Move private funds to a public account on this chain.</p><form id="withdraw-form"><label for="recipient">Public destination address</label><textarea id="recipient" required rows="2" maxlength="44" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><p class="hint">The default account is controlled by your recovery seed. This sends this chain's native coin, not SOL on Solana.</p><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><p class="hint" id="withdraw-minimum"></p><div id="fee-details"></div><button class="primary">Review withdrawal</button></form><button class="text-button back" id="back">Back to wallet</button>`);
   document.querySelector('#recipient').value = draft.recipient || publicAddress;
   document.querySelector('#amount').value = draft.amount || '';
   document.querySelector('#withdraw-minimum').textContent = (minimumPublicWithdrawal > 1 ? `Your public account needs at least ${minimumPublicWithdrawal} units for its first withdrawal. ` : 'Your destination receives the full withdrawal amount. ') + (ownFees ? 'You pay fees and rent separately.' : 'The sponsor pays fees and rent.');
-  const fees = document.querySelector('#fee-details');
-  if (ownFees) {
-    const address = document.createElement('p'); address.className = 'address'; address.id = 'fee-address'; address.textContent = quote.fee_address;
-    const details = document.createElement('p'); details.className = 'hint'; details.id = 'fee-quote';
-    details.textContent = `You pay fees from this seed-controlled fee account. Balance: ${quote.public_balance}. Refundable upload rent: ${quote.refundable_staging_rent}. Permanent nullifier rent: ${quote.permanent_nullifier_rent}. Estimated transaction fees: ${quote.transaction_fees}. Maximum gross debit authorized: ${quote.maximum_gross_debit}. Keep ${quote.minimum_remaining_balance} units in the account. ${quote.funding_shortfall ? `Fund at least ${quote.funding_shortfall} more native units on this chain before continuing.` : 'The fee account is funded.'}`;
-    fees.append(details, address);
-    const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'secondary'; refresh.textContent = 'Refresh fee balance';
-    refresh.onclick = () => withdraw({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:'user'}); fees.append(refresh);
-  }
-  if (session.operator_sponsor_available) {
-    const mode = document.createElement('button'); mode.type = 'button'; mode.className = 'secondary'; mode.textContent = ownFees ? 'Use test sponsor' : 'Pay my own fees';
-    mode.onclick = () => withdraw({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:ownFees?'sponsor':'user'}); fees.append(mode);
-  }
+  feeDetails(draft, quote, withdraw);
   on('back', 'click', renderDashboard);
   on('withdraw-form', 'submit', event => {
     event.preventDefault();
@@ -195,12 +203,29 @@ function renderWithdrawal(draft, quote) {
     review(recipient, amount, 'withdraw', {fee_mode:ownFees?'user':'sponsor',max_fee_debit:ownFees?quote.maximum_gross_debit:undefined});
   });
 }
+function feeDetails(draft, quote, rerender) {
+  const ownFees = draft.fee_mode !== 'sponsor';
+  const fees = document.querySelector('#fee-details');
+  if (ownFees) {
+    const address = document.createElement('p'); address.className = 'address'; address.id = 'fee-address'; address.textContent = quote.fee_address;
+    const details = document.createElement('p'); details.className = 'hint'; details.id = 'fee-quote';
+    details.textContent = `You pay fees from this seed-controlled fee account. Balance: ${quote.public_balance}. Refundable upload rent: ${quote.refundable_staging_rent}. Permanent nullifier rent: ${quote.permanent_nullifier_rent}. Estimated transaction fees: ${quote.transaction_fees}. Maximum gross debit authorized: ${quote.maximum_gross_debit}. Keep ${quote.minimum_remaining_balance} units in the account. ${quote.funding_shortfall ? `Fund at least ${quote.funding_shortfall} more native units on this chain before continuing.` : 'The fee account is funded.'}`;
+    fees.append(details, address);
+    const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'secondary'; refresh.textContent = 'Refresh fee balance';
+    refresh.onclick = () => rerender({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:'user'}); fees.append(refresh);
+  }
+  if (session.operator_sponsor_available) {
+    const mode = document.createElement('button'); mode.type = 'button'; mode.className = 'secondary'; mode.textContent = ownFees ? 'Use test sponsor' : 'Pay my own fees';
+    mode.onclick = () => rerender({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:ownFees?'sponsor':'user'}); fees.append(mode);
+  }
+}
 function review(recipient, amount, action = 'send', fees = {}) {
   const withdrawing = action === 'withdraw';
   setScreen(`<h2>${withdrawing ? 'Review public withdrawal' : 'Review payment'}</h2><div class="balance" id="review-amount"></div><p class="hint">To</p><p class="address" id="review-address"></p><p class="hint" id="review-fees"></p><button class="primary" id="confirm-send">${withdrawing ? 'Withdraw publicly' : 'Send payment'}</button><button class="secondary" id="back">${withdrawing ? 'Edit withdrawal' : 'Edit payment'}</button>`);
-  document.querySelector('#review-fees').textContent = withdrawing ? 'The amount and destination become public on this chain. ' + (fees.fee_mode === 'user' ? `You authorize up to ${fees.max_fee_debit} units of gross debit from your seed-controlled fee account, including refundable upload rent. No operator sponsor is used.` : 'The sponsor pays fees and rent, and receives none of your withdrawal.') : 'The local test sponsor pays the network fees.';
+  const feeDescription = fees.fee_mode === 'user' ? `You authorize up to ${fees.max_fee_debit} units of gross debit from your seed-controlled fee account, including refundable upload rent. No operator sponsor is used. Your public fee account and transaction timing remain visible.` : 'The selected test sponsor pays fees and rent.';
+  document.querySelector('#review-fees').textContent = (withdrawing ? 'The amount and destination become public on this chain. ' : 'The payment amount and recipient stay shielded. ') + feeDescription;
   document.querySelector('#review-amount').textContent = `${amount} test units`; document.querySelector('#review-address').textContent = recipient;
-  on('back', 'click', () => withdrawing ? withdraw({ recipient, amount, ...fees }) : send({ recipient, amount })); on('confirm-send', 'click', () => payment(action, { recipient, amount, ...fees }));
+  on('back', 'click', () => withdrawing ? withdraw({ recipient, amount, ...fees }) : send({ recipient, amount, ...fees })); on('confirm-send', 'click', () => payment(action, { recipient, amount, ...fees }));
 }
 
 async function payment(action, extra = {}) {

@@ -65,9 +65,13 @@ class TesterPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name, patch("wallet_ui.subprocess.run", return_value=self.validated()):
             app = WalletApp.from_profile(Path("profile.json"), Path(name) / "state")
             app.ack.touch()
-            for action in ("fund", "send"):
-                with self.assertRaisesRegex(ValueError, "Operator sponsorship"):
-                    app.action({"action": action})
+            with self.assertRaisesRegex(ValueError, "Operator sponsorship"):
+                app.action({"action": "fund"})
+            self.assertTrue(app.status()["user_paid_sends"])
+            with patch.object(app,"cli",return_value={}) as cli:
+                app.action({"action":"send","password":"test-password-long","amount":1,"recipient":"npriv1example","fee_mode":"user","max_fee_debit":150000000})
+                self.assertEqual(cli.call_args.args[0],"send")
+                self.assertNotIn("--sponsor",cli.call_args.args[2])
             with patch("wallet_ui.subprocess.run", return_value=self.validated()) as run:
                 app.cli("address", "test-password-long")
                 self.assertNotIn("--rpc", run.call_args.args[0])

@@ -27,7 +27,8 @@ fn run() -> Result<()> {
         println!("deposit/send: --to <npriv1-address> (deposit defaults to this wallet)");
         println!("withdraw: --to <public-address> (defaults to your seed-recoverable public account on this chain); fee sponsor receives no withdrawal value.");
         println!("fees: show the user fee address, refundable rent, gross-debit quote and funding shortfall; no sponsor needed.");
-        println!("withdraw --fee-payer user --max-fee-debit <native-units>: sign with your seed-derived fee authority; never loads operator keys. Fund its public fee address first.");
+        println!("send/withdraw --fee-payer user --max-fee-debit <native-units>: sign with your seed-derived fee authority; never loads operator keys. Fund its public fee address first.");
+        println!("fees --payment send|withdraw: quote the exact payment shape; default withdraw for compatibility.");
         println!("withdraw-legacy: disposable fixture compatibility only; credits the sponsor. Never enabled for guarded rehearsal keys.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
@@ -71,6 +72,7 @@ fn run() -> Result<()> {
             "--sponsor-request-id",
             "--fee-payer",
             "--max-fee-debit",
+            "--payment",
         ]
         .contains(&flag.as_str())
         {
@@ -83,12 +85,13 @@ fn run() -> Result<()> {
     }
     let user_paid = match args.get("--fee-payer").map(String::as_str) {
         None | Some("sponsor") => false,
-        Some("user") if command == "withdraw" => true,
-        _ => return Err("--fee-payer must select user or sponsor for a withdrawal".into()),
+        Some("user") if matches!(command.as_str(), "send" | "withdraw") => true,
+        _ => return Err("--fee-payer must select user or sponsor for send/withdraw".into()),
     };
-    if args.contains_key("--fee-payer") && command != "withdraw" {
+    if args.contains_key("--fee-payer") && !matches!(command.as_str(), "send" | "withdraw") {
         return Err(
-            "fee selection is only for withdraw; reclaim uses the original recorded payer".into(),
+            "fee selection is only for send/withdraw; reclaim uses the original recorded payer"
+                .into(),
         );
     }
     if user_paid
@@ -103,8 +106,13 @@ fn run() -> Result<()> {
         return Err("user-paid fees cannot be combined with operator sponsor options".into());
     }
     if args.contains_key("--max-fee-debit") && !user_paid {
-        return Err("--max-fee-debit requires user-paid withdrawal fees".into());
+        return Err("--max-fee-debit requires user-paid send/withdraw fees".into());
     }
+    let quote_payment = match args.get("--payment").map(String::as_str) {
+        None => "withdraw",
+        Some(value @ ("send" | "withdraw")) if command == "fees" => value,
+        _ => return Err("--payment send|withdraw is only supported for fees".into()),
+    };
     if command == "withdraw-legacy" && args.contains_key("--to") {
         return Err("legacy fixture withdrawal pays the sponsor; no destination override".into());
     }
@@ -130,11 +138,12 @@ fn run() -> Result<()> {
         ]
         .iter()
         .any(|flag| args.contains_key(*flag))
-            || matches!(command.as_str(), "deposit" | "send" | "withdraw-legacy")
-            || (command == "withdraw" && !user_paid)
+            || matches!(command.as_str(), "deposit" | "withdraw-legacy")
+            || (matches!(command.as_str(), "send" | "withdraw") && !user_paid)
         {
             return Err(
-                "tester profile permits no operator sponsorship; use user-paid withdrawals".into(),
+                "tester profile permits no operator sponsorship; use user-paid sends/withdrawals"
+                    .into(),
             );
         }
         Some(profile)
@@ -230,13 +239,15 @@ fn run() -> Result<()> {
         return Ok(());
     }
     if command == "fees" {
-        println!(
-            "{}",
-            serde_json::to_string(&chain.withdrawal_fee_quote(
+        let quote = if quote_payment == "send" {
+            chain.private_send_fee_quote(wallet.fee_keypair().pubkey())?
+        } else {
+            chain.withdrawal_fee_quote(
                 wallet.fee_keypair().pubkey(),
-                wallet.public_keypair().pubkey()
-            )?)?
-        );
+                wallet.public_keypair().pubkey(),
+            )?
+        };
+        println!("{}", serde_json::to_string(&quote)?);
         return Ok(());
     }
     if command == "reclaim" {
@@ -341,15 +352,25 @@ fn run() -> Result<()> {
     payments::validate(&wallet, &synced.state, &payment)?;
     if user_paid {
         let maximum = required("--max-fee-debit")?.parse::<u64>()?;
-        let recipient = match payment {
-            Payment::WithdrawTo { recipient, .. } => {
-                solana_pubkey::Pubkey::new_from_array(recipient)
+        let quote = match payment {
+            Payment::Send { .. } => chain.private_send_fee_quote(sponsor.pubkey())?,
+            Payment::WithdrawTo { recipient, .. } => chain.withdrawal_fee_quote(
+                sponsor.pubkey(),
+                solana_pubkey::Pubkey::new_from_array(recipient),
+            )?,
+            _ => {
+                return Err(
+                    "user fee mode only supports private sends and recipient-bound withdrawals"
+                        .into(),
+                )
             }
-            _ => return Err("user fee mode only supports recipient-bound withdrawals".into()),
         };
-        let quote = chain.withdrawal_fee_quote(sponsor.pubkey(), recipient)?;
         if maximum < quote.maximum_gross_debit {
-            return Err("user fee debit cap is below the current withdrawal quote".into());
+            return Err(format!(
+                "user fee debit cap is below the current {} quote",
+                quote.payment
+            )
+            .into());
         }
         if quote.public_balance
             < maximum

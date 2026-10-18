@@ -12,7 +12,9 @@ This repository starts from upstream Agave source and a new development history.
 
 See development status for the current prototype stage, completed components and production gaps.
 
-The [standalone tester wallet](docs/tester-wallet-runbook.md) packages the device-local client independently of the checkout and operator keys, with a pinned genesis/RPC profile, HTTPS for remote endpoints and preserved wallet data across package replacement. Extracted-package acceptance passed offline recovery and real local-validator reads. This unsigned development bundle remains local; sponsor-free private sends, test-gas provisioning, hosting and release review are still required before inviting testers.
+The [standalone tester wallet](docs/tester-wallet-runbook.md) packages the device-local client independently of the checkout and operator keys, with a pinned genesis/RPC profile, HTTPS for remote endpoints and preserved wallet data across package replacement. Extracted-package acceptance passed offline recovery and real local-validator reads. This unsigned development bundle remains local; test-gas provisioning, hosting and release review are still required before inviting testers.
+
+[Sponsor-free private sends](docs/private-send-runbook.md) use the same seed-derived fee authority with an explicit gas/rent quote and durable cap. Real browser/CLI sends, interrupted uploads, lost finalized replies, validator crash/restart, spent-proof rejection and restored-seed spending passed locally. Recipients receive the full private amount; the sender funds fees and refundable staging rent publicly. No protocol or consensus change is needed.
 
 The product is an independent privacy blockchain with its own validators and fee/staking coin. Its first user interface is a payments wallet; building that interface does not turn the chain into a Solana application. A DEX, private swaps and an Axiom-style terminal are not implemented. The Solana bridge remains later work.
 
