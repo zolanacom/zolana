@@ -119,9 +119,23 @@ pub struct JsonRpcService {
     #[cfg(test)]
     pub request_processor: JsonRpcRequestProcessor, // Used only by test_rpc_new()...
 
-    close_handle: Option<CloseHandle>,
+    close_handle: Option<RpcCloseHandle>,
 
     client_updater: Arc<dyn NotifyKeyUpdate + Send + Sync>,
+}
+
+#[derive(Clone)]
+enum RpcCloseHandle {
+    Tcp(CloseHandle),
+    Unix(CancellationToken),
+}
+impl RpcCloseHandle {
+    fn close(self) {
+        match self {
+            Self::Tcp(h) => h.close(),
+            Self::Unix(t) => t.cancel(),
+        }
+    }
 }
 
 struct RpcRequestMiddleware {
@@ -741,18 +755,29 @@ impl JsonRpcService {
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         runtime: Arc<TokioRuntime>,
     ) -> Result<Self, String> {
-        let operator_token = if let Some(path) = &config.native_rpc_access_file {
+        let operator_credential = if let Some(path) = &config.native_rpc_access_file {
             if !rpc_addr.ip().is_loopback() {
                 return Err("protected raw RPC requires loopback binding".into());
             }
             Some(
-                native_rpc_access::read_token(path)
+                native_rpc_access::read_credential(path)
                     .map_err(|_| "raw RPC credential unavailable or invalid".to_string())?,
             )
         } else {
             None
         };
-        info!("rpc bound to {rpc_addr:?}");
+        let unix_socket = operator_credential
+            .as_ref()
+            .map(|c| c.socket(rpc_addr.port()).map(|p| p.map(Path::to_path_buf)))
+            .transpose()
+            .map_err(|_| "private RPC route missing".to_string())?
+            .flatten();
+        let operator_token = operator_credential.map(|c| c.token);
+        if unix_socket.is_some() {
+            info!("rpc configured for owner-only Unix transport; TCP disabled");
+        } else {
+            info!("rpc bound to {rpc_addr:?}");
+        }
         info!("rpc configuration: {config:?}");
         let rpc_niceness_adj = config.rpc_niceness_adj;
 
@@ -881,6 +906,61 @@ impl JsonRpcService {
                     health.clone(),
                 );
                 request_middleware.operator_token = operator_token;
+                if let Some(path) = unix_socket {
+                    // No TCP listener is opened in this branch. Use the upstream HTTP
+                    // handler directly over an owner-only Unix listener.
+                    let bound = native_rpc_access::bind_socket(&path);
+                    let (listener, _guard) = match bound {
+                        Ok(bound) => bound,
+                        Err(_) => { let _ = close_handle_sender.send(Err("private RPC socket unavailable".into())); return; }
+                    };
+                    let cancel = CancellationToken::new();
+                    let rpc = jsonrpc_http_server::Rpc {
+                        handler: Arc::new(io),
+                        extractor: Arc::new(move |req: &hyper::Request<hyper::Body>| {
+                            if req.headers().get("x-bigtable").is_some_and(|v| v == "disabled") {
+                                request_processor.clone_without_bigtable()
+                            } else { request_processor.clone() }
+                        }),
+                    };
+                    let middleware = Arc::new(request_middleware);
+                    runtime.block_on(async {
+                        let listener = match tokio::net::UnixListener::from_std(listener) {
+                            Ok(l) => l,
+                            Err(_) => { let _ = close_handle_sender.send(Err("private RPC socket unavailable".into())); return; }
+                        };
+                        let _ = close_handle_sender.send(Ok(RpcCloseHandle::Unix(cancel.clone())));
+                        let permits = Arc::new(tokio::sync::Semaphore::new(64));
+                        let mut tasks = tokio::task::JoinSet::new();
+                        loop {
+                            tokio::select! {
+                                _ = cancel.cancelled() => break,
+                                Some(_) = tasks.join_next(), if !tasks.is_empty() => (),
+                                accepted = listener.accept() => {
+                                    let Ok((stream, _)) = accepted else { break; };
+                                    // Socket permissions protect access; peer UID is an
+                                    // independent check before any HTTP bytes are parsed.
+                                    if stream.peer_cred().map(|c| c.uid()).ok() != Some(unsafe { libc::geteuid() }) { continue; }
+                                    let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
+                                    let service = jsonrpc_http_server::ServerHandler::new(
+                                        rpc.downgrade(), None, None, jsonrpc_http_server::cors::AccessControlAllowHeaders::Any, None,
+                                        middleware.clone(), jsonrpc_http_server::RestApi::Disabled,
+                                        None, max_request_body_size, false,
+                                    );
+                                    tasks.spawn(async move {
+                                        let _permit = permit;
+                                        let _ = tokio::time::timeout(Duration::from_secs(30),
+                                            hyper::server::conn::Http::new().http1_keep_alive(false).serve_connection(stream, service)).await;
+                                    });
+                                }
+                            }
+                        }
+                        tasks.abort_all();
+                        while tasks.join_next().await.is_some() {}
+                    });
+                    exit_bigtable_ledger_upload_service.store(true, Ordering::Relaxed);
+                    return;
+                }
                 let server = ServerBuilder::with_meta_extractor(
                     io,
                     move |req: &hyper::Request<hyper::Body>| {
@@ -913,7 +993,7 @@ impl JsonRpcService {
                 }
 
                 let server = server.unwrap();
-                close_handle_sender.send(Ok(server.close_handle())).unwrap();
+                close_handle_sender.send(Ok(RpcCloseHandle::Tcp(server.close_handle()))).unwrap();
                 server.wait();
                 exit_bigtable_ledger_upload_service.store(true, Ordering::Relaxed);
             })

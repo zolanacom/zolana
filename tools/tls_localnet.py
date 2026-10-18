@@ -138,12 +138,15 @@ class TLSExperiment(Distribution):
             finally:server.shutdown();server.server_close();thread.join(timeout=5)
         self.event('tls_certificate_hostname_and_plaintext_rejections_passed')
     def public_without_ca(self):return request('https://127.0.0.1:18898',dict(jsonrpc='2.0',id=1,method='getGenesisHash'))
+    def enable_policy(self,root):enable(root)
+    def crash_validators(self):
+        for i in [1,0]:stop(self.root,i)
     def run(self):
         root=self.root;self.operator=PROJECT/'.local'/('operator-'+root.name);self.operator.mkdir(mode=0o700)
         cold,hot=self.operator/'cold.password',self.operator/'sponsor.password'
         for path in [cold,hot]:private_new(path,secrets.token_urlsafe(36).encode())
         self.command([str(LAB),'init-private',str(root),'--cold-password-file',str(cold),'--sponsor-password-file',str(hot)])
-        enable(root);self.tls=self.operator/'tls';certificates(self.tls);self.ca=self.tls/'ca.crt'
+        self.enable_policy(root);self.tls=self.operator/'tls';certificates(self.tls);self.ca=self.tls/'ca.crt'
         self.secret_digest=hashlib.sha256((root/'rpc-access.key').read_bytes()).hexdigest()
         for i in [0,1]:self.children[i]=start(root,i);wait_rpc(root,i)
         quiet(root);self.converge(0);self.wait_for(self.ready_history,timeout=30);config=load(root);self.raw_probes();self.event('raw_http_routes_protected_and_websockets_closed')
@@ -154,6 +157,10 @@ class TLSExperiment(Distribution):
         setup=self.command([str(FAUCET),'init','--root',str(self.faucet_root),'--profile',str(source_file),'--password-file',str(self.password_file),'--max-claims','2','--rpc-access-file',str(root/'rpc-access.key')])
         self.source=self.faucet_root/'wallet.enc.json'
         receipt=self.command([str(WALLET),'deposit','--network',str(root/'network.json'),'--wallet',str(self.source),'--password-file',str(self.password_file),'--rpc','http://127.0.0.1:18899','--rpc-access-file',str(root/'rpc-access.key'),'--sponsor-password-file',str(hot),'--sponsor-request-id','https-test-reservoir','--amount','5000000']);self.closed(receipt['staging_account'])
+        # Finalized rent closure can precede local journal removal. Complete
+        # setup's original sponsor cleanup before disabling operator material.
+        if Path(str(self.source)+'.staging.json').exists():
+            self.command([str(WALLET),'reclaim','--network',str(root/'network.json'),'--wallet',str(self.source),'--password-file',str(self.password_file),'--rpc','http://127.0.0.1:18899','--rpc-access-file',str(root/'rpc-access.key'),'--sponsor-password-file',str(hot)])
         self.command([str(LAB),'fund-faucet-check',str(root),str(self.source),str(self.password_file),str(cold),'http://127.0.0.1:18899']);self.wait_for(lambda:self.native_balance(setup['fee_address'])==1_000_000_000)
         self.preserved={}
         for name in ['sponsor.enc.json','sponsor-policy.json','sponsor-policy.json.reservations.json']:
@@ -170,6 +177,9 @@ class TLSExperiment(Distribution):
             app=WalletApp.from_profile(self.profiles[0],self.evidence/(who+'-client'));self.clients[who]=app;self.keys[who]=self.user(who,'create');self.user(who,'ack-backup')
             export=self.operator/(who+'.invite.json');issued=self.command([str(FAUCET),'invite-issue','--root',str(self.faucet_root),'--output',str(export),'--expires-in','86400','--bind-fee',self.keys[who]['fee_address']]);self.invite_ids[who]=issued['invite_id']
             self.user(who,'join',invitation=json.loads(export.read_text())['invitation'])
+        self.finish_grants_and_recovery(setup)
+    def finish_grants_and_recovery(self,setup):
+        root=self.root;config=load(root)
         deadline=time.monotonic()+480
         while time.monotonic()<deadline:
             self.tick()
@@ -188,7 +198,7 @@ class TLSExperiment(Distribution):
         self.kill(child);self.gated.release.set();pending=self.gated.pending;pending_digest=hashlib.sha256(pending.read_bytes()).hexdigest();state=durable(root,0);barrier=max(self.slots())
         self.event('real_private_finality_reply_lost_over_tls',pending_signature=json.loads(pending.read_text())['signature'])
         self.close_tls();admission_digest=hashlib.sha256((self.faucet_root/'admission.json').read_bytes()).hexdigest()
-        for i in [1,0]:stop(root,i)
+        self.crash_validators()
         # Missing files cannot change a managed restart into an open raw listener.
         credential=root/'rpc-access.key';saved=root/'rpc-access.key.preserved';credential.rename(saved)
         try:

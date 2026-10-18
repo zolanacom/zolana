@@ -145,6 +145,8 @@ struct Policy {
     invite_required: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     operator_rpc: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    operator_unix: bool,
     private_amount: u64,
     gas_amount: u64,
     max_attempts: u8,
@@ -243,11 +245,24 @@ pub fn initialize_with_rpc(
     max_claims: usize,
     credential: Option<&Path>,
 ) -> Result<Value> {
-    let token = credential.map(native_rpc_access::read_token).transpose()?;
+    let material = credential
+        .map(native_rpc_access::read_credential)
+        .transpose()?;
+    let token = credential
+        .map(native_rpc_access::read_material)
+        .transpose()?;
     if root.exists() || !(1..=100).contains(&max_claims) {
         return Err("use a new faucet directory and 1..100 lifetime claims".into());
     }
     let profile = TesterProfile::load(profile_path)?;
+    let operator_port = reqwest::Url::parse(&profile.rpc.url)?
+        .port()
+        .ok_or("operator RPC port required");
+    let operator_unix = if let Some(c) = &material {
+        c.socket(operator_port?)?.is_some()
+    } else {
+        false
+    };
     if profile.invite_required {
         return Err(
             "faucet source profile must use separate operator RPC without invitation access".into(),
@@ -257,7 +272,7 @@ pub fn initialize_with_rpc(
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
     if let Some(token) = &token {
-        write_private_new(&root.join("rpc-access.key"), token.as_bytes())?;
+        write_private_new(&root.join("rpc-access.key"), token)?;
     }
     let wallet = WalletKey::generate(profile.network())?;
     wallet.save(&root.join("wallet.enc.json"), password)?;
@@ -270,6 +285,7 @@ pub fn initialize_with_rpc(
         max_claims,
         invite_required: false,
         operator_rpc: token.is_some(),
+        operator_unix,
         private_amount: PRIVATE_GRANT,
         gas_amount: GAS_GRANT,
         max_attempts: ATTEMPTS,
@@ -405,6 +421,17 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
     }
     let connect = || {
         if ledger.policy.operator_rpc {
+            if ledger.policy.operator_unix
+                && native_rpc_access::read_credential(&root.join("rpc-access.key"))?
+                    .socket(
+                        reqwest::Url::parse(&profile.rpc.url)?
+                            .port()
+                            .ok_or("operator RPC port required")?,
+                    )?
+                    .is_none()
+            {
+                return Err("faucet private RPC transport cannot be downgraded".into());
+            }
             Chain::connect_operator(
                 &profile.rpc.url,
                 profile.network(),

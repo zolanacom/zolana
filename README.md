@@ -62,6 +62,8 @@ The [fault recovery runner](docs/fault-recovery-runbook.md) exercises owned-proc
 
 The [offline recovery runner](docs/offline-recovery-runbook.md) covers multiple epoch boundaries, expired staging, snapshot fallback and damaged-archive rejection. Its validation record preserves the failed ordinary-repair attempt separately from successful snapshot-assisted recovery.
 
+For fresh private rehearsals, the [host isolation runbook](docs/host-isolation-runbook.md) adds owner-only Unix transport for raw validator RPC, including recovery inspection. Invited clients still use verified HTTPS. The private transport closes loopback port impersonation; a dedicated OS service identity is required to exclude unrelated processes running as the operator's own user.
+
 ## Attribution
 
 Upstream attribution is preserved in [THIRD_PARTY.md](THIRD_PARTY.md) and vendored notices.

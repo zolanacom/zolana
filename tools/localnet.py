@@ -28,17 +28,14 @@ class NoRpcRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def rpc(port, method, params=None):
-    headers={"Content-Type":"application/json"}
+    raw=json.dumps({"jsonrpc":"2.0","id":1,"method":method,"params":params or []}).encode()
     if port in RPC_CREDENTIALS:
-        from service_tls import operator_token
-        headers["X-Native-Operator"]=operator_token(RPC_CREDENTIALS[port])
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}",
-        json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []}).encode(),
-        headers,
-    )
-    with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRpcRedirect()).open(request, timeout=5) as response:
-        result = json.load(response)
+        from operator_transport import Operator
+        result=json.loads(Operator(f"http://127.0.0.1:{port}",RPC_CREDENTIALS[port]).forward(raw,timeout=5))
+    else:
+        request=urllib.request.Request(f"http://127.0.0.1:{port}",raw,{"Content-Type":"application/json"})
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRpcRedirect()).open(request,timeout=5) as response:
+            result=json.load(response)
     if "error" in result:
         raise RuntimeError(result["error"])
     return result["result"]
@@ -54,8 +51,9 @@ def load(root):
             raise RuntimeError("not a disposable fixture or owner-only local testnet rehearsal")
     from rpc_isolation import validate as validate_rpc_policy
     credential=validate_rpc_policy(root,config)
-    if credential:
-        for i in [0,1]: RPC_CREDENTIALS[port(i)]=credential
+    for i in [0,1]:
+        if credential: RPC_CREDENTIALS[port(i)]=credential
+        else: RPC_CREDENTIALS.pop(port(i),None)
     return config
 
 
@@ -123,10 +121,11 @@ def start(root, index, archive=False, coordinated=False, faults=False):
                     raise RuntimeError("rehearsal validator hot keys must be bounded owner-only regular files")
     if config.get("pool_format") != "NPOOL003":
         raise RuntimeError("incompatible development pool format; preserve this network and initialize a fresh --root")
-    with socket.socket() as probe:
-        # Ignore completed TCP connections in TIME_WAIT, while rejecting a live listener.
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        probe.bind(("127.0.0.1", port(index)))
+    if not config.get("raw_rpc_host_isolation"):
+        with socket.socket() as probe:
+            # Ignore completed connections in TIME_WAIT, reject live listeners.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port(index)))
     path = ledger(root, index)
     if len(os.fsencode(path / "admin.rpc")) >= 104:
         raise RuntimeError("ledger path exceeds the portable local admin socket limit")
@@ -192,7 +191,8 @@ def start(root, index, archive=False, coordinated=False, faults=False):
         process = subprocess.Popen(args, cwd=PROJECT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
     (root / f"validator-{index}.pid").write_text(str(process.pid))
     (root / f"validator-{index}.command.json").write_text(json.dumps(args, indent=2))
-    print(f"Started local validator {index}; PID {process.pid}, RPC http://127.0.0.1:{port(index)}", flush=True)
+    transport=f"private Unix socket rpc-{port(index)}.sock" if config.get("raw_rpc_host_isolation") else f"http://127.0.0.1:{port(index)}"
+    print(f"Started local validator {index}; PID {process.pid}, RPC {transport}", flush=True)
     return process
 
 

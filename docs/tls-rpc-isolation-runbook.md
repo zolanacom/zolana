@@ -2,6 +2,8 @@
 
 Use a new private rehearsal following the [key setup runbook](testnet-key-sponsor-runbook.md). Preserve all existing fixtures, source seeds, budgets and pending journals. These commands create local files/listeners only, never public hosting, OS certificate trust or firewall rules.
 
+For fresh hardened rehearsals, use the [private host transport](host-isolation-runbook.md) with `--hardened-host` to close raw TCP port impersonation. The original capability-only mode below remains for compatibility with existing fixtures.
+
 Before starting either validator, install the durable raw-RPC policy:
 
 ```sh

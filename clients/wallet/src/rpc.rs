@@ -280,7 +280,7 @@ impl Chain {
             url,
             network,
             None,
-            Some(native_rpc_access::read_token(credential)?),
+            Some(native_rpc_access::read_credential(credential)?),
             None,
         )
     }
@@ -291,15 +291,15 @@ impl Chain {
         url: &str,
         network: Network,
         access: Option<String>,
-        operator: Option<String>,
+        operator: Option<native_rpc_access::Credential>,
         ca: Option<&str>,
     ) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(proof) = access {
             headers.insert("X-Testnet-Access", proof.parse()?);
         }
-        if let Some(token) = operator {
-            headers.insert(native_rpc_access::HEADER, token.parse()?);
+        if let Some(ref credential) = operator {
+            headers.insert(native_rpc_access::HEADER, credential.token.parse()?);
         }
         let mut http = reqwest::Client::builder()
             .default_headers(headers)
@@ -308,6 +308,15 @@ impl Chain {
             .timeout(Duration::from_secs(15));
         if let Some(pem) = ca {
             http = http.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
+        }
+        if let Some(ref credential) = operator {
+            let parsed = reqwest::Url::parse(url)?;
+            if let Some(path) =
+                credential.socket(parsed.port().ok_or("operator RPC port required")?)?
+            {
+                native_rpc_access::check_socket(path)?;
+                http = http.unix_socket(path);
+            }
         }
         let http = http.build()?;
         let rpc = RpcClient::new_sender(
