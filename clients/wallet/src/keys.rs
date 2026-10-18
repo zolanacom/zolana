@@ -105,6 +105,21 @@ impl WalletKey {
         self.viewing_key().address_at(0u32, Scope::Internal)
     }
 
+    /// Independent Ed25519 authority recoverable from the same encrypted seed.
+    /// Network/genesis separation prevents cross-chain public key reuse.
+    pub fn public_keypair(&self) -> solana_keypair::Keypair {
+        let mut hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"NPayPublicKeyV1!")
+            .key(&self.seed[..])
+            .to_state();
+        hash.update(&self.network.network);
+        hash.update(self.network.genesis_hash.as_bytes());
+        let secret =
+            Zeroizing::new(<[u8; 32]>::try_from(hash.finalize().as_bytes()).expect("32 bytes"));
+        solana_keypair::Keypair::new_from_array(*secret)
+    }
+
     pub(crate) fn scan_cache_key(&self) -> Zeroizing<[u8; 32]> {
         let mut hash = blake2b_simd::Params::new()
             .hash_length(32)
@@ -302,6 +317,30 @@ fn network_tag(network: &Network) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_signer::Signer;
+
+    #[test]
+    fn encrypted_seed_restores_independent_network_bound_public_signing_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = Network {
+            network: [5; 32],
+            genesis_hash: bs58::encode([7; 32]).into_string(),
+        };
+        let wallet = WalletKey::generate(network.clone()).unwrap();
+        let path = dir.path().join("backup");
+        wallet
+            .save(&path, b"public authority test password")
+            .unwrap();
+        let restored = WalletKey::open(&path, b"public authority test password", &network).unwrap();
+        let key = restored.public_keypair();
+        assert_eq!(key.pubkey(), wallet.public_keypair().pubkey());
+        assert!(key
+            .sign_message(b"user-controlled native account")
+            .verify(key.pubkey().as_ref(), b"user-controlled native account"));
+        let mut other = restored;
+        other.network.network[0] ^= 1;
+        assert_ne!(other.public_keypair().pubkey(), key.pubkey());
+    }
 
     #[test]
     fn piped_passwords_are_bounded_even_without_end_of_input() {

@@ -88,6 +88,8 @@ class SponsorExperiment(Experiment):
                      "--sponsor-password-file", str(self.hot_password)]
         self.command(init_args)
         config = load(root)
+        config["faucet_amount"] = 100  # Preserve this regression's original development amounts.
+        (root / "network.json").write_text(json.dumps(config))
         roles = config["roles"]
         if len(roles) != 14 or len(set(roles.values())) != 14 or config["fixture_keys_are_public"]:
             raise RuntimeError("rehearsal did not separate fourteen private roles")
@@ -129,8 +131,8 @@ class SponsorExperiment(Experiment):
         self.command(self.wallet_args("deposit", "bob", ["--sponsor", "forbidden", "--amount", "100"]), "plaintext sponsor override")
         self.command(self.wallet_args("deposit", "bob", ["--sponsor-password-file", str(cold_password),
                      "--sponsor-request-id", "wrong-password-request", "--amount", "100"]), "incorrect operator password")
-        self.command(self.wallet_args("deposit", "bob", self.sponsor("over-limit-request") + ["--amount", "101"]), "exceeds policy")
-        self.command(self.wallet_args("withdraw", "alice", self.sponsor("withdraw-request-denied") + ["--amount", "1"]), "withdrawals are not sponsored")
+        self.command(self.wallet_args("deposit", "bob", self.sponsor("over-limit-request") + ["--amount", str(self.journal()["policy"]["max_deposit"] + 1)]), "exceeds policy")
+        self.command(self.wallet_args("withdraw-legacy", "alice", self.sponsor("withdraw-request-denied") + ["--amount", "1"]), "disposable fixtures")
         self.command(self.wallet_args("deposit", "bob", self.sponsor("bad-address-request-0001") + ["--amount", "100", "--to", "npriv11111"]), "receiving address")
         self.command(self.wallet_args("send", "bob", self.sponsor("empty-wallet-request-0001") + ["--amount", "1", "--to", addresses["alice"]]), "insufficient value")
         if self.journal()["reserved"]:

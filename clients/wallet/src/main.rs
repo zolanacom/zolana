@@ -21,10 +21,11 @@ fn run() -> Result<()> {
         println!("init/restore: --backup <encrypted-seed-backup.json>");
         println!("balance/deposit/send/withdraw/resolve/reclaim: --rpc http://127.0.0.1:<port>");
         println!("deposit/send/withdraw: --sponsor <private-keypair.json> --amount <native-units>");
-        println!("rehearsal deposit/send: --sponsor-password-file <private-operator-file> --sponsor-request-id <unique-id> --amount <native-units>; fixed encrypted sponsor/policy beside network.json");
-        println!("rehearsal reclaim: --sponsor-password-file; reuses the saved original reservation for cleanup only. Sponsored withdrawals are disabled.");
+        println!("rehearsal deposit/send/withdraw: --sponsor-password-file <private-operator-file> --sponsor-request-id <unique-id> --amount <native-units>; fixed encrypted sponsor/policy beside network.json");
+        println!("rehearsal reclaim: --sponsor-password-file; reuses the saved original reservation for cleanup only.");
         println!("deposit/send: --to <npriv1-address> (deposit defaults to this wallet)");
-        println!("Withdrawal pays the signed public sponsor; --to is not supported.");
+        println!("withdraw: --to <public-address> (defaults to your seed-recoverable public account on this chain); fee sponsor receives no withdrawal value.");
+        println!("withdraw-legacy: disposable fixture compatibility only; credits the sponsor. Never enabled for guarded rehearsal keys.");
         println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
         println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
         println!("archive: --network --rpc --history <directory>; public collector needs no wallet/password/sponsor");
@@ -32,8 +33,17 @@ fn run() -> Result<()> {
         return Ok(());
     }
     if ![
-        "init", "restore", "address", "balance", "deposit", "send", "withdraw", "resolve",
-        "reclaim", "archive",
+        "init",
+        "restore",
+        "address",
+        "balance",
+        "deposit",
+        "send",
+        "withdraw",
+        "resolve",
+        "reclaim",
+        "archive",
+        "withdraw-legacy",
     ]
     .contains(&command.as_str())
     {
@@ -63,8 +73,8 @@ fn run() -> Result<()> {
             return Err("duplicate option".into());
         }
     }
-    if command == "withdraw" && args.contains_key("--to") {
-        return Err("withdrawal pays the signed sponsor; --to is not supported".into());
+    if command == "withdraw-legacy" && args.contains_key("--to") {
+        return Err("legacy fixture withdrawal pays the sponsor; no destination override".into());
     }
     let required = |name: &str| -> Result<&str> {
         args.get(name)
@@ -75,6 +85,9 @@ fn run() -> Result<()> {
     let configuration: serde_json::Value =
         serde_json::from_slice(&std::fs::read(required("--network")?)?)?;
     let private_setup = configuration["key_mode"] == "local-testnet-rehearsal-v1";
+    if command == "withdraw-legacy" && configuration["fixture_keys_are_public"] != true {
+        return Err("legacy sponsor withdrawals are restricted to disposable fixtures".into());
+    }
     if !private_setup && configuration["fixture_keys_are_public"] != true {
         return Err(
             "network must explicitly select disposable fixture or guarded rehearsal keys".into(),
@@ -92,7 +105,8 @@ fn run() -> Result<()> {
         return Ok(());
     }
     if args.contains_key("--history")
-        && !["balance", "deposit", "send", "withdraw"].contains(&command.as_str())
+        && !["balance", "deposit", "send", "withdraw", "withdraw-legacy"]
+            .contains(&command.as_str())
     {
         return Err("--history is only for balance/payment reconstruction; unknown-payment resolution requires canonical full RPC history".into());
     }
@@ -112,7 +126,7 @@ fn run() -> Result<()> {
         wallet.save(path, &password)?;
         println!(
             "{}",
-            json!({"address":wallet.address_text(),"encrypted_seed_backup_created":true})
+            json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"encrypted_seed_backup_created":true})
         );
         return Ok(());
     }
@@ -129,7 +143,7 @@ fn run() -> Result<()> {
     if command == "address" || command == "restore" {
         println!(
             "{}",
-            json!({"address":wallet.address_text(),"restored_seed_only":command=="restore"})
+            json!({"address":wallet.address_text(),"public_address":wallet.public_keypair().pubkey().to_string(),"restored_seed_only":command=="restore"})
         );
         return Ok(());
     }
@@ -173,9 +187,10 @@ fn run() -> Result<()> {
         chain.sync_cached(&wallet, &operation)?
     };
     if command == "balance" {
+        let public = wallet.public_keypair().pubkey();
         println!(
             "{}",
-            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan})
+            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan,"public_address":public.to_string(),"public_balance":chain.public_balance(public)?,"minimum_public_withdrawal":chain.minimum_withdrawal(public)?})
         );
         return Ok(());
     }
@@ -191,13 +206,34 @@ fn run() -> Result<()> {
             amount,
             recipient: required("--to")?,
         },
-        "withdraw" => Payment::Withdraw { amount },
+        "withdraw-legacy" => Payment::Withdraw { amount },
+        "withdraw" => {
+            let recipient = match args.get("--to") {
+                Some(value) => value
+                    .parse::<solana_pubkey::Pubkey>()
+                    .map_err(|_| "withdrawal needs a public address on this chain")?,
+                None => wallet.public_keypair().pubkey(),
+            };
+            if recipient == sponsor.pubkey()
+                || configuration["roles"].as_object().is_some_and(|roles| {
+                    roles
+                        .values()
+                        .any(|key| key == &serde_json::Value::String(recipient.to_string()))
+                })
+            {
+                return Err(
+                    "choose a user public address, not an operator authority or fee sponsor".into(),
+                );
+            }
+            chain.check_withdrawal(recipient, amount)?;
+            Payment::WithdrawTo {
+                amount,
+                recipient: recipient.to_bytes(),
+            }
+        }
         _ => return Err("unknown wallet command; use --help".into()),
     };
-    // Managed withdrawals are denied by policy even if the wallet has no funds.
-    if command != "withdraw" {
-        payments::validate(&wallet, &synced.state, &payment)?;
-    }
+    payments::validate(&wallet, &synced.state, &payment)?;
     if private_setup {
         chain = chain.with_sponsor_budget(reserve_sponsor(
             &args,

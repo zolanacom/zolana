@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+native-wallet = { path = "../../clients/wallet" }
 # Preserve the syscall API and semantics used by the imported engine.
 solana-bn254 = "=3.0.0"
 native-payment-program = { path = "../adapter" }

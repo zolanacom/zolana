@@ -84,6 +84,33 @@ class WalletUiTests(unittest.TestCase):
                     app.cli("address", "local-test-password")
             self.assertEqual(list(app.directory.glob(".unlock-*")), [])
 
+    def test_withdrawals_require_feature_backup_and_strict_user_destination(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            request = {"action": "withdraw", "password": "local-test-password", "amount": 1_000_000}
+            with patch.object(app, "cli", return_value={}) as cli:
+                with self.assertRaisesRegex(ValueError, "recovery file"):
+                    app.action(request)
+                app.ack.touch()
+                with self.assertRaisesRegex(ValueError, "preserved network"):
+                    app.action(request)
+                app.withdrawal_enabled = True
+                for value in [True, 0, -1, 1.5, "1000000", 10**20]:
+                    with self.assertRaises(ValueError):
+                        app.action({**request, "amount": value})
+                for value in ["npriv1test", "0" * 44, "1" * 45, [], 123]:
+                    with self.assertRaises(ValueError):
+                        app.action({**request, "recipient": value})
+                cli.assert_not_called()
+                app.action(request)
+                self.assertEqual(cli.call_args.args[0], "withdraw")
+                self.assertNotIn("--to", cli.call_args.args[2])
+                destination = "1" * 32
+                app.action({**request, "recipient": destination, "rpc": "https://untrusted.invalid"})
+                extra = cli.call_args.args[2]
+                self.assertEqual(extra[-2:], ["--to", destination])
+                self.assertNotIn("untrusted.invalid", str(extra))
+
     def test_failed_partial_creation_can_resume_from_its_encrypted_backup(self):
         with tempfile.TemporaryDirectory() as name:
             app = self.app(Path(name))

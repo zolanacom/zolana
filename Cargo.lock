@@ -4505,6 +4505,7 @@ version = "0.1.0"
 dependencies = [
  "native-payment-program",
  "native-payments",
+ "native-wallet",
  "payment-lab",
  "solana-account",
  "solana-bn254",
@@ -4546,6 +4547,7 @@ dependencies = [
  "solana-account-decoder-client-types",
  "solana-commitment-config",
  "solana-compute-budget-interface",
+ "solana-feature-gate-interface",
  "solana-instruction",
  "solana-keypair",
  "solana-pubkey",

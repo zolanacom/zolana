@@ -69,3 +69,16 @@ pub fn close(buffer: Pubkey, sponsor: Pubkey) -> Instruction {
         data: vec![4],
     }
 }
+
+pub fn finalize_to(
+    buffer: Pubkey,
+    sponsor: Pubkey,
+    nullifiers: [[u8; 32]; 2],
+    recipient: Pubkey,
+) -> Instruction {
+    let mut instruction = finalize(buffer, sponsor, nullifiers);
+    instruction
+        .accounts
+        .push(AccountMeta::new(recipient, false));
+    instruction
+}

@@ -1,5 +1,6 @@
 #[derive(Clone, Copy, Default)]
 pub struct SVMFeatureSet {
+    pub native_recipient_withdrawals: bool,
     pub move_precompile_verification_to_svm: bool,
     pub stricter_abi_and_runtime_constraints: bool,
     pub enable_bpf_loader_set_authority_checked_ix: bool,
@@ -41,6 +42,7 @@ pub struct SVMFeatureSet {
 impl SVMFeatureSet {
     pub fn all_enabled() -> Self {
         Self {
+            native_recipient_withdrawals: true,
             move_precompile_verification_to_svm: true,
             stricter_abi_and_runtime_constraints: true,
             enable_bpf_loader_set_authority_checked_ix: true,

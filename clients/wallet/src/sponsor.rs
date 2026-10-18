@@ -25,6 +25,8 @@ pub struct Policy {
     pub lifetime_allowance: u64,
     pub max_deposit: u64,
     pub max_send: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_withdraw: Option<u64>,
     pub max_requests_per_wallet: usize,
 }
 #[derive(Serialize, Deserialize)]
@@ -70,6 +72,7 @@ impl Policy {
             || self.lifetime_allowance < self.operation_allowance
             || self.max_deposit == 0
             || self.max_send == 0
+            || self.max_withdraw == Some(0)
             || !(1..=1000).contains(&self.max_requests_per_wallet)
         {
             return Err("invalid sponsor policy".into());
@@ -122,6 +125,8 @@ impl Budget {
         match kind {
             "deposit" if amount > 0 && amount <= policy.max_deposit => (),
             "send" if amount > 0 && amount <= policy.max_send => (),
+            "withdraw"
+                if amount > 0 && policy.max_withdraw.is_some_and(|limit| amount <= limit) => {}
             _ => {
                 return Err(
                     "sponsor action or amount exceeds policy; withdrawals are not sponsored".into(),
@@ -195,7 +200,11 @@ impl Budget {
             || ledger.requests.iter().any(|r| {
                 r.allowance != policy.operation_allowance
                     || r.charged > r.allowance
-                    || !["deposit", "send"].contains(&r.kind.as_str())
+                    || match r.kind.as_str() {
+                        "deposit" | "send" => false,
+                        "withdraw" => policy.max_withdraw.is_none(),
+                        _ => true,
+                    }
             })
         {
             return Err(
@@ -276,6 +285,64 @@ mod tests {
     use solana_keypair::Keypair;
     use solana_signer::Signer;
     #[test]
+    fn withdrawal_reservations_reopen_for_cleanup_without_resetting_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy");
+        let key = Keypair::new();
+        let network = Network {
+            network: [9; 32],
+            genesis_hash: bs58::encode([4; 32]).into_string(),
+        };
+        Policy {
+            format: "native-sponsor-policy-v1".into(),
+            network: network.clone(),
+            sponsor: key.pubkey().to_string(),
+            operation_allowance: 10,
+            lifetime_allowance: 20,
+            max_deposit: 100,
+            max_send: 1000,
+            max_withdraw: Some(1000),
+            max_requests_per_wallet: 2,
+        }
+        .create(&path)
+        .unwrap();
+        let reserve = |amount, request| {
+            Budget::reserve(
+                &path,
+                &network,
+                &key.pubkey(),
+                "owner",
+                "withdraw",
+                amount,
+                request,
+            )
+        };
+        assert!(reserve(0, "withdraw-request-0001").is_err());
+        assert!(reserve(1001, "withdraw-request-0001").is_err());
+        let first = reserve(1000, "withdraw-request-0001").unwrap();
+        first.charge(3).unwrap();
+        drop(first);
+        let recovered = Budget::recover(
+            &path,
+            &network,
+            &key.pubkey(),
+            "owner",
+            "withdraw-request-0001",
+        )
+        .unwrap();
+        recovered.charge(7).unwrap();
+        assert!(recovered.charge(1).is_err());
+        drop(recovered);
+        assert!(reserve(1, "withdraw-request-0001").is_err());
+        drop(reserve(1, "withdraw-request-0002").unwrap());
+        assert!(reserve(1, "withdraw-request-0003").is_err());
+        let ledger: Ledger =
+            serde_json::from_slice(&fs::read(ledger_path(&path)).unwrap()).unwrap();
+        assert_eq!(ledger.reserved, 20);
+        assert_eq!(ledger.requests[0].charged, 10);
+        assert_eq!(ledger.requests.len(), 2);
+    }
+    #[test]
     fn reservations_survive_drop_reject_duplicates_concurrency_tampering_and_exhaustion() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy");
@@ -292,8 +359,14 @@ mod tests {
             lifetime_allowance: 20,
             max_deposit: 100,
             max_send: 1000,
+            max_withdraw: None,
             max_requests_per_wallet: 1,
         };
+        // Existing policies omit this field and continue to deny withdrawals.
+        assert!(serde_json::to_value(&p)
+            .unwrap()
+            .get("max_withdraw")
+            .is_none());
         p.create(&path).unwrap();
         let reserve =
             |who, id| Budget::reserve(&path, &network, &key.pubkey(), who, "deposit", 100, id);

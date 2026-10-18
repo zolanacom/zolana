@@ -15,10 +15,30 @@ use orchard::{
     value::NoteValue,
 };
 
+#[derive(Clone, Copy)]
 pub enum Payment<'a> {
     Deposit { amount: u64, recipient: &'a str },
     Send { amount: u64, recipient: &'a str },
     Withdraw { amount: u64 },
+    WithdrawTo { amount: u64, recipient: [u8; 32] },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WithdrawalReceipt {
+    pub recipient: String,
+    pub amount: u64,
+    pub sponsor: String,
+}
+pub fn withdrawal_receipt(payment: &wire::DecodedPayment) -> Option<WithdrawalReceipt> {
+    payment
+        .context
+        .withdrawal_recipient
+        .map(|recipient| WithdrawalReceipt {
+            recipient: solana_pubkey::Pubkey::new_from_array(recipient).to_string(),
+            amount: payment.context.public_value_balance as u64,
+            sponsor: solana_pubkey::Pubkey::new_from_array(payment.context.sponsor).to_string(),
+        })
 }
 
 /// Reject address/amount/balance mistakes before reserving a sponsor attempt or
@@ -37,6 +57,12 @@ pub fn validate(wallet: &WalletKey, state: &WalletState, payment: &Payment<'_>) 
             (*amount, true)
         }
         Payment::Withdraw { amount } => (*amount, true),
+        Payment::WithdrawTo { amount, recipient } => {
+            if !solana_pubkey::Pubkey::new_from_array(*recipient).is_on_curve() {
+                return Err("withdrawal recipient must be a public signing address".into());
+            }
+            (*amount, true)
+        }
     };
     i64::try_from(amount)?;
     if amount == 0 {
@@ -100,6 +126,7 @@ impl PaymentProver {
                 true,
             ),
             Payment::Withdraw { amount } => (amount, i64::try_from(amount)?, None, true),
+            Payment::WithdrawTo { amount, .. } => (amount, i64::try_from(amount)?, None, true),
         };
         if amount == 0 {
             return Err("payment amount must be positive".into());
@@ -159,6 +186,11 @@ impl PaymentProver {
             expires_at,
             public_value_balance: public_balance,
             sponsor,
+
+            withdrawal_recipient: match payment {
+                Payment::WithdrawTo { recipient, .. } => Some(recipient),
+                _ => None,
+            },
         };
         let digest = authorization_digest(wallet.network.network, &bundle, &context)?;
         let signing = if spends {
@@ -177,6 +209,75 @@ impl PaymentProver {
 mod tests {
     use super::*;
     use crate::{history::WalletState, keys::Network};
+    use solana_signer::Signer;
+
+    #[test]
+    fn withdrawal_recipient_is_authorized_and_cannot_be_downgraded_to_sponsor() {
+        let wallet = WalletKey::generate(Network {
+            network: [9; 32],
+            genesis_hash: bs58::encode([8; 32]).into_string(),
+        })
+        .unwrap();
+        let sponsor = solana_keypair::Keypair::new().pubkey().to_bytes();
+        let mut state = WalletState::new(&wallet, 1000).unwrap();
+        let prover = PaymentProver::new();
+        let deposit = prover
+            .build(
+                &wallet,
+                &state,
+                sponsor,
+                100,
+                Payment::Deposit {
+                    amount: 5_000_000,
+                    recipient: &wallet.address_text(),
+                },
+            )
+            .unwrap();
+        assert_eq!(&deposit[..8], b"NPAY0001");
+        let decoded = wire::decode(wallet.network.network, &deposit).unwrap();
+        state.accept(&decoded.bundle, &decoded.context, 1).unwrap();
+        let recipient = wallet.public_keypair().pubkey().to_bytes();
+        let bytes = prover
+            .build(
+                &wallet,
+                &state,
+                sponsor,
+                100,
+                Payment::WithdrawTo {
+                    amount: 1_000_000,
+                    recipient,
+                },
+            )
+            .unwrap();
+        assert_eq!(&bytes[..8], b"NPAY0002");
+        assert_eq!(bytes.len(), deposit.len() + 32);
+        let original = wire::decode(wallet.network.network, &bytes).unwrap();
+        let changed = AuthorizationContext {
+            withdrawal_recipient: Some(solana_keypair::Keypair::new().pubkey().to_bytes()),
+            ..original.context
+        };
+        assert!(state.accept(&original.bundle, &changed, 1).is_err());
+        let stripped = AuthorizationContext {
+            withdrawal_recipient: None,
+            ..original.context
+        };
+        let downgraded = wire::encode(wallet.network.network, &stripped, &original.bundle).unwrap();
+        assert_eq!(&downgraded[..8], b"NPAY0001");
+        let decoded = wire::decode(wallet.network.network, &downgraded).unwrap();
+        assert!(state.accept(&decoded.bundle, &decoded.context, 1).is_err());
+        let zero = AuthorizationContext {
+            withdrawal_recipient: Some([0; 32]),
+            ..original.context
+        };
+        assert!(wire::encode(wallet.network.network, &zero, &original.bundle).is_err());
+        state
+            .accept(&original.bundle, &original.context, 1)
+            .unwrap();
+        assert_eq!(state.balance().unwrap(), 4_000_000);
+        assert!(state
+            .accept(&original.bundle, &original.context, 1)
+            .is_err());
+    }
 
     #[test]
     fn independent_wallets_discover_change_spends_and_recover_without_a_note_cache() {

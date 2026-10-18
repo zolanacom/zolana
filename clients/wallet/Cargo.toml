@@ -24,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
 solana-account = "=3.0.0"
+solana-feature-gate-interface = { version = "=3.0.0", features=["bincode"] }
 solana-account-decoder-client-types = { path = "../../node/agave/account-decoder-client-types" }
 solana-pubkey = "=3.0.0"
 solana-instruction = "=3.0.0"

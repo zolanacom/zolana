@@ -43,7 +43,7 @@ def main():
 
     def command(action, who, extra=(), index=0, restored=False, expect=None, password_path=password):
         file = directory / f"{who}{'-restored' if restored else ''}.wallet.json"
-        params = [str(WALLET), action, "--network", str(root / "network.json"),
+        params = [str(WALLET), "withdraw-legacy" if action == "withdraw" else action, "--network", str(root / "network.json"),
                   "--wallet", str(file), "--password-file", str(password_path),
                   "--rpc", f"http://127.0.0.1:{18899 + index * 1000}"]
         if action in ["init", "restore"]:

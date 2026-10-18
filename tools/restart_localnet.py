@@ -110,7 +110,7 @@ def main():
     checks, cycles, receipts = [], [], []
 
     def wallet(action, who, extra=()):
-        command = [str(PROJECT / "target/debug/native-wallet"), action,
+        command = [str(PROJECT / "target/debug/native-wallet"), "withdraw-legacy" if action == "withdraw" else action,
                    "--network", str(root / "network.json"),
                    "--wallet", str(root / "wallets" / f"{who}-restored.wallet.json"),
                    "--password-file", str(root / "wallets/unlock.password"),

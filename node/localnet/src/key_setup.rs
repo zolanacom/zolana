@@ -105,8 +105,9 @@ pub(super) fn save(
         sponsor: sponsor.pubkey().to_string(),
         operation_allowance: 150_000_000,
         lifetime_allowance: 900_000_000,
-        max_deposit: 100,
+        max_deposit: 5_000_000,
         max_send: 1_000_000_000,
+        max_withdraw: Some(10_000_000),
         max_requests_per_wallet: 3,
     }
     .create(&root.join("sponsor-policy.json"))?;

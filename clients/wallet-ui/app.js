@@ -1,6 +1,6 @@
 const screen = document.querySelector('#screen');
 const notice = document.querySelector('#notice');
-let session = {}, password = '', address = '', balance = null, receipt = null, busy = false, idle;
+let session = {}, password = '', address = '', balance = null, receipt = null, publicAddress = '', publicBalance = null, minimumPublicWithdrawal = null, busy = false, idle;
 
 function message(text = '', kind = '') {
   notice.textContent = text; notice.className = kind;
@@ -33,9 +33,9 @@ async function work(label, action) {
   busy = true; message(label);
   screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = true);
   try { await action(); } catch (error) { message(error.message || 'The local wallet is unavailable. Check that the local network is running.', 'error'); }
-  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); touch(); }
+  finally { busy = false; screen.querySelectorAll('button,input,textarea').forEach(el => el.disabled = false); if (session.pending || session.staging) ['send','fund','withdraw'].forEach(id => { const control = document.getElementById(id); if (control) control.disabled = true; }); touch(); }
 }
-function lock() { if (busy) return; password = ''; address = ''; balance = null; receipt = null; welcome(); }
+function lock() { if (busy) return; password = ''; address = ''; balance = null; receipt = null; publicAddress = ''; publicBalance = null; minimumPublicWithdrawal = null; welcome(); }
 function touch() { clearTimeout(idle); if (password) idle = setTimeout(lock, 15 * 60 * 1000); }
 document.addEventListener('pointerdown', touch); document.addEventListener('keydown', touch);
 
@@ -108,28 +108,30 @@ function recovery() {
   on('continue', 'click', () => { if (required && (!downloaded || !document.querySelector('#saved').checked)) return message('Save your recovery file or encrypted text and confirm that you have saved it.', 'error'); work('Opening your wallet…', async () => { if (required) await api('ack-backup'); await dashboard(); }); });
 }
 function renderDashboard() {
-  setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">Add 100 test units</button><p class="hint small">Fees are paid by the local test sponsor. Solana funding is coming later.</p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
+  setScreen(`<div class="row"><h2>Your private wallet</h2><button class="text-button small" id="lock">Lock</button></div><div class="balance" id="balance">${balance === null ? '—' : balance}<small> test units</small></div><p class="hint">Verified from finalized payment history.</p><div class="row"><button class="primary" id="send">Send</button><button class="secondary" id="receive">Receive</button></div><button class="secondary" id="fund">Add ${Number(session.faucet_amount || 100).toLocaleString()} test units</button>${session.recipient_withdrawals ? '<button class="secondary" id="withdraw">Withdraw publicly</button><p class="hint" id="public-balance"></p>' : ''}<p class="hint small">Fees are paid by the local test sponsor. Solana funding is coming later.</p><div id="receipt"></div><div class="split row"><button class="text-button small" id="refresh">Refresh balance</button><button class="text-button small" id="backup">Recovery file</button></div><div id="recovery-controls"></div>`);
   on('lock', 'click', lock); on('receive', 'click', receive); on('send', 'click', send);
+  if (session.recipient_withdrawals) { on('withdraw', 'click', () => withdraw()); document.querySelector('#public-balance').textContent = `Public account: ${publicBalance === null ? '—' : publicBalance} test units on this chain.`; }
   on('refresh', 'click', () => work('Verifying finalized payment history…', dashboard));
   on('backup', 'click', recovery);
   on('fund', 'click', () => payment('fund'));
   if (receipt) {
     const element = document.querySelector('#receipt'); element.className = 'receipt';
-    const heading = document.createElement('strong'); heading.textContent = 'Payment finalized'; element.append(heading, document.createElement('br'));
+    const heading = document.createElement('strong'); heading.textContent = receipt.withdrawal ? 'Withdrawal finalized' : 'Payment finalized'; element.append(heading, document.createElement('br'));
     element.append(document.createTextNode(receipt.signature));
+    if (receipt.withdrawal) { const destination = document.createElement('p'); destination.className = 'address'; destination.textContent = `${receipt.withdrawal.amount} public units to ${receipt.withdrawal.recipient}`; element.append(destination); }
     if (!receipt.staging_rent_reclaimed) element.append(document.createElement('br'), document.createTextNode('Payment succeeded. Upload rent still needs recovery.'));
   }
   if (session.pending || session.staging) {
-    document.querySelector('#fund').disabled = true; document.querySelector('#send').disabled = true;
+    ['fund','send','withdraw'].forEach(id => { const button = document.getElementById(id); if (button) button.disabled = true; });
     const controls = document.querySelector('#recovery-controls');
     const description = document.createElement('p'); description.className = 'hint'; description.textContent = session.pending ? 'A previous payment needs a status check before you send again.' : 'An interrupted upload needs cleanup before you send again.';
     const button = document.createElement('button'); button.className = 'secondary'; button.textContent = session.pending ? 'Check previous payment' : 'Recover upload rent';
-    button.addEventListener('click', () => work('Checking finalized recovery state…', async () => { const result = await api(session.pending ? 'resolve' : 'reclaim'); await dashboard(); message(result.accepted ? 'The previous payment finalized. Recover its upload rent if prompted.' : 'Recovery step completed.', 'success'); }));
+    button.addEventListener('click', () => work('Checking finalized recovery state…', async () => { const result = await api(session.pending ? 'resolve' : 'reclaim'); if (result.accepted) receipt = { ...result, staging_rent_reclaimed: !result.staging_recovery_required }; await dashboard(); message(result.accepted ? 'The previous payment finalized. Recover its upload rent if prompted.' : 'Recovery step completed.', 'success'); }));
     controls.append(description, button);
   }
 }
 async function dashboard() {
-  const result = await api('balance'); balance = result.balance; renderDashboard();
+  const result = await api('balance'); balance = result.balance; publicAddress = result.public_address || ''; publicBalance = result.public_balance ?? null; minimumPublicWithdrawal = result.minimum_public_withdrawal ?? null; renderDashboard();
 }
 function receive() {
   setScreen(`<h2>Receive privately</h2><p class="caption">Share this address with someone using this local network.</p><p class="address" id="address"></p><button class="primary" id="copy">Copy receiving address</button><button class="secondary" id="back">Back to wallet</button><p class="hint">This is a private address for this chain. It cannot receive SOL or USDC from Solana.</p>`);
@@ -145,11 +147,28 @@ function send(draft = {}) {
   on('back', 'click', renderDashboard);
   on('send-form', 'submit', event => { event.preventDefault(); const recipient = document.querySelector('#recipient').value.trim(), amount = Number(document.querySelector('#amount').value); if (!recipient.startsWith('npriv1') || !Number.isSafeInteger(amount) || amount < 1 || amount > balance) return message('Enter a private receiving address and an amount within your balance.', 'error'); review(recipient, amount); });
 }
-function review(recipient, amount) {
-  setScreen(`<h2>Review payment</h2><div class="balance" id="review-amount"></div><p class="hint">To</p><p class="address" id="review-address"></p><p class="hint">The local test sponsor pays the network fees.</p><button class="primary" id="confirm-send">Send payment</button><button class="secondary" id="back">Edit payment</button>`);
-  document.querySelector('#review-amount').textContent = `${amount} test units`; document.querySelector('#review-address').textContent = recipient;
-  on('back', 'click', () => send({ recipient, amount })); on('confirm-send', 'click', () => payment('send', { recipient, amount }));
+function withdraw(draft = {}) {
+  if (session.pending || session.staging) return renderDashboard();
+  setScreen(`<h2>Withdraw publicly</h2><p class="caption">Move private funds to a public account on this chain.</p><form id="withdraw-form"><label for="recipient">Public destination address</label><textarea id="recipient" required rows="2" maxlength="44" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea><p class="hint">The default account is controlled by your recovery seed. This sends this chain's native coin, not SOL on Solana.</p><label for="amount">Amount in test units</label><input id="amount" type="number" inputmode="numeric" min="1" step="1" required><p class="hint" id="withdraw-minimum"></p><button class="primary">Review withdrawal</button></form><button class="text-button back" id="back">Back to wallet</button>`);
+  document.querySelector('#recipient').value = draft.recipient || publicAddress;
+  document.querySelector('#amount').value = draft.amount || '';
+  document.querySelector('#withdraw-minimum').textContent = minimumPublicWithdrawal > 1 ? `Your public account needs at least ${minimumPublicWithdrawal} units for its first withdrawal. The sponsor pays fees and protocol rent.` : 'The sponsor pays fees and protocol rent; your destination receives the full withdrawal amount.';
+  on('back', 'click', renderDashboard);
+  on('withdraw-form', 'submit', event => {
+    event.preventDefault();
+    const recipient = document.querySelector('#recipient').value.trim(), amount = Number(document.querySelector('#amount').value);
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient) || !Number.isSafeInteger(amount) || amount < 1 || amount > balance) return message('Enter a public address and a whole amount within your private balance.', 'error');
+    if (recipient === publicAddress && amount < minimumPublicWithdrawal) return message(`Withdraw at least ${minimumPublicWithdrawal} units to create this public account.`, 'error');
+    review(recipient, amount, 'withdraw');
+  });
 }
+function review(recipient, amount, action = 'send') {
+  const withdrawing = action === 'withdraw';
+  setScreen(`<h2>${withdrawing ? 'Review public withdrawal' : 'Review payment'}</h2><div class="balance" id="review-amount"></div><p class="hint">To</p><p class="address" id="review-address"></p><p class="hint">${withdrawing ? 'The amount and destination become public on this chain. The sponsor pays fees and rent, and receives none of your withdrawal.' : 'The local test sponsor pays the network fees.'}</p><button class="primary" id="confirm-send">${withdrawing ? 'Withdraw publicly' : 'Send payment'}</button><button class="secondary" id="back">${withdrawing ? 'Edit withdrawal' : 'Edit payment'}</button>`);
+  document.querySelector('#review-amount').textContent = `${amount} test units`; document.querySelector('#review-address').textContent = recipient;
+  on('back', 'click', () => withdrawing ? withdraw({ recipient, amount }) : send({ recipient, amount })); on('confirm-send', 'click', () => payment(action, { recipient, amount }));
+}
+
 async function payment(action, extra = {}) {
   await work('Preparing your proof, uploading, and waiting for finalization. Keep this tab open…', async () => {
     try { receipt = await api(action, extra); }

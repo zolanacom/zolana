@@ -200,6 +200,9 @@ pub(crate) struct AcceptedHistoryPayment {
     effects: VerifiedPayment,
 }
 impl AcceptedHistoryPayment {
+    pub(crate) fn withdrawal(&self) -> Option<crate::payments::WithdrawalReceipt> {
+        crate::payments::withdrawal_receipt(&self.payment)
+    }
     pub(crate) fn apply(&self, state: &mut WalletState) -> Result<()> {
         if state.pool.encode() != self.before {
             return Err("shared history checkpoint mismatch".into());
@@ -244,7 +247,7 @@ impl Replay {
         let accounts = &ix.accounts;
         if opcode == 3 {
             if !rest.is_empty()
-                || accounts.len() != 6
+                || ![6, 7].contains(&accounts.len())
                 || accounts[0].0 != pool_address()
                 || accounts[3].0 != solana_sdk_ids::system_program::id()
                 || !accounts[2].1
@@ -261,6 +264,15 @@ impl Replay {
             let payment = wire::decode(self.state.pool.network, buffer.payload()?)?;
             if payment.context.sponsor != accounts[2].0.to_bytes() {
                 return Err("history authorization sponsor mismatch".into());
+            }
+            match payment.context.withdrawal_recipient {
+                None if accounts.len() == 6 => (),
+                Some(recipient)
+                    if accounts.len() == 7
+                        && accounts[6].0.to_bytes() == recipient
+                        && accounts[6].0.is_on_curve()
+                        && accounts[6].0 != accounts[2].0 => {}
+                _ => return Err("history withdrawal recipient/account shape mismatch".into()),
             }
             for (index, action) in payment.bundle.actions().iter().enumerate() {
                 if accounts[4 + index].0 != nullifiers::address(&action.nullifier().to_bytes()) {

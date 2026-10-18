@@ -47,7 +47,7 @@ It runs a no-voting validator to an upstream development inspection halt, execut
 
 ## Sponsor controls
 
-The managed sponsor funds development deposits and native private-send fees/rent. It has no treasury authority, accepts no arbitrary transaction-signing request, and uses the existing wallet's fixed instruction construction and native sponsor-bound proof authorization. The local UI selects the operator password file at startup; browser requests cannot replace it, the RPC, signer or policy.
+The managed sponsor funds development deposits and native private-send/withdrawal fees/rent. It has no treasury authority, accepts no arbitrary transaction-signing request, and uses the wallet's fixed instruction construction and native authorization. Recipient-bound withdrawals pay the user's chosen public account, independently of the sponsor. The local UI selects the operator password file at startup; browser requests cannot replace it, the RPC, signer or policy.
 
 The rehearsal defaults are deliberately finite development amounts:
 
@@ -57,8 +57,9 @@ The rehearsal defaults are deliberately finite development amounts:
 | Treasury genesis balance | 10,000,000,000 units, separate offline authority |
 | Gross allowance per payment attempt | 150,000,000 units |
 | Lifetime reserved allowance | 900,000,000 units, six attempts total |
-| Maximum sponsored deposit | 100 units |
+| Maximum sponsored deposit / local faucet amount | 5,000,000 units in new private rehearsals |
 | Maximum private send value | 1,000,000,000 units of the user's shielded balance |
+| Maximum recipient-bound withdrawal | 10,000,000 units of the user's shielded balance |
 | Attempts per receiving identity | Three, including failed/interrupted reservations |
 
 These are valueless rehearsal units, not selected issuance, denomination, market value or launch parameters. The 80/20 stake arrangement, overfunded development vote accounts, short epochs and validator balances are development settings, not an external validator distribution plan.
@@ -75,7 +76,7 @@ target/debug/native-wallet deposit --network .data/rehearsal/network.json \
   --sponsor-request-id <unique-16-to-128-character-request-id>
 ```
 
-`send` also requires `--to` and uses the same sponsor arguments. Plaintext sponsor overrides are rejected for this mode. Managed-sponsor withdrawals are disabled because the protocol pays a withdrawal to the signed sponsor; a user-controlled withdrawal/fee-payer flow is still required. Fixture withdrawal testing remains available in disposable mode.
+`send` also requires `--to` and uses the same sponsor arguments. Plaintext sponsor overrides are rejected for this mode. New private genesis and policies enable recipient-bound `withdraw`, defaulting to a public authority recoverable from the user's encrypted seed. See the [withdrawal runbook](withdrawal-runbook.md). Preserved old policies without `max_withdraw` continue to deny it; old genesis does not activate the new feature. Explicit `withdraw-legacy` remains restricted to disposable fixtures and is always denied by managed sponsorship. The earlier LOCAL-011 acceptance deliberately retains its original 100-unit test amounts.
 
 An interrupted upload records its original request ID in the existing staging journal. `resolve` still requires canonical history and never uses retained-history inclusion claims. Once any pending payment is resolved, `reclaim` uses only the original wallet reservation's durably remaining allowance; it cannot authorize a new payment or increase lifetime reservations. Cleanup therefore remains available after the per-wallet/global new-payment cap is reached, provided that original allowance can cover the close fee. The UI selects this association automatically. Preserve pending/staging journals.
 

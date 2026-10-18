@@ -387,3 +387,264 @@ fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
         independent.get_account(&pool_address())
     );
 }
+
+#[test]
+fn recipient_bound_withdrawal_rejects_redirects_and_preserves_legacy_gate() {
+    use native_wallet::{
+        history::WalletState,
+        keys::{Network, WalletKey},
+        payments::{Payment, PaymentProver},
+    };
+    let sponsor = Keypair::new();
+    let mut config = genesis(&sponsor, true);
+    config.accounts.insert(
+        native_payment_program::WITHDRAWAL_ACTIVATION_ID,
+        create_account(
+            &Feature {
+                activated_at: Some(0),
+            },
+            1_000_000,
+        )
+        .into(),
+    );
+    let recipient_wallet = WalletKey::generate(Network {
+        network: FIXTURE_GENESIS,
+        genesis_hash: config.hash().to_string(),
+    })
+    .unwrap();
+    let recipient = recipient_wallet.public_keypair().pubkey();
+    let mut inactive_config = config.clone();
+    inactive_config
+        .accounts
+        .remove(&native_payment_program::WITHDRAWAL_ACTIVATION_ID);
+    let inactive_forks = BankForks::new_rw_arc(Bank::new_for_tests(&inactive_config));
+    let inactive = inactive_forks.read().unwrap().root_bank();
+    let forks = BankForks::new_rw_arc(Bank::new_for_tests(&config));
+    let bank = forks.read().unwrap().root_bank();
+    let floor = config.rent.minimum_balance(STATE_BYTES);
+    let mut state = WalletState::new(&recipient_wallet, floor).unwrap();
+    let prover = PaymentProver::new();
+    let bytes = prover
+        .build(
+            &recipient_wallet,
+            &state,
+            sponsor.pubkey().to_bytes(),
+            100,
+            Payment::Deposit {
+                amount: 5_000_000,
+                recipient: &recipient_wallet.address_text(),
+            },
+        )
+        .unwrap();
+    for target in [&bank, &inactive] {
+        let (buffer, txs) = stage_transactions(target, &sponsor, &bytes);
+        for tx in txs {
+            target.process_transaction(&tx).unwrap();
+        }
+        target
+            .process_transaction(&finalize(target, &sponsor, buffer))
+            .unwrap();
+    }
+    let payment = wire::decode(FIXTURE_GENESIS, &bytes).unwrap();
+    state.accept(&payment.bundle, &payment.context, 0).unwrap();
+    let bytes = prover
+        .build(
+            &recipient_wallet,
+            &state,
+            sponsor.pubkey().to_bytes(),
+            100,
+            Payment::WithdrawTo {
+                amount: 1_000_000,
+                recipient: recipient.to_bytes(),
+            },
+        )
+        .unwrap();
+    let (buffer, txs) = stage_transactions(&bank, &sponsor, &bytes);
+    for tx in txs {
+        bank.process_transaction(&tx).unwrap();
+    }
+    let payment = wire::decode(FIXTURE_GENESIS, &bytes).unwrap();
+    let nfs = std::array::from_fn(|i| {
+        payment
+            .bundle
+            .actions()
+            .get(i)
+            .unwrap()
+            .nullifier()
+            .to_bytes()
+    });
+    let good = instructions::finalize_to(buffer, sponsor.pubkey(), nfs, recipient);
+    let saved_pool = bank.get_account(&pool_address());
+    let saved_buffer = bank.get_account(&buffer);
+    let mut changed = good.clone();
+    changed.accounts[6].pubkey = Keypair::new().pubkey();
+    let mut readonly = good.clone();
+    readonly.accounts[6].is_writable = false;
+    let omitted = instructions::finalize(buffer, sponsor.pubkey(), nfs);
+    for ix in [changed, readonly, omitted] {
+        let tx = transaction(
+            &bank,
+            &sponsor,
+            &[
+                ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+                ix,
+            ],
+            &[],
+        );
+        assert!(bank.process_transaction(&tx).is_err());
+        assert_eq!(bank.get_account(&pool_address()), saved_pool);
+        assert_eq!(bank.get_account(&buffer), saved_buffer);
+        assert_eq!(bank.get_balance(&recipient), 0);
+        for nf in nfs {
+            assert!(bank.get_account(&nullifiers::address(&nf)).is_none());
+        }
+    }
+    // A correctly bound address must still be an ordinary receiving account.
+    bank.store_account(&recipient, &AccountSharedData::new(1_000_000, 1, &id()));
+    let tx = transaction(
+        &bank,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_399_999),
+            good.clone(),
+        ],
+        &[],
+    );
+    assert!(bank.process_transaction(&tx).is_err());
+    assert_eq!(bank.get_account(&pool_address()), saved_pool);
+    bank.store_account(&recipient, &AccountSharedData::default());
+
+    let dust = prover
+        .build(
+            &recipient_wallet,
+            &state,
+            sponsor.pubkey().to_bytes(),
+            100,
+            Payment::WithdrawTo {
+                amount: 1,
+                recipient: recipient.to_bytes(),
+            },
+        )
+        .unwrap();
+    let (dust_buffer, txs) = stage_transactions(&bank, &sponsor, &dust);
+    for tx in txs {
+        bank.process_transaction(&tx).unwrap();
+    }
+    let dust_payment = wire::decode(FIXTURE_GENESIS, &dust).unwrap();
+    let dust_nfs = std::array::from_fn(|i| {
+        dust_payment
+            .bundle
+            .actions()
+            .get(i)
+            .unwrap()
+            .nullifier()
+            .to_bytes()
+    });
+    let tx = transaction(
+        &bank,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            instructions::finalize_to(dust_buffer, sponsor.pubkey(), dust_nfs, recipient),
+        ],
+        &[],
+    );
+    assert!(bank.process_transaction(&tx).is_err());
+    assert_eq!(bank.get_balance(&recipient), 0);
+    assert_eq!(bank.get_account(&pool_address()), saved_pool);
+    for nf in dust_nfs {
+        assert!(bank.get_account(&nullifiers::address(&nf)).is_none());
+    }
+    let mut tampered = bytes.clone();
+    tampered[88..120].copy_from_slice(Keypair::new().pubkey().as_ref());
+    let (fake, txs) = stage_transactions(&bank, &sponsor, &tampered);
+    for tx in txs {
+        bank.process_transaction(&tx).unwrap();
+    }
+    let fake_recipient = Pubkey::new_from_array(tampered[88..120].try_into().unwrap());
+    let tx = transaction(
+        &bank,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            instructions::finalize_to(fake, sponsor.pubkey(), nfs, fake_recipient),
+        ],
+        &[],
+    );
+    assert!(bank.process_transaction(&tx).is_err());
+    assert_eq!(bank.get_account(&pool_address()), saved_pool);
+    let (disabled, txs) = stage_transactions(&inactive, &sponsor, &bytes);
+    for tx in txs {
+        inactive.process_transaction(&tx).unwrap();
+    }
+    let tx = transaction(
+        &inactive,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            instructions::finalize_to(disabled, sponsor.pubkey(), nfs, recipient),
+        ],
+        &[],
+    );
+    assert!(inactive.process_transaction(&tx).is_err());
+    assert_eq!(inactive.get_balance(&recipient), 0);
+    let sponsor_before = bank.get_balance(&sponsor.pubkey());
+    let tx = transaction(
+        &bank,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            good,
+        ],
+        &[],
+    );
+    bank.process_transaction(&tx).unwrap();
+    assert_eq!(bank.get_balance(&recipient), 1_000_000);
+    assert_eq!(
+        bank.get_balance(&sponsor.pubkey()),
+        sponsor_before - 2 * config.rent.minimum_balance(nullifiers::MARKER_BYTES)
+    );
+    assert_eq!(
+        PoolState::decode(bank.get_account(&pool_address()).unwrap().data())
+            .unwrap()
+            .backing,
+        4_000_000
+    );
+    // Do not decode a consumed staging payload in the test helper: submit a
+    // fresh signed attempt against the already-consumed account itself.
+    let consumed = transaction(
+        &bank,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_399_998),
+            instructions::finalize_to(buffer, sponsor.pubkey(), nfs, recipient),
+        ],
+        &[],
+    );
+    assert!(bank.process_transaction(&consumed).is_err());
+    let (repeat, txs) = stage_transactions(&bank, &sponsor, &bytes);
+    for tx in txs {
+        bank.process_transaction(&tx).unwrap();
+    }
+    let tx = transaction(
+        &bank,
+        &sponsor,
+        &[
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            instructions::finalize_to(repeat, sponsor.pubkey(), nfs, recipient),
+        ],
+        &[],
+    );
+    assert!(bank.process_transaction(&tx).is_err());
+    assert_eq!(bank.get_balance(&recipient), 1_000_000);
+    // The seed owner, without the operator signer, can spend the withdrawn coin.
+    let owner = recipient_wallet.public_keypair();
+    let spend = transaction(
+        &bank,
+        &owner,
+        &[system::transfer(&recipient, &sponsor.pubkey(), 10_000)],
+        &[],
+    );
+    bank.process_transaction(&spend).unwrap();
+    assert_eq!(bank.get_balance(&recipient), 990_000);
+}

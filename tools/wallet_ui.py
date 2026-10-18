@@ -23,6 +23,10 @@ class WalletApp:
         if not self.root.is_relative_to(PROJECT / ".data"):
             raise ValueError("wallet UI requires a local .data fixture")
         config = load(self.root)
+        self.withdrawal_enabled = config.get("recipient_withdrawals") is True
+        self.faucet_amount = config.get("faucet_amount", 100)
+        if type(self.faucet_amount) is not int or not 1 <= self.faucet_amount <= 1_000_000_000:
+            raise ValueError("invalid local faucet amount")
         self.private_setup = config.get("key_mode") == "local-testnet-rehearsal-v1" and config.get("fixture_keys_are_public") is False
         if config.get("pool_format") != "NPOOL003" or (config.get("fixture_keys_are_public") is not True and not self.private_setup):
             raise ValueError("wallet UI requires a local NPOOL003 fixture or rehearsal")
@@ -55,7 +59,8 @@ class WalletApp:
         return {"exists": self.wallet.exists() or self.backup.exists(), "needs_backup": not self.ack.exists(),
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
-                "network": "Local testnet rehearsal" if self.private_setup else "Local test network", "solana_funding_available": False}
+                "network": "Local testnet rehearsal" if self.private_setup else "Local test network", "solana_funding_available": False,
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -76,7 +81,7 @@ class WalletApp:
     def action(self, request):
         action = request.get("action")
         password = request.get("password")
-        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fund", "send", "resolve", "reclaim"}:
+        if action not in {"create", "restore", "unlock", "backup", "ack-backup", "balance", "fund", "send", "withdraw", "resolve", "reclaim"}:
             raise ValueError("Unknown wallet action.")
         if action == "create":
             return self.cli("init", password, ["--backup", str(self.backup)])
@@ -98,16 +103,28 @@ class WalletApp:
             return result
         if action == "balance":
             return self.cli("balance", password)
-        if action in {"fund", "send", "resolve", "reclaim"}:
+        if action in {"fund", "send", "withdraw", "resolve", "reclaim"}:
             if not self.ack.exists():
                 raise ValueError("Save and confirm your encrypted recovery file before making payments.")
             sponsor = ["--sponsor", str(self.root / "sponsor.keypair.json")]
             if self.private_setup:
                 sponsor = ["--sponsor-password-file", str(self.sponsor_password_file)]
-                if action in {"fund", "send"}:
+                if action in {"fund", "send", "withdraw"}:
                     sponsor += ["--sponsor-request-id", secrets.token_hex(16)]
             if action == "fund":
-                return self.cli("deposit", password, sponsor + ["--amount", "100"])
+                return self.cli("deposit", password, sponsor + ["--amount", str(self.faucet_amount)])
+            if action == "withdraw":
+                if not self.withdrawal_enabled:
+                    raise ValueError("This preserved network does not enable recipient-bound withdrawals. Use a fresh rehearsal network.")
+                amount, recipient = request.get("amount"), request.get("recipient")
+                if type(amount) is not int or not 1 <= amount <= 1_000_000_000:
+                    raise ValueError("Enter a positive whole withdrawal amount.")
+                extra = ["--amount", str(amount)]
+                if recipient is not None:
+                    if not isinstance(recipient, str) or not 32 <= len(recipient) <= 44 or any(c not in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for c in recipient):
+                        raise ValueError("Enter a public address on this chain.")
+                    extra += ["--to", recipient]
+                return self.cli("withdraw", password, sponsor + extra)
             if action == "send":
                 amount = request.get("amount")
                 recipient = request.get("recipient")

@@ -24,6 +24,8 @@ pub struct AuthorizationContext {
     pub expires_at: u64,
     pub public_value_balance: i64,
     pub sponsor: [u8; 32],
+    /// Present only for recipient-bound withdrawals; never the fee payer role.
+    pub withdrawal_recipient: Option<[u8; 32]>,
 }
 
 /// Authenticated node state, never values asserted by an untrusted RPC caller.
@@ -50,7 +52,12 @@ pub fn authorization_digest<A: Authorization>(
     bundle: &Bundle<A, i64>,
     context: &AuthorizationContext,
 ) -> Result<[u8; 32], Error> {
-    if genesis == [0; 32] || context.sponsor == [0; 32] {
+    if genesis == [0; 32]
+        || context.sponsor == [0; 32]
+        || context
+            .withdrawal_recipient
+            .is_some_and(|key| key == [0; 32] || context.public_value_balance <= 0)
+    {
         return Err(Error::InvalidContext);
     }
     if bundle.bundle_version() != bundle_version() {
@@ -62,7 +69,11 @@ pub fn authorization_digest<A: Authorization>(
         .into();
     let mut state = blake2b_simd::Params::new()
         .hash_length(32)
-        .personal(b"NativePayAuthV1!")
+        .personal(if context.withdrawal_recipient.is_some() {
+            b"NativePayAuthV2!"
+        } else {
+            b"NativePayAuthV1!"
+        })
         .to_state();
     state.update(&genesis);
     state.update(&PROTOCOL_VERSION.to_le_bytes());
@@ -70,6 +81,9 @@ pub fn authorization_digest<A: Authorization>(
     state.update(&context.expires_at.to_le_bytes());
     state.update(&context.public_value_balance.to_le_bytes());
     state.update(&context.sponsor);
+    if let Some(recipient) = context.withdrawal_recipient {
+        state.update(&recipient);
+    }
     Ok(state
         .finalize()
         .as_bytes()

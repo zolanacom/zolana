@@ -62,6 +62,8 @@ impl DepositProver {
             expires_at,
             public_value_balance: -i64::try_from(amount)?,
             sponsor,
+
+            withdrawal_recipient: None,
         };
         let digest = authorization_digest(network, &bundle, &context)?;
         Ok((
@@ -165,6 +167,8 @@ pub fn build_fixture_for_network(
         expires_at,
         public_value_balance: -100,
         sponsor,
+
+        withdrawal_recipient: None,
     };
     let digest = authorization_digest(network, &funding, &funding_context)?;
     let funding = funding

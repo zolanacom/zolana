@@ -35,7 +35,7 @@ use solana_transaction_status_client_types::{
     option_serializer::OptionSerializer, TransactionDetails, UiTransactionEncoding,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     str::FromStr,
@@ -54,6 +54,7 @@ pub struct Synced {
     pub slot: u64,
     pub block_height: u64,
     accepted_finalizations: BTreeSet<String>,
+    withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
     pub scan: ScanStats,
 }
 
@@ -75,6 +76,7 @@ struct ScanResult {
     block_hash: Option<String>,
     block_height: u64,
     accepted: BTreeSet<String>,
+    withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
     scan: ScanStats,
 }
 
@@ -150,6 +152,10 @@ impl ScanResult {
                     data: ix.data.clone(),
                 };
                 if let Some(accepted) = self.replay.apply_verified(&instruction, block.slot)? {
+                    if let Some(withdrawal) = accepted.withdrawal() {
+                        self.withdrawals
+                            .insert(tx.signatures[0].to_string(), withdrawal);
+                    }
                     self.scan.payments_verified += 1;
                     for state in &mut self.secondary {
                         accepted.apply(state)?;
@@ -178,6 +184,7 @@ impl ScanResult {
                 slot: self.slot,
                 block_height: self.block_height,
                 accepted_finalizations: self.accepted.clone(),
+                withdrawals: self.withdrawals.clone(),
                 scan: self.scan.clone(),
             })
             .collect()
@@ -191,6 +198,8 @@ struct Pending {
     signature: String,
     staging_account: String,
     last_valid_block_height: u64,
+    #[serde(default)]
+    withdrawal: Option<crate::payments::WithdrawalReceipt>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -216,6 +225,7 @@ pub struct Submitted {
     pub upload_transactions: usize,
     pub upload_ms: u128,
     pub finalization_ms: u128,
+    pub withdrawal: Option<crate::payments::WithdrawalReceipt>,
 }
 
 impl Chain {
@@ -249,6 +259,50 @@ impl Chain {
     pub fn with_sponsor_budget(mut self, budget: crate::sponsor::Budget) -> Self {
         self.sponsor_budget = Some(budget);
         self
+    }
+
+    pub fn public_balance(&self, recipient: Pubkey) -> Result<u64> {
+        Ok(self.rpc.get_balance(&recipient)?)
+    }
+    pub fn minimum_withdrawal(&self, recipient: Pubkey) -> Result<u64> {
+        if !recipient.is_on_curve() {
+            return Err("withdrawal recipient must be a public signing address".into());
+        }
+        let account = self
+            .rpc
+            .get_account_with_commitment(&recipient, CommitmentConfig::confirmed())?
+            .value;
+        let balance = if let Some(account) = account {
+            if account.owner != solana_sdk_ids::system_program::id()
+                || !account.data.is_empty()
+                || account.executable
+            {
+                return Err("withdrawal recipient must be an ordinary public account".into());
+            }
+            account.lamports
+        } else {
+            0
+        };
+        Ok(self
+            .rpc
+            .get_minimum_balance_for_rent_exemption(0)?
+            .saturating_sub(balance)
+            .max(1))
+    }
+    pub fn check_withdrawal(&self, recipient: Pubkey, amount: u64) -> Result<()> {
+        let feature = self
+            .rpc
+            .get_account(&native_payment_program::WITHDRAWAL_ACTIVATION_ID)?;
+        let active =
+            solana_feature_gate_interface::from_account(&feature).and_then(|f| f.activated_at);
+        if !active.is_some_and(|slot| self.rpc.get_slot().is_ok_and(|current| slot <= current)) {
+            return Err("recipient-bound withdrawals are not active on this network".into());
+        }
+        let minimum = self.minimum_withdrawal(recipient)?;
+        if amount < minimum {
+            return Err(format!("withdrawal needs at least {minimum} native units to meet the public account minimum balance").into());
+        }
+        Ok(())
     }
 
     fn charge_sponsor(&self, tx: &Transaction, native_debit: u64) -> Result<()> {
@@ -475,6 +529,7 @@ impl Chain {
             block_hash: previous_hash,
             block_height,
             accepted: accepted_finalizations,
+            withdrawals: BTreeMap::new(),
             scan: stats,
         };
         if let Some(history) = history {
@@ -536,6 +591,7 @@ impl Chain {
         // never evidence that a particular outer transaction was canonical.
         if history.is_some() {
             result.accepted.clear();
+            result.withdrawals.clear();
         }
         Ok(result)
     }
@@ -615,6 +671,15 @@ impl Chain {
         let signature = Signature::from_str(&pending.signature)?;
         let synced = self.sync(wallet)?;
         let accepted = synced.accepted_finalizations.contains(&pending.signature);
+        let withdrawal = synced.withdrawals.get(&pending.signature).cloned();
+        if accepted
+            && pending
+                .withdrawal
+                .as_ref()
+                .is_some_and(|intent| Some(intent) != withdrawal.as_ref())
+        {
+            return Err("canonical withdrawal differs from the saved recipient/amount/sponsor intent; pending record retained".into());
+        }
         let statuses = self.rpc.get_signature_statuses_with_history(&[signature])?;
         let failed = statuses
             .value
@@ -637,7 +702,7 @@ impl Chain {
             serde_json::json!({"signature":pending.signature,"accepted":accepted,"failed":failed,
             "expired_without_execution":expired_without_execution,"staging_account":pending.staging_account,
             "balance":synced.state.balance()?,"pending_cleared":true,
-            "staging_recovery_required":operation.staging.exists()}),
+            "staging_recovery_required":operation.staging.exists(),"withdrawal":withdrawal}),
         )
     }
 
@@ -671,6 +736,23 @@ impl Chain {
         let payment = wire::decode(self.network.network, bytes)?;
         if payment.context.sponsor != sponsor.pubkey().to_bytes() {
             return Err("payment sponsor does not match the local signer".into());
+        }
+        if self.sponsor_budget.is_some()
+            && payment.context.public_value_balance > 0
+            && payment.context.withdrawal_recipient.is_none()
+        {
+            return Err(
+                "managed withdrawals require a separately authorized public recipient".into(),
+            );
+        }
+        if let Some(recipient) = payment.context.withdrawal_recipient {
+            if recipient == sponsor.pubkey().to_bytes() {
+                return Err("withdrawal recipient must differ from fee sponsor".into());
+            }
+            self.check_withdrawal(
+                Pubkey::new_from_array(recipient),
+                payment.context.public_value_balance as u64,
+            )?;
         }
         let checkpoint = self
             .rpc
@@ -759,7 +841,15 @@ impl Chain {
         });
         let finalization = [
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-            instructions::finalize(buffer.pubkey(), sponsor.pubkey(), nullifiers),
+            match payment.context.withdrawal_recipient {
+                Some(recipient) => instructions::finalize_to(
+                    buffer.pubkey(),
+                    sponsor.pubkey(),
+                    nullifiers,
+                    Pubkey::new_from_array(recipient),
+                ),
+                None => instructions::finalize(buffer.pubkey(), sponsor.pubkey(), nullifiers),
+            },
         ];
         let (blockhash, last_valid_block_height) = self
             .rpc
@@ -798,6 +888,7 @@ impl Chain {
                 signature: signature.to_string(),
                 staging_account: buffer.pubkey().to_string(),
                 last_valid_block_height,
+                withdrawal: crate::payments::withdrawal_receipt(&payment),
             })?,
         )?;
         self.rpc.send_transaction_with_config(&tx, RpcSendTransactionConfig {
@@ -832,6 +923,7 @@ impl Chain {
             upload_transactions,
             upload_ms,
             finalization_ms,
+            withdrawal: crate::payments::withdrawal_receipt(&payment),
         })
     }
 
@@ -984,6 +1076,7 @@ mod recovery_tests {
             lifetime_allowance: 10,
             max_deposit: 100,
             max_send: 100,
+            max_withdraw: None,
             max_requests_per_wallet: 1,
         }
         .create(&path)

@@ -295,6 +295,10 @@ fn initialize(root: &Path, passwords: Option<(&[u8], &[u8])>) -> Result<()> {
         }
     }
     activate_feature(&mut genesis, ACTIVATION_ID);
+    activate_feature(
+        &mut genesis,
+        native_payment_program::WITHDRAWAL_ACTIVATION_ID,
+    );
     genesis.poh_config.hashes_per_tick = None;
     genesis.epoch_schedule = EpochSchedule::custom(128, 128, false);
     let mut identities = Vec::new();
@@ -355,6 +359,8 @@ fn initialize(root: &Path, passwords: Option<(&[u8], &[u8])>) -> Result<()> {
             "network": network, "genesis_hash": genesis.hash().to_string(), "identities": identities,
             "pool": pool_address().to_string(), "program": id().to_string(),
             "pool_format": "NPOOL003",
+            "recipient_withdrawals": true,
+            "faucet_amount": if private {5_000_000} else {100},
             "fixture_keys_are_public": !private,
             "key_mode": if private {"local-testnet-rehearsal-v1"} else {"disposable-fixture"},
             "roles": roles,
@@ -815,6 +821,49 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if command == "owner-transfer-check" {
+        // Acceptance utility only: one bounded public transfer signed directly
+        // by a restored user's seed. No operator keys or retryable wallet flow.
+        let wallet_path = PathBuf::from(args.next().ok_or("expected encrypted user wallet")?);
+        let password_path = PathBuf::from(args.next().ok_or("expected private password file")?);
+        let recipient: Pubkey = args.next().ok_or("expected funded recipient")?.parse()?;
+        let amount: u64 = args.next().ok_or("expected amount")?.parse()?;
+        let url = args.next().ok_or("expected local RPC")?;
+        if args.next().is_some() || amount != 10_000 {
+            return Err("owner-control acceptance transfers exactly 10000 test units once".into());
+        }
+        let network = native_wallet::keys::Network::load(&root.join("network.json"))?;
+        let config: Value = serde_json::from_slice(&fs::read(root.join("network.json"))?)?;
+        if config["key_mode"] != "local-testnet-rehearsal-v1" {
+            return Err("owner-control check requires local rehearsal keys".into());
+        }
+        let rpc = client(&url, &config)?;
+        let password = native_wallet::keys::read_password(&password_path)?;
+        let wallet = native_wallet::keys::WalletKey::open(&wallet_path, &password, &network)?;
+        let owner = wallet.public_keypair();
+        if !recipient.is_on_curve() || rpc.get_balance(&recipient)? == 0 {
+            return Err("acceptance recipient must already be a funded user account".into());
+        }
+        let tx = Transaction::new_signed_with_payer(
+            &[system::transfer(&owner.pubkey(), &recipient, amount)],
+            Some(&owner.pubkey()),
+            &[&owner],
+            rpc.get_latest_blockhash()?,
+        );
+        let signature = rpc.send_transaction_with_config(
+            &tx,
+            RpcSendTransactionConfig {
+                max_retries: Some(0),
+                preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+                ..Default::default()
+            },
+        )?;
+        println!(
+            "{}",
+            json!({"signature":signature.to_string(),"owner":owner.pubkey().to_string(),"recipient":recipient.to_string(),"amount":amount,"operator_signed":false})
+        );
+        return Ok(());
+    }
     if command == "load" {
         return load_lab::run(&root, &args.collect::<Vec<_>>());
     }

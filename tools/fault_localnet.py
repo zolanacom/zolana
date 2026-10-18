@@ -72,7 +72,7 @@ class Experiment:
         print(kind, flush=True)
 
     def wallet_args(self, action, who, extra=(), index=0, restored=False):
-        return [str(WALLET), action, "--network", str(self.root / "network.json"),
+        return [str(WALLET), "withdraw-legacy" if action == "withdraw" and not getattr(self, "recipient_withdrawals", False) else action, "--network", str(self.root / "network.json"),
                 "--wallet", str(self.root / "wallets" / f"{who}{'-restored' if restored else ''}.wallet.json"),
                 "--password-file", str(self.root / "wallets/unlock.password"),
                 "--rpc", f"http://127.0.0.1:{port(index)}"] + list(extra)

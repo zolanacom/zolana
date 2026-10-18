@@ -123,7 +123,7 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
         let instruction = context
             .transaction_context
             .get_current_instruction_context()?;
-        if instruction.get_number_of_instruction_accounts() != 6
+        if ![6, 7].contains(&instruction.get_number_of_instruction_accounts())
             || !instruction.is_instruction_account_signer(2)?
         {
             return Err(Error::MissingRequiredSignature);
@@ -168,6 +168,52 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
     if payment.context.sponsor != sponsor.to_bytes() {
         return Err(Error::MissingRequiredSignature);
     }
+    let recipient_index = {
+        let instruction = context
+            .transaction_context
+            .get_current_instruction_context()?;
+        match payment.context.withdrawal_recipient {
+            None => {
+                if instruction.get_number_of_instruction_accounts() != 6 {
+                    return Err(Error::InvalidArgument);
+                }
+                2
+            }
+            Some(key) => {
+                if !context.get_feature_set().native_recipient_withdrawals
+                    || instruction.get_number_of_instruction_accounts() != 7
+                {
+                    return Err(Error::InvalidInstructionData);
+                }
+                if instruction.get_key_of_instruction_account(6)?.to_bytes() != key
+                    || !instruction.is_instruction_account_writable(6)?
+                {
+                    return Err(Error::InvalidArgument);
+                }
+                let recipient = instruction.try_borrow_instruction_account(6)?;
+                // Keep the explicit ordinary-account constraint even on this
+                // Agave release, which deprecates the executable accessor.
+                #[allow(deprecated)]
+                let executable = recipient.is_executable();
+                if recipient.get_owner() != &system_program::id()
+                    || !recipient.get_data().is_empty()
+                    || executable
+                    || !solana_pubkey::Pubkey::new_from_array(key).is_on_curve()
+                    || key == sponsor.to_bytes()
+                {
+                    return Err(Error::InvalidAccountOwner);
+                }
+                let final_balance = recipient
+                    .get_lamports()
+                    .checked_add(payment.context.public_value_balance as u64)
+                    .ok_or(Error::ArithmeticOverflow)?;
+                if final_balance < context.get_sysvar_cache().get_rent()?.minimum_balance(0) {
+                    return Err(Error::AccountNotRentExempt);
+                }
+                6
+            }
+        }
+    };
     let nullifiers: [[u8; 32]; 2] = std::array::from_fn(|index| {
         payment
             .bundle
@@ -243,7 +289,7 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
             .try_borrow_instruction_account(0)?
             .checked_sub_lamports(effects.public_value_balance as u64)?;
         instruction
-            .try_borrow_instruction_account(2)?
+            .try_borrow_instruction_account(recipient_index)?
             .checked_add_lamports(effects.public_value_balance as u64)?;
     }
     for (index, nullifier) in effects.nullifiers.iter().enumerate() {
