@@ -91,19 +91,40 @@ def ready(timeout=120):
     raise RuntimeError('service validators not ready')
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False):
-    if ack_test or package_test or browser_test or restore_test:os.nice(10)
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False):
+    if ack_test or package_test or browser_test or restore_test or retention_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
-    children=[None,None];shutdown=threading.Event();ingress=None
-    def terminate(*_):shutdown.set()
+    children=[None,None];shutdown=threading.Event();ingress=None;retention=None
+    def terminate(*_):
+        shutdown.set()
+        if retention is not None:retention.stop.set()
     signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
+    def pause_owned():
+        nonlocal ingress,retention
+        errors=[]
+        for name,worker in [('ingress',ingress),('retention',retention)]:
+            if name=='ingress':ingress=None
+            else:retention=None
+            if worker is not None:
+                try:worker.close()
+                except Exception:errors.append(name)
+        for i in [1,0]:
+            if children[i] is not None and children[i].poll() is None:
+                try:stop(ROOT,i)
+                except Exception:errors.append('validator-'+str(i))
+        if errors:raise RuntimeError('owned service cleanup failed: '+','.join(errors))
+    def park(reason):
+        pause_owned()
+        print(reason+'; validators paused and original private state retained.',flush=True)
+        while not shutdown.wait(5):pass
+
     try:
         test_deadline=None
-        if ack_test or package_test or browser_test or restore_test:
+        if ack_test or package_test or browser_test or restore_test or retention_test:
             from service_tls import private_bytes
-            session_name='restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
@@ -121,25 +142,33 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
         for i in [0,1]:children[i]=start(ROOT,i,coordinated=True,new_session=False);wait_rpc(ROOT,i)
         quiet(ROOT)
         save(ROOT/'service-instance.json',{'supervisor':os.getpid(),'validators':[p.pid for p in children],'started_at':time.time(),'uid':os.getuid(),'gid':os.getgid(),'process_groups':[os.getpgid(p.pid) for p in children]})
+        from history_retention import Retention
+        try:
+            retention=Retention(ROOT,WALLET,'http://127.0.0.1:23899',lambda method,params:rpc(23899,method,params),
+                credential=ROOT/'rpc-access.key')
+            retention.start()
+        except Exception:
+            park('History retention initialization failed')
+            return
+        if shutdown.is_set():return
+        if test_deadline is not None and time.time()>=test_deadline:
+            park('Test-duration guard before ingress')
+            return
         if (ROOT/'ingress-setup.json').exists():
             from service_ingress import Ingress
             if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':
                 ingress=Ingress(restore_test=True) if restore_test else Ingress(browser_test=True) if browser_test else Ingress(package_test=True) if package_test else Ingress(ack_test=True) if ack_test else Ingress()
         while not shutdown.wait(1):
             if any(p.poll() is not None for p in children):raise RuntimeError('owned validator exited; restart the coordinated service group')
+            if not retention.healthy():
+                park('History retention verification, lag or capacity guard')
+                return
             if ingress is not None and not ingress.healthy():raise RuntimeError('wallet ingress worker exited; restart original service group')
             if shutil.disk_usage(ROOT).free<1024*1024*1024 or (test_deadline is not None and time.time()>=test_deadline):
-                # Stop writers, then wait without a launchd restart/write loop.
-                if ingress is not None:ingress.close();ingress=None
-                for i in [1,0]:
-                    if children[i].poll() is None:stop(ROOT,i)
-                print('Service paused at disk/test-duration guard; private state retained.',flush=True)
-                while not shutdown.wait(5):pass
+                park('Disk or test-duration guard')
                 return
     finally:
-        if ingress is not None:ingress.close()
-        for i in [1,0]:
-            if children[i] is not None and children[i].poll() is None:stop(ROOT,i)
+        pause_owned()
 
 
 def args(who,action,extra=(),proxy=False):
@@ -256,9 +285,17 @@ if __name__=='__main__':
     elif action=='run-package-test':output=supervise(package_test=True)
     elif action=='run-browser-test':output=supervise(browser_test=True)
     elif action=='run-restore-test':output=supervise(restore_test=True)
+    elif action=='run-retention-test':output=supervise(retention_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
-    elif action=='status':ready(timeout=4);output={'slots':slots(),'native_state':canonical(),'uid':os.getuid()}
+    elif action=='status':
+        ready(timeout=4)
+        from history_retention import read
+        output={'slots':slots(),'native_state':canonical(),'uid':os.getuid(),
+            'history_retention':json.loads(read(ROOT/'history-retention.json',8192)) if (ROOT/'history-retention.json').exists() else {'phase':'starting'}}
+    elif action=='history-status':
+        from history_retention import read
+        output=json.loads(read(ROOT/'history-retention.json',8192))
     elif action=='ingress-init':
         from service_ingress import initialize as initialize_ingress
         output=initialize_ingress()

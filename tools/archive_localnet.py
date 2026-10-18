@@ -140,15 +140,21 @@ class ArchiveExperiment(Experiment):
         self.event("missing_corrupt_and_rehashed_payment_omission_rejected")
 
         # Retained metadata is never accepted as canonical outer-tx inclusion.
-        pending = root / "wallets/bob-restored.wallet.json.pending.json"
+        # Use a genuinely fresh device: bob-restored now has a verified RPC
+        # checkpoint and can legitimately resolve the post-snapshot signature.
+        # Retained metadata alone must not supply that canonical evidence.
+        self.wallet("restore", "bob-pending", ["--backup", str(root / "wallets/bob.seed-backup.json")])
+        pending = root / "wallets/bob-pending.wallet.json.pending.json"
+        if Path(str(root / "wallets/bob-pending.wallet.json") + ".scan-cache").exists():
+            raise RuntimeError("unknown-payment fixture unexpectedly has a verified checkpoint")
         config = load(root)
         private_new(pending, json.dumps({"network": {"network": config["network"], "genesis_hash": config["genesis_hash"]},
                     "signature": receipt["signature"], "staging_account": receipt["staging_account"], "last_valid_block_height": 0}).encode())
-        self.reject(self.wallet_args("resolve", "bob", ["--history", str(history)], index=1, restored=True), "canonical full RPC history")
-        self.reject(self.wallet_args("resolve", "bob", index=1, restored=True), "history")
+        self.reject(self.wallet_args("resolve", "bob-pending", ["--history", str(history)], index=1), "canonical full RPC history")
+        self.reject(self.wallet_args("resolve", "bob-pending", index=1), "history")
         if not pending.exists():
             raise RuntimeError("missing canonical history cleared an unknown payment")
-        resolved = self.wallet("resolve", "bob", index=0, restored=True)
+        resolved = self.wallet("resolve", "bob-pending", index=0)
         if not resolved["accepted"] or pending.exists():
             raise RuntimeError("canonical archive RPC did not resolve the actual accepted payment")
         final_state = durable(root, 0)

@@ -9,7 +9,7 @@ CARGO_BUILD_JOBS=2 sh tools/dev.sh build --offline --locked -p native-wallet
 target/debug/native-wallet archive --network .data/l3/network.json --rpc http://127.0.0.1:18899 --history .data/l3/recovery-history
 ```
 
-No wallet, password or sponsor key is required. The command verifies all retained proofs again, reads the new finalized RPC suffix and checks the complete pool and latest finalized header before publishing the manifest. Repeat the same command to extend the archive. It is a bounded one-shot collector, not an installed daemon or scheduled service. Initial collection requires history from genesis; running it for the first time against a snapshot-only RPC cannot recreate lost ciphertexts.
+No wallet, password or sponsor key is required. The command verifies all retained proofs again, reads the new finalized RPC suffix and checks the complete pool and latest finalized header before publishing the manifest. Repeat the same command to extend an operator archive. The dedicated local service now runs this bounded collector automatically, as described below. Initial collection requires history from genesis; running it for the first time against a snapshot-only RPC cannot recreate lost ciphertexts.
 
 The archive retains block continuity fields and successful signed native transactions, including upload/seal/finalize/close data and needed loaded addresses. Unrelated transaction bodies are discarded. These are public chain ciphertexts/metadata; wallet seeds, passwords and decrypted notes are never retained here.
 
@@ -41,4 +41,28 @@ python3 -B tools/archive_localnet.py --root .data/archive-new
 
 The runner owns/stops two loopback validators. It checks collector restart/immutability, actual full-snapshot loading and new finalization, seed recovery that fails without retained history, a recovered-witness private send, a second seed restore, backend integration, corruption/missing files, payment omission with recomputed checksums, permanent nullifiers and pending-payment safety. Private evidence remains under its ignored root. See LOCAL-010 validation.
 
-Before public testnet this needs replicated retention, capacity/lag alerts, backup recovery drills and sustained/adversarial load evidence. Production wallet/sponsor keys, launch parameters and independent protocol/runtime review remain separate release gates. No public deployment is authorized by these tools.
+## Automatic dedicated-service retention
+
+The current sealed service bundle (`native-service-bundle-v3`) includes `history_retention.py`. Updating an older v1/v2 installation preserves its original private data and loaded/paused state; it does not start a deliberately paused service. On a subsequent authorized start, the unprivileged service collects and verifies a complete prefix before opening the invited gateway/faucet. It repeats collection every 60 seconds while validators run. It needs only the fixed operator RPC credential; no wallet, password, faucet signer or sponsor authority is passed to the collector.
+
+The service writes `recovery-history` and publishes a separate `recovery-history-mirror` under its owner-only network root. Each backup captures one manifest, copies only its referenced immutable payloads and publishes the manifest last, with file/directory sync. A failed copy retains the previous committed backup. Complete identical unreferenced files can be reused after interruption. No archive segment is removed, replaced or silently repartitioned. The mirror cannot roll back or change a previously committed prefix. Unrelated files, secrets, locks and uncommitted temporary payloads are excluded from copies.
+
+Collection verifies all native signatures/proofs and reconciles finalized state; the Python mirror additionally checks identity, checksums, continuity and bounds. Those mirror checks are not consensus proofs. Fresh wallets still perform their own complete replay and live finalized-pool reconciliation. The archive remains unsuitable as authoritative inclusion/absence evidence for resolving an interrupted outer transaction.
+
+`service_runtime.py history-status`, run through the existing dedicated-account administrator wrapper, returns the **last recorded** phase, collection PID, success timestamp, retained tip, observed finalized tip, segment count, source/mirror bytes and sanitized error. `status` also includes this record after checking live validators. A persisted `ready` file alone is not proof that a stopped service is live. No new desktop access to private files or raw RPC is granted.
+
+Admission stays closed if initial verification fails. Later collection failure, an observed tip more than 1,024 slots behind, no success within 180 seconds, or an invalid worker stops ingress and both validators and parks the service without reinitializing anything. Each collection is limited to 120 seconds. Storage is monitored during collection: each store is limited to 256 MiB, and at least 1.5 GiB plus one maximum 32 MiB segment of disk headroom is required. Existing native manifest/segment bounds also apply. Temporary/orphan files count toward capacity. These are monitored development limits, not filesystem quotas. An unusually large write can cross a limit before the monitor stops collection; committed files are retained for investigation. A failed capture never publishes an incomplete backup.
+
+To recover a damaged primary, first stop the service and preserve the failure evidence and both histories. Validate a captured mirror with a fresh restored seed against a trusted current RPC, including balance reconciliation. Reconstruct the primary from that verified committed manifest and its exact referenced files **as the service identity**, retaining owner-only permissions; preserve the displaced damaged directory. Restart the original service with its original keys, journals, policies and genesis. If the mirror ends before history still available from the RPC, repair from another complete retained copy; never clear manifests to pretend the missing prefix was empty. This version fails closed and requires this operator recovery step rather than silently replacing a damaged primary.
+
+The two stores are on the same disk. This covers interrupted collection/copy and some file damage; it does **not** cover disk or host loss. Independent off-host storage, alert delivery, longer retention/capacity policy and sustained/adversarial load evidence remain public-testnet work. The invited gateway still serves canonical live RPC history; installing a mirror does not automatically distribute retained segments to testers or resolve historical pending signatures after RPC pruning. Keep a full-history RPC available until a separately tested gateway archive path exists.
+
+Repeat automatic collection, actual collector SIGKILL, fresh-seed snapshot-peer recovery and recovered-witness spending locally:
+
+```sh
+PYTHONPATH=tools nice -n 15 python3 tools/retention_localnet.py --root .data/rh-new
+```
+
+This uses a new disposable fixture, stops its own validators in cleanup and has a ten-minute acceptance timer. The installed-service rehearsal uses a separate finite deadline and restores the normal launchd definition to its unloaded state. See LOCAL-026 validation.
+
+Before public testnet this needs independent replicated retention, operational alerting, gateway archive recovery and sustained/adversarial load evidence. Production wallet/sponsor keys, launch parameters and independent protocol/runtime review remain separate release gates. No public deployment is authorized by these tools.

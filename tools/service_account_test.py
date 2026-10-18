@@ -90,26 +90,28 @@ class ServiceIsolationTests(unittest.TestCase):
                         self.assertEqual(key.read_bytes(),b'original secret')
                         self.assertEqual([call.args[0][1] for call in command.call_args_list],['bootout','bootstrap'])
     def test_reviewed_inventory_upgrade_keeps_paused_service_paused_and_rolls_back_new_files(self):
-        for fail in (False,True):
-            with self.subTest(failed_verification=fail),tempfile.TemporaryDirectory() as directory:
-                root=Path(directory);source=root/'source';source.mkdir()
-                for name in service.FILES:
-                    path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(('fixture '+name).encode())
-                installed=root/'installed';bundle=root/'bundle'
-                service.prepare(source,installed)
-                legacy=json.loads((installed/'MANIFEST.json').read_text());legacy['format']='native-service-bundle-v1'
-                legacy['files']={n:v for n,v in legacy['files'].items() if n in service.LEGACY_FILES}
-                for name in set(service.FILES)-set(service.LEGACY_FILES):(installed/name).unlink()
-                manifest=installed/'MANIFEST.json';manifest.chmod(0o600);manifest.write_text(json.dumps(legacy))
-                report=service.prepare(source,bundle)
-                checks=[{},ValueError('new seal invalid')] if fail else [{},{}]
-                with patch.object(service,'INSTALL',installed),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service,'verify_install',side_effect=checks),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=113)),patch.object(service,'command') as command:
-                    if fail:
-                        with self.assertRaises(ValueError):service.update(bundle,report['manifest_sha256'])
-                    else:self.assertTrue(service.update(bundle,report['manifest_sha256'])['service_left_paused'])
-                    command.assert_not_called()
-                self.assertEqual(service.verify_bundle(installed)['format'],'native-service-bundle-v1' if fail else 'native-service-bundle-v2')
-                self.assertEqual((installed/'target/debug/native-faucet').exists(),not fail)
+        for version,inventory in [(1,service.LEGACY_FILES),(2,service.V2_FILES)]:
+            for fail in (False,True):
+                with self.subTest(failed_verification=fail),tempfile.TemporaryDirectory() as directory:
+                    root=Path(directory);source=root/'source';source.mkdir()
+                    for name in service.FILES:
+                        path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(('fixture '+name).encode())
+                    installed=root/'installed';bundle=root/'bundle'
+                    service.prepare(source,installed)
+                    legacy=json.loads((installed/'MANIFEST.json').read_text());legacy['format']='native-service-bundle-v%d'%version
+                    legacy['files']={n:v for n,v in legacy['files'].items() if n in inventory}
+                    for name in set(service.FILES)-set(inventory):(installed/name).unlink()
+                    manifest=installed/'MANIFEST.json';manifest.chmod(0o600);manifest.write_text(json.dumps(legacy))
+                    report=service.prepare(source,bundle)
+                    checks=[{},ValueError('new seal invalid')] if fail else [{},{}]
+                    with patch.object(service,'INSTALL',installed),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service,'verify_install',side_effect=checks),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=113)),patch.object(service,'command') as command:
+                        if fail:
+                            with self.assertRaises(ValueError):service.update(bundle,report['manifest_sha256'])
+                        else:self.assertTrue(service.update(bundle,report['manifest_sha256'])['service_left_paused'])
+                        command.assert_not_called()
+                    self.assertEqual(service.verify_bundle(installed)['format'],'native-service-bundle-v%d'%version if fail else 'native-service-bundle-v3')
+                    self.assertEqual((installed/'tools/history_retention.py').exists(),not fail)
+                    self.assertEqual((installed/'target/debug/native-faucet').exists(),version==2 or not fail)
 
 
 if __name__=='__main__':unittest.main()
