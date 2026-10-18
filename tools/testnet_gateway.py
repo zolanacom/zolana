@@ -13,7 +13,7 @@ import urllib.request
 from test_faucet import BoundedServer, Faucet
 
 METHODS = {
-    "getWalletHistoryBlocks", "getWalletRetainedHistory",
+    "getWalletHistoryBlocks", "getWalletRetainedHistory", "getWalletCanonicalHistory",
     "getGenesisHash", "getHealth", "getVersion", "getAccountInfo", "getMultipleAccounts",
     "getBlocks", "getBlock", "getBlockHeight", "getSlot", "getEpochInfo", "getBalance",
     "getSignaturesForAddress", "getSignatureStatuses", "getTransaction", "getLatestBlockhash",
@@ -27,7 +27,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Gateway:
-    def __init__(self, faucet, history_root=None):
+    def __init__(self, faucet, history_root=None, archive_rpc=None):
         self.faucet = faucet
         self.info = faucet.command("access-info")
         if self.info.get("invite_required") is not True:
@@ -52,6 +52,15 @@ class Gateway:
         if history_root is not None:
             from gateway_history import History
             self.history = History(history_root, self.info['network'])
+        self.archive = None
+        if archive_rpc is not None:
+            from gateway_archival import ArchiveRPC
+            self.archive = ArchiveRPC(self, archive_rpc, ledger)
+
+    def canonical_history(self, request):
+        if self.archive is None:
+            return json.dumps({'jsonrpc':'2.0','id':request['id'],'result':None}).encode()
+        return self.archive.page(request)
 
     def retained_history(self, request):
         if self.history is None:
@@ -125,6 +134,9 @@ class Handler(BaseHTTPRequestHandler):
                 if request['method'] == 'getWalletRetainedHistory':
                     from gateway_history import parameters
                     parameters(request)
+                if request['method'] == 'getWalletCanonicalHistory':
+                    from gateway_archival import parameters
+                    parameters(request)
                 slots = history_slots(request) if request["method"] == "getWalletHistoryBlocks" else None
                 header = self.headers.get("X-Testnet-Access", "")
                 if not 1 <= len(header) <= 3072:
@@ -132,6 +144,7 @@ class Handler(BaseHTTPRequestHandler):
                 proof = json.loads(base64.b64decode(header + "=" * (-len(header) % 4), altchars=b"-_", validate=True))
                 self.server.app.faucet.command("authorize", proof)
             if request['method'] == 'getWalletRetainedHistory':data = self.server.app.retained_history(request)
+            elif request['method'] == 'getWalletCanonicalHistory':data = self.server.app.canonical_history(request)
             else:data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
         except (ValueError, RecursionError, OSError, urllib.error.URLError, subprocess.SubprocessError) as error:
             code = 429 if "quota exhausted" in str(error) else 403
@@ -158,12 +171,13 @@ def main():
     parser.add_argument("--password-file", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18898)
     parser.add_argument("--history",type=Path,help="operator-configured retained mirror; never supplied by a client")
+    parser.add_argument("--archive-rpc",help="fixed operator-only canonical archive RPC; never supplied by a client")
     parser.add_argument("--tls-cert",type=Path)
     parser.add_argument("--tls-key",type=Path)
     args = parser.parse_args()
     # Reuse the bounded, owner-only operator service interface; no worker starts here.
     faucet = Faucet(args.root, args.password_file)
-    app = Gateway(faucet,history_root=args.history)
+    app = Gateway(faucet,history_root=args.history,archive_rpc=args.archive_rpc)
     from service_tls import listener
     server=listener(app.info['rpc_audience'],args.port,Handler,app,args.tls_cert,args.tls_key)
     try:

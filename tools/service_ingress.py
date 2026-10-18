@@ -137,10 +137,10 @@ def ack_gate():
 
 class FinalityGateGateway(Gateway):
     """Only selected by the temporary administrator-owned run-ack-test job."""
-    def __init__(self,faucet,history_root=None):
+    def __init__(self,faucet,history_root=None,archive_rpc=None):
         self.gate_lock=threading.Lock();self.release=threading.Event()
         ack_gate()  # Unsafe existing controls fail before opening a listener.
-        super().__init__(faucet,history_root=history_root)
+        super().__init__(faucet,history_root=history_root,archive_rpc=archive_rpc)
 
     def forward(self,raw,timeout=15):
         query=json.loads(raw);attempt=None
@@ -221,7 +221,7 @@ class Ingress:
             if restore_test:restore_test_paths()
             elif browser_test:browser_test_paths()
             self.faucet=Faucet(FAUCET_ROOT,PASSWORD,binary=FAUCET)
-            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test or browser_test or restore_test else Gateway)(self.faucet,history_root=ROOT/'recovery-history-mirror')
+            gateway=(PackageRecoveryGateway if package_test else FinalityGateGateway if ack_test or browser_test or restore_test else Gateway)(self.faucet,history_root=ROOT/'recovery-history-mirror',archive_rpc='http://127.0.0.1:23899')
             self.gateway=gateway
             for port,handler,app,endpoint in [(FAUCET_PORT,FaucetHandler,self.faucet,gateway.info['faucet_audience']),
                 (RPC_PORT,GatewayHandler,gateway,gateway.info['rpc_audience'])]:

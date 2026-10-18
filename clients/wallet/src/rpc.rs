@@ -1,3 +1,4 @@
+mod archival;
 mod retained;
 use crate::{
     archive::{Archive, HistoryBlock, Writer},
@@ -59,6 +60,7 @@ pub struct Synced {
     accepted_finalizations: BTreeSet<String>,
     canonical_from_slot: u64,
     withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
+    finalizations: BTreeMap<String, (String, bool)>,
     pub scan: ScanStats,
 }
 
@@ -70,6 +72,7 @@ pub struct ScanStats {
     pub payments_verified: usize,
     pub block_rpc_requests: usize,
     pub retained_rpc_requests: usize,
+    pub archival_rpc_requests: usize,
     pub fetch_ms: u128,
     pub replay_ms: u128,
     pub setup_ms: u128,
@@ -87,6 +90,7 @@ struct ScanResult {
     accepted: BTreeSet<String>,
     canonical_from_slot: u64,
     withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
+    finalizations: BTreeMap<String, (String, bool)>,
     scan: ScanStats,
 }
 
@@ -151,10 +155,26 @@ impl ScanResult {
                 .meta
                 .as_ref()
                 .ok_or("native payment execution metadata is unavailable")?;
+            tx.verify_and_hash_message()?;
+            if canonical {
+                for ix in tx.message.instructions() {
+                    if keys.get(ix.program_id_index as usize) == Some(&id()) && ix.data == [3] {
+                        let staging = ix.accounts.get(1).and_then(|i| keys.get(*i as usize));
+                        // A failed malformed instruction can have too few
+                        // accounts. It supplies no matching receipt, but must
+                        // not prevent every wallet from scanning the chain.
+                        if let Some(staging) = staging {
+                            self.finalizations.insert(
+                                tx.signatures[0].to_string(),
+                                (staging.to_string(), meta.err.is_some()),
+                            );
+                        }
+                    }
+                }
+            }
             if meta.err.is_some() {
                 continue;
             }
-            tx.verify_and_hash_message()?;
             for ix in tx.message.instructions() {
                 if keys.get(ix.program_id_index as usize) != Some(&id()) {
                     continue;
@@ -209,6 +229,7 @@ impl ScanResult {
                 accepted_finalizations: self.accepted.clone(),
                 canonical_from_slot: self.canonical_from_slot,
                 withdrawals: self.withdrawals.clone(),
+                finalizations: self.finalizations.clone(),
                 scan: self.scan.clone(),
             })
             .collect()
@@ -881,6 +902,7 @@ impl Chain {
             accepted: accepted_finalizations,
             canonical_from_slot,
             withdrawals: BTreeMap::new(),
+            finalizations: BTreeMap::new(),
             scan: stats,
         };
         if let Some(history) = history {
@@ -897,6 +919,14 @@ impl Chain {
             }
         }
         result.scan.setup_ms = setup_started.elapsed().as_millis();
+        // Only pending-outcome recovery requests a full canonical archive.
+        // Ordinary balance restoration keeps its distinct retained provenance.
+        let remote_archival =
+            if !allow_remote_retained && self.history_batches && result.slot == 0 && target > 0 {
+                self.scan_archival(&mut result, target)?
+            } else {
+                false
+            };
         // A pinned checkpoint already supplies verified state. Read its recent
         // canonical suffix directly, including original pending-send receipts.
         let remote_retained = if allow_remote_retained
@@ -949,7 +979,7 @@ impl Chain {
                     .into(),
             );
         }
-        if (history.is_some() || remote_retained) && target != 0 {
+        if (history.is_some() || remote_retained || remote_archival) && target != 0 {
             let header = self.rpc.get_block_with_config(target, RpcBlockConfig {
                 transaction_details:Some(TransactionDetails::None), rewards:Some(false),
                 commitment:Some(CommitmentConfig::finalized()), ..Default::default()
@@ -970,6 +1000,7 @@ impl Chain {
         if history.is_some() {
             result.accepted.clear();
             result.withdrawals.clear();
+            result.finalizations.clear();
             result.canonical_from_slot = result
                 .canonical_from_slot
                 .max(history.unwrap().tip().min(target).saturating_add(1));
@@ -1050,6 +1081,7 @@ impl Chain {
             return Err("pending transaction network mismatch".into());
         }
         let signature = Signature::from_str(&pending.signature)?;
+        Pubkey::from_str(&pending.staging_account)?;
         // Private sends can extend the same authenticated, canonically pinned
         // checkpoint used by normal wallet sync. Withdrawal intent still needs
         // full receipt replay: that recipient/amount map is not cached.
@@ -1059,7 +1091,7 @@ impl Chain {
             self.sync(wallet)?
         };
         let statuses = self.rpc.get_signature_statuses_with_history(&[signature])?;
-        let failed = statuses
+        let mut failed = statuses
             .value
             .first()
             .and_then(Option::as_ref)
@@ -1077,6 +1109,12 @@ impl Chain {
                 .finish().pop().ok_or("missing canonical recovery state")?;
         }
         let accepted = synced.accepted_finalizations.contains(&pending.signature);
+        if let Some((staging, canonical_failed)) = synced.finalizations.get(&pending.signature) {
+            if staging != &pending.staging_account {
+                return Err("canonical finalization differs from the saved staging account; pending record retained".into());
+            }
+            failed |= *canonical_failed;
+        }
         let withdrawal = synced.withdrawals.get(&pending.signature).cloned();
         if accepted
             && pending
@@ -1742,6 +1780,229 @@ mod recovery_tests {
                 assert!(scanned.accepted.is_empty());
             } else {
                 assert!(scanned.is_err(), "invalid retained mode {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn archival_pages_require_full_continuity_fixed_anchor_and_primary_header() {
+        for mode in 0..12 {
+            let (wallet, _, mut chain) = cached_fixture(2, vec![], vec![]);
+            chain.history_batches = true;
+            let anchor = json!({"slot":2,"blockhash":block(2,1)["blockhash"],"block_height":2});
+            let page = |after, slot| {
+                json!({"network":wallet.network,"anchor":anchor,
+                "after_slot":after,"next_slot":slot,"complete":slot==2,"blocks":[{"slot":slot,"block":block(slot,after)}]})
+            };
+            let mut first = page(0, 1);
+            let mut second = page(1, 2);
+            match mode {
+                1 => second["anchor"]["blockhash"] = json!(bs58::encode([33; 32]).into_string()),
+                2 => first["network"]["network"][0] = json!(99),
+                3 => first["blocks"] = json!([]),
+                4 => second["blocks"][0]["block"]["parentSlot"] = json!(0),
+                5 => first["next_slot"] = json!(2),
+                6 => first["complete"] = json!(true),
+                7 => second = serde_json::Value::Null,
+                8 => first["blocks"][0]["slot"] = json!(3),
+                9 => first["extra"] = json!("denied"),
+                11 => {
+                    first["anchor"]["block_height"] = json!(3);
+                    second["anchor"]["block_height"] = json!(3);
+                }
+                _ => (),
+            }
+            let pool = Replay::new(&wallet, 1000).unwrap().state.pool.encode();
+            chain.rpc = RpcClient::new_mock_with_mocks_map(
+                "succeeds",
+                MocksMap::from_iter([
+                    (
+                        RpcRequest::GetAccountInfo,
+                        json!({"context":{"slot":2},"value":{
+                    "lamports":1000,"owner":id().to_string(),"executable":false,"rentEpoch":0,
+                    "data":[bs58::encode(pool).into_string(),"base58"]}}),
+                    ),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletCanonicalHistory",
+                        },
+                        first,
+                    ),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletCanonicalHistory",
+                        },
+                        second,
+                    ),
+                    (
+                        RpcRequest::GetBlock,
+                        block(if mode == 10 { 3 } else { 2 }, 1),
+                    ),
+                ]),
+            );
+            let scanned = chain.scan_source_mode(&[&wallet], None, None, None, false);
+            if mode == 0 {
+                let scanned = scanned.unwrap();
+                assert_eq!(scanned.slot, 2);
+                assert_eq!(scanned.canonical_from_slot, 0);
+                assert_eq!(scanned.scan.archival_rpc_requests, 2);
+                assert_eq!(scanned.scan.retained_rpc_requests, 0);
+            } else {
+                assert!(scanned.is_err(), "invalid archival mode {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_failed_finalization_requires_a_valid_signature_and_preserves_staging_identity() {
+        let (wallet, _, chain) = cached_fixture(0, vec![], vec![]);
+        let payer = Keypair::new();
+        let staging = Pubkey::new_unique();
+        let instruction = Instruction {
+            program_id: id(),
+            accounts: vec![
+                solana_instruction::AccountMeta::new(pool_address(), false),
+                solana_instruction::AccountMeta::new(staging, false),
+            ],
+            data: vec![3],
+        };
+        let tx = Transaction::new_signed_with_payer(
+            &[instruction],
+            Some(&payer.pubkey()),
+            &[&payer],
+            Default::default(),
+        );
+        let signature = tx.signatures[0].to_string();
+        let encoded = json!({"transaction":[base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).unwrap()),"base64"],
+            "meta":{"err":{"InstructionError":[0,{"Custom":1}]},"status":{"Err":{"InstructionError":[0,{"Custom":1}]}},"fee":5000,"preBalances":[],"postBalances":[]}});
+        let malformed = Transaction::new_signed_with_payer(
+            &[Instruction {
+                program_id: id(),
+                accounts: vec![],
+                data: vec![3],
+            }],
+            Some(&payer.pubkey()),
+            &[&payer],
+            Default::default(),
+        );
+        let mut malformed_encoded = encoded.clone();
+        malformed_encoded["transaction"][0] = json!(base64::engine::general_purpose::STANDARD
+            .encode(bincode::serialize(&malformed).unwrap()));
+        let mut canonical = block(1, 0);
+        canonical["transactions"] = json!([encoded, malformed_encoded]);
+        let mut result = chain.scan(&[&wallet], None).unwrap();
+        result
+            .apply_block(
+                HistoryBlock::from_rpc(1, serde_json::from_value(canonical.clone()).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.finalizations.get(&signature),
+            Some(&(staging.to_string(), true))
+        );
+        assert!(result.accepted.is_empty());
+        assert_eq!(result.finalizations.len(), 1);
+        assert_eq!(result.scan.payments_verified, 0);
+        let (retained_wallet, _, retained_chain) = cached_fixture(0, vec![], vec![]);
+        let mut retained = retained_chain.scan(&[&retained_wallet], None).unwrap();
+        retained
+            .apply_retained_block(
+                HistoryBlock::from_rpc(1, serde_json::from_value(canonical).unwrap()).unwrap(),
+            )
+            .unwrap();
+        assert!(retained.finalizations.is_empty());
+        let mut bad = tx;
+        bad.signatures[0] = Signature::from([12; 64]);
+        let mut block = block(2, 1);
+        block["transactions"] = json!([{"transaction":[base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&bad).unwrap()),"base64"],"meta":{"err":"AccountNotFound","status":{"Err":"AccountNotFound"},"fee":5000,"preBalances":[],"postBalances":[]}}]);
+        assert!(result
+            .apply_block(HistoryBlock::from_rpc(2, serde_json::from_value(block).unwrap()).unwrap())
+            .is_err());
+    }
+
+    #[test]
+    fn old_pending_archival_absence_requires_complete_coverage_and_expiry() {
+        for mode in 0..5 {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let (wallet, mut checkpoint, mut chain) = cached_fixture(6, vec![], vec![]);
+            checkpoint.canonical_from_slot = u64::MAX;
+            cache::write(&operation.scan_cache, &wallet, &checkpoint).unwrap();
+            chain.history_batches = true;
+            let payer = Keypair::new();
+            let staging = Pubkey::new_unique();
+            let tx = Transaction::new_signed_with_payer(
+                &[Instruction {
+                    program_id: id(),
+                    accounts: vec![
+                        solana_instruction::AccountMeta::new(pool_address(), false),
+                        solana_instruction::AccountMeta::new(staging, false),
+                    ],
+                    data: vec![3],
+                }],
+                Some(&payer.pubkey()),
+                &[&payer],
+                Default::default(),
+            );
+            let mut old = block(2, 0);
+            if mode == 2 || mode == 3 {
+                old["transactions"] = json!([{"transaction":[base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).unwrap()),"base64"],
+                    "meta":{"err":"AccountNotFound","status":{"Err":"AccountNotFound"},"fee":5000,"preBalances":[],"postBalances":[]}}]);
+            }
+            let mut page = json!({"network":wallet.network,"anchor":{"slot":6,"blockhash":block(6,2)["blockhash"],"block_height":6},
+                "after_slot":0,"next_slot":6,"complete":true,"blocks":[{"slot":2,"block":old},{"slot":6,"block":block(6,2)}]});
+            if mode == 4 {
+                page["blocks"][1]["block"]["parentSlot"] = json!(4);
+            }
+            let pool = Replay::new(&wallet, 1000).unwrap().state.pool.encode();
+            let account = json!({"context":{"slot":6},"value":{"lamports":1000,"owner":id().to_string(),"executable":false,"rentEpoch":0,"data":[bs58::encode(pool).into_string(),"base58"]}});
+            chain.rpc = RpcClient::new_mock_with_mocks_map(
+                "succeeds",
+                MocksMap::from_iter([
+                    (RpcRequest::GetAccountInfo, account.clone()),
+                    (RpcRequest::GetAccountInfo, account),
+                    (RpcRequest::GetBlock, block(4, 3)),
+                    (RpcRequest::GetBlock, block(6, 2)),
+                    (RpcRequest::GetBlocks, json!([6])),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletHistoryBlocks",
+                        },
+                        json!([{"slot":6,"block":block(6,4)}]),
+                    ),
+                    (
+                        RpcRequest::Custom {
+                            method: "getWalletCanonicalHistory",
+                        },
+                        page,
+                    ),
+                ]),
+            );
+            let pending = Pending {
+                network: wallet.network.clone(),
+                signature: tx.signatures[0].to_string(),
+                staging_account: if mode == 3 {
+                    Pubkey::new_unique().to_string()
+                } else {
+                    staging.to_string()
+                },
+                last_valid_block_height: if mode == 1 { 100 } else { 0 },
+                withdrawal: None,
+            };
+            let original = serde_json::to_vec(&pending).unwrap();
+            write_private_new(&operation.pending, &original).unwrap();
+            let outcome = chain.resolve(&wallet, &operation);
+            if mode == 0 || mode == 2 {
+                let outcome = outcome.unwrap();
+                assert_eq!(outcome["accepted"], false);
+                assert_eq!(outcome["failed"], mode == 2);
+                assert_eq!(outcome["expired_without_execution"], mode == 0);
+                assert!(!operation.pending.exists());
+                assert_eq!(outcome["sync"]["archival_rpc_requests"], 1);
+            } else {
+                assert!(outcome.is_err());
+                assert_eq!(fs::read(&operation.pending).unwrap(), original);
             }
         }
     }

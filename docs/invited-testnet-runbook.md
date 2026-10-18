@@ -85,4 +85,20 @@ The checkpoint hashes canonical descriptor-prefix JSON and its network, with the
 
 Deploy the updated gateway before using the updated wallet binary. An old invited gateway fails with an update-required error. A gateway with no configured history, or an initial empty archive, returns null and the wallet tries complete canonical RPC. On a new device the wallet replays retained signatures/proofs, reads the recent canonical suffix and checks the live finalized header and full pool before saving its encrypted checkpoint. A valid checkpoint uses recent canonical RPC directly. No history directory is copied to the tester.
 
-Ordinary `getBlock/getBlocks/getTransaction/getSignatureStatuses/getBlockHeight` are unchanged. Checkpoints remember canonical coverage; old checkpoint provenance is unknown. Retained records supply neither canonical signature receipts nor absence. Unknown outcomes try a complete canonical scan without the retained endpoint; when unavailable the original pending record stays blocked. Use archival canonical RPC rather than reissuing a payment. See LOCAL-027.
+Ordinary `getBlock/getBlocks/getTransaction/getSignatureStatuses/getBlockHeight` are unchanged. Checkpoints remember canonical coverage; old checkpoint provenance is unknown. Retained records supply neither canonical signature receipts nor absence. Unknown outcomes try a complete canonical scan without the retained endpoint; when unavailable the original pending record stays blocked. See LOCAL-027.
+
+## Canonical archival pending recovery
+
+The updated gateway also supports `getWalletCanonicalHistory` for old pending payments. Configure its fixed full-history validator with `--archive-rpc http://127.0.0.1:<raw-port>`; tester requests cannot choose or override it. The v5 dedicated service uses its existing full-history primary at port 23899 through the private Unix socket. A separate snapshot-only primary can instead use a full-history archive validator. This lane does not manufacture canonical data from the retained mirror and is not an independent archive replica by itself.
+
+Each request is `[after_slot, target_slot, anchor_or_null]`. A first page starts at zero; continuations carry the exact returned `{slot, blockhash, block_height}`. Each page checks archive genesis and matches the primary and archive finalized target header, returning at most 16 full blocks within 16 MiB/15 seconds. The wallet verifies continuity, native signatures/proofs, the primary target header and pool. Existing invitation/revocation and durable quota checks apply to every page. No change to the public wallet profile or operator credential export is required.
+
+`resolve` requests this lane only when existing canonical evidence cannot settle the original pending payment. Full coverage can establish acceptance, canonical failure, or finalized expiry without execution. The exact saved staging identity and withdrawal recipient/amount/sponsor must match. On archive outage, pruning, changed anchor, incomplete bodies or inconsistent evidence, keep the original journals and retry recovery later. Do not send again or clear recovery files. Resolution itself broadcasts no payment; original upload rent cleanup remains a separate `reclaim` action. See [the trust model](decisions/0020-canonical-archival-recovery.md).
+
+Repeat the finite snapshot/old-payment crash acceptance on a **new** short fixture root:
+
+```sh
+PYTHONPATH=tools RAYON_NUM_THREADS=2 nice -n 15 python3 tools/canonical_archive_localnet.py --root .data/c28-new
+```
+
+The runner retains evidence and journals and stops its owned validators in cleanup. It does not start or reset the installed service. Keep validators stopped outside these bounded tests.

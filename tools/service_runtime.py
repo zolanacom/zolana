@@ -91,8 +91,8 @@ def ready(timeout=120):
     raise RuntimeError('service validators not ready')
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False):
-    if ack_test or package_test or browser_test or restore_test or retention_test or history_test:os.nice(10)
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False):
+    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
     children=[None,None];shutdown=threading.Event();ingress=None;retention=None
@@ -121,10 +121,10 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
 
     try:
         test_deadline=None
-        if ack_test or package_test or browser_test or restore_test or retention_test or history_test:
+        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test:
             from service_tls import private_bytes
-            session_name='gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
@@ -287,6 +287,7 @@ if __name__=='__main__':
     elif action=='run-restore-test':output=supervise(restore_test=True)
     elif action=='run-retention-test':output=supervise(retention_test=True)
     elif action=='run-history-test':output=supervise(history_test=True)
+    elif action=='run-archival-test':output=supervise(archival_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':
@@ -309,6 +310,19 @@ if __name__=='__main__':
     elif action=='history-status':
         from history_retention import read
         output=json.loads(read(ROOT/'history-retention.json',8192))
+    elif action=='archival-check':
+        from test_faucet import Faucet
+        from testnet_gateway import Gateway
+        load(ROOT)
+        faucet=Faucet(ROOT/'faucet',OPERATORS/'faucet.password',binary=BASE/'target/debug/native-faucet')
+        try:
+            gateway=Gateway(faucet,archive_rpc='http://127.0.0.1:23899')
+            target=slots()[0]
+            page=json.loads(gateway.canonical_history({'jsonrpc':'2.0','id':1,'params':[0,target,None]}))['result']
+            resumed=json.loads(gateway.canonical_history({'jsonrpc':'2.0','id':1,'params':[page['next_slot'],target,page['anchor']]}))['result']
+            output={'blocks':len(page['blocks']),'next_blocks':len(resumed['blocks']),'anchor':page['anchor'],
+                'same_anchor':page['anchor']==resumed['anchor'],'private_unix_transport':gateway.archive.operator.path is not None}
+        finally:faucet.close()
     elif action=='ingress-init':
         from service_ingress import initialize as initialize_ingress
         output=initialize_ingress()

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 
 class RuntimeRetentionTests(unittest.TestCase):
-    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False):
+    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False):
         events = []
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); root = base / '.data/s20'; root.mkdir(parents=True)
@@ -47,11 +47,11 @@ class RuntimeRetentionTests(unittest.TestCase):
             exec(compile(ast.Module(body=[function],type_ignores=[]),'service_runtime.py','exec'), namespace)
             modules = {'history_retention': SimpleNamespace(Retention=Mock(return_value=retention)),
                        'service_ingress': SimpleNamespace(Ingress=opening),
-                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-history-retention-test-v1','expires_at':600}).encode())}
+                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
             with patch.dict('sys.modules', modules):
                 if close_failure:
                     with self.assertRaisesRegex(RuntimeError,'cleanup failed'):namespace['supervise']()
-                else: namespace['supervise'](retention_test=expired_after_start)
+                else: namespace['supervise'](retention_test=expired_after_start and not archival,archival_test=archival)
         return events
 
     def test_verified_initial_mirror_precedes_ingress_and_normal_shutdown_stops_everything(self):
@@ -72,6 +72,10 @@ class RuntimeRetentionTests(unittest.TestCase):
 
     def test_expiry_during_initial_collection_never_opens_ingress(self):
         self.assertEqual(self.exercise(expired_after_start=True),['retention-start','retention-close','stop1','stop0'])
+
+    def test_archival_rehearsal_has_its_own_finite_session_and_cleans_both_validators(self):
+        self.assertEqual(self.exercise(archival=True),['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
+        self.assertEqual(self.exercise(archival=True,expired_after_start=True),['retention-start','retention-close','stop1','stop0'])
 
 
 if __name__ == '__main__': unittest.main()

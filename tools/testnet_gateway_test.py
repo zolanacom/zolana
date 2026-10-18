@@ -27,6 +27,8 @@ class GatewayTests(unittest.TestCase):
                 calls.append(('history',slots)); return json.dumps({'result':slots}).encode()
             def retained_history(self, request):
                 calls.append(('retained',request['params'])); return b'{"result":null}'
+            def canonical_history(self, request):
+                calls.append(('canonical',request['params'])); return b'{"result":null}'
             def forward(self, raw):
                 calls.append(('forward',json.loads(raw)))
                 return b'{"jsonrpc":"2.0","id":1,"result":"genuine-upstream"}'
@@ -125,6 +127,18 @@ class GatewayTests(unittest.TestCase):
         for response in [[],{'id':1,'result':None},{'id':2,'result':{}},{'id':1,'error':{'code':-1}},{'id':1,'result':{'data':'x'*(16*1024*1024)}}]:
             gateway.forward=lambda raw,timeout=15:json.dumps(response).encode()
             with self.assertRaises(ValueError):gateway.history_blocks(request,[1])
+
+    def test_canonical_pages_use_original_invitation_and_quota_before_archive_access(self):
+        request=dict(jsonrpc='2.0',id=1,method='getWalletCanonicalHistory',params=[0,100,None])
+        header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
+        self.assertEqual(self.request(request)[0],403)
+        code,_,calls=self.request(request,header)
+        self.assertEqual(code,200)
+        self.assertEqual([c[0] for c in calls],['ingress','authorize','canonical'])
+        self.assertEqual(self.request(request,header,limit=True)[0],429)
+        for params in [[],[0,100],[0,True,None],[1,100,None],[0,100,'http://evil'],[0,100,{'slot':100,'blockhash':'1'*32,'block_height':1,'url':'http://evil'}]]:
+            code,_,calls=self.request(dict(request,params=params),header)
+            self.assertEqual(code,403);self.assertFalse(any(c[0]=='canonical' for c in calls))
 
     def test_history_deadline_and_exact_escaped_response_limit(self):
         gateway=object.__new__(Gateway)
