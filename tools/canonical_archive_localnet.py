@@ -18,6 +18,7 @@ from history_retention import atomic
 from test_faucet import BoundedServer, Faucet
 from testnet_gateway import Gateway, Handler
 from wallet_localnet import private_new
+from replay_localnet import prepare
 
 
 class CanonicalRecovery(GatewayRecovery):
@@ -70,7 +71,7 @@ class CanonicalRecovery(GatewayRecovery):
         if payment['pending'].read_bytes()!=payment['saved'] or Path(str(payment['wallet'])+'.staging.json').read_bytes()!=payment['stage']:
             raise RuntimeError('original pending/staging journal changed')
 
-    def run(self):
+    def setup(self):
         root=self.root;operator=PROJECT/'.local'/('operator-'+root.name);operator.mkdir(mode=0o700)
         cold,hot=operator/'cold.password',operator/'hot.password'
         for path in [cold,hot]:private_new(path,secrets.token_urlsafe(36).encode())
@@ -85,10 +86,45 @@ class CanonicalRecovery(GatewayRecovery):
             receipt=self.wallet(action,'alice',extra);self.closed(receipt['staging_account'])
         for who in ['alice','bob']:
             self.command([LAB,'fund-user-fee-check',root,root/'wallets'/(who+'.wallet.json'),root/'wallets/unlock.password',cold,'http://127.0.0.1:18899'])
+        self.wait_for_gas(keys)
         self.export();self.setup_invited()
         invite=root/'alice-invite.json'
         self.alice_invitation=self.command([FAUCET,'invite-issue','--root',root/'faucet','--output',invite,'--expires-in','3600'])
         self.user('join','alice',['--invitation-file',invite])
+        return keys
+
+    def wait_for_gas(self,keys):
+        self.wait(lambda:all(rpc(p,'getBalance',[keys[who]['fee_address'],{'commitment':'finalized'}])['value']==300_000_000
+                            for who in ['alice','bob'] for p in [18899,19899]),60)
+
+    def resume_before_payments(self):
+        root=self.root;previous=root/'canonical-archive-result.json'
+        value=json.loads(previous.read_text())
+        if value['status']!='failed' or 'fund user fee address' not in value.get('error','') or [e['kind'] for e in value['events']]!=['automatic_history_mirrored','existing_seed_admitted_without_faucet_worker_or_operator_key_export']:
+            raise RuntimeError('resume permitted only for the pre-payment gas-finality setup failure')
+        for who in ['alice','bob']:
+            for suffix in ['.pending.json','.staging.json']:
+                if (root/'wallets'/(who+'.wallet.json'+suffix)).exists():raise RuntimeError('ambiguous payment exists; never repeat value')
+        if self.broadcasts():raise RuntimeError('pre-payment resume requires no attempted gateway broadcast')
+        private_new(root/'canonical-archive-prepayment-failure.json',previous.read_bytes())
+        self.result=value;self.result.update(status='running');self.result.pop('error')
+        prepare(root)
+        for i in [0,1]:self.children[i]=start(root,i,coordinated=True);wait_rpc(root,i)
+        quiet(root);self.converge(0)
+        if len(durable(root,0))!=5:raise RuntimeError('pre-payment setup pool/four nullifiers changed')
+        keys={who:self.wallet('address',who) for who in ['alice','bob']};self.wait_for_gas(keys)
+        self.profile=root/'invited-profile.json';self.invitation=json.loads((root/'invite.json').read_text())
+        self.faucet=Faucet(root/'faucet',root/'wallets/unlock.password')
+        from test_faucet import Handler as FaucetHandler
+        import threading
+        self.server=BoundedServer(('127.0.0.1',8780),FaucetHandler);self.server.authority='127.0.0.1:8780';self.server.app=self.faucet
+        self.server_thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.server_thread.start()
+        self.export();self.launch_gateway()
+        self.event('prepayment_setup_resumed_after_finalized_gas_without_refunding_or_repeating_payments')
+        return keys
+
+    def run(self,resume=False):
+        root=self.root;keys=self.resume_before_payments() if resume else self.setup()
         fees=['--fee-payer','user','--max-fee-debit','150000000']
         sent=self.interrupted_payment('bob','send',fees+['--amount','500000','--to',keys['alice']['address']])
         withdrawal=self.interrupted_payment('alice','withdraw',fees+['--amount','1000000'])
@@ -200,15 +236,16 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--root',type=Path,required=True)
     for flag in ['gateway-child','history','archive']:parser.add_argument('--'+flag,action='store_true')
     parser.add_argument('--gate',choices=['send','archive']);parser.add_argument('--pending',type=Path)
+    parser.add_argument('--resume-before-payments',action='store_true',help='one-time guarded resume of a gas-finality setup failure; never repeats funding or a pending payment')
     args=parser.parse_args()
     if args.gateway_child:child(args)
     else:
         root=args.root.resolve()
-        if root.parent!=PROJECT/'.data' or root.exists() or len(bytes(root/'ledger-recovered-1/admin.rpc'))>=104:parser.error('new short fixture root under .data required')
+        if root.parent!=PROJECT/'.data' or (root.exists() and not args.resume_before_payments) or len(bytes(root/'ledger-recovered-1/admin.rpc'))>=104:parser.error('new short fixture root under .data required')
         trial=CanonicalRecovery(root)
         def limit(*_):raise TimeoutError('ten-minute local acceptance limit')
         signal.signal(signal.SIGALRM,limit);signal.alarm(600)
-        try:trial.run()
+        try:trial.run(resume=args.resume_before_payments)
         except BaseException as error:trial.result.update(status='failed',error=str(error));raise
         finally:
             signal.alarm(0)
