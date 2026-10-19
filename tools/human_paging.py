@@ -265,9 +265,19 @@ def run(path,duration=60,allow_network=False,retry_blocked=False):
     for number in (signal.SIGTERM,signal.SIGINT):signal.signal(number,lambda *_:stopping.set())
     if hasattr(signal,'pthread_sigmask'):signal.pthread_sigmask(signal.SIG_UNBLOCK,{signal.SIGTERM,signal.SIGINT})
     deadline=time.monotonic()+duration if duration else float('inf');last=None
+    from watchdog_progress import Progress
+    progress=None;failed=True
     try:
+        progress=Progress(relay.root,c['deployment'],'pager',route['integration_sha256'])
         while not stopping.is_set() and time.monotonic()<deadline:
             status=relay.step()
+            queued=snapshot(relay.inbox,c['deployment'])[relay.state['cursor']:]
+            progress.complete(len(queued),min(e['at'] for e in queued) if queued else None,
+                'delivery_blocked' if status['phase']=='blocked' else 'delivery_retrying' if relay.state['pending'] and relay.state['pending']['failure'] else None)
             if status!=last:print(json.dumps(status,sort_keys=True),flush=True);last=status
             stopping.wait(c['interval_seconds'])
-    finally:relay.close()
+        failed=False
+    finally:
+        try:
+            if progress is not None:progress.close(failed)
+        finally:relay.close()

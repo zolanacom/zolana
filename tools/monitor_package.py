@@ -7,7 +7,7 @@ from pathlib import Path
 import stat
 import zipfile
 
-RUNTIME=('operator_health.py','operator_monitor.py','monitor_transport.py','offhost_monitor.py','human_paging.py')
+RUNTIME=('operator_health.py','operator_monitor.py','monitor_transport.py','offhost_monitor.py','human_paging.py','watchdog_progress.py','watchdog_notify.py','watchdog_monitor.py')
 README='''# Independent monitoring bundle
 
 This bundle uses Python 3.9+ and its standard library on macOS/Linux. It contains
@@ -17,7 +17,8 @@ the fixed file inventory and every digest before importing application code;
 this is integrity checking, not release signing or a security audit.
 
 Run with: python3 -I /absolute/bundle/run.py ACTION --config /private/config.json
-Actions: export, receive, watch, check, page, page-retry. The exporter reads the sanitized heartbeat
+Actions: export, receive, watch, check, page, page-retry, watchdog-agent, watchdog,
+watchdog-retry. The exporter reads the sanitized heartbeat
 and fixed macOS launchd job. Run it as an unprivileged desktop operator, not as
 the validator/key account. The observer and alert inbox run independently on
 macOS or Linux and need no validator installation or raw RPC access.
@@ -72,7 +73,19 @@ this adapter does not claim exactly-once human notification.
 After fixing a rejected request, stop the pager and use page-retry with the same
 config to explicitly re-arm that original action; it makes no provider request.
 Then restart page. Restart alone never silently clears a rejected request.
-Keep an independent watchdog for the observer/delivery channel itself.
+The watchdog-agent reads only sanitized completed-cycle progress from the monitor
+and pager. The independent watchdog uses its own journal, queue and Telegram
+notification lane; it never depends on the monitored inbox or PagerDuty adapter
+to send its notifications. Progress advances in each role's main loop, not a
+background heartbeat. Dead roles, hangs, stale/backlogged delivery, blocked paging
+and host/agent loss remain visible. Merely starting a replacement does not resolve
+an outage. Place the watchdog outside the monitored host's failure domain.
+No Telegram bot/chat or credentials are created. Use the separate watchdog example
+configs and a separately provisioned notification credential. Lost Telegram
+acknowledgements can produce duplicate messages with the same incident key;
+neither provider acceptance nor this package proves human receipt.
+The watchdog itself still requires external liveness supervision and a live
+channel test; there is no infinite chain of watchdogs installed by this package.
 
 Local tests do not establish real separate-host availability, power-loss safety,
 release signing or independent security review. No public deployment is implied.
@@ -90,6 +103,11 @@ def templates():
         'observer.example.json':dict(format='native-offhost-monitor-v1',deployment=deployment,source=peer('health','health-read'),alerts=peer('alerts','alert-write'),journal='private-observer-journal',interval_seconds=2,expect_running=True),
         'pager.example.json':dict(format='native-human-pager-config-v1',deployment=deployment,inbox='private-alert-inbox',state='private-paging-state',interval_seconds=2,
             provider=dict(endpoint='https://events.pagerduty.com/v2/enqueue',ca_file='provider-ca.crt',ca_sha256='REVIEWED_CA_SHA256',routing_key_file='provider-integration.json')),
+        'watchdog-agent.example.json':dict(format='native-watchdog-agent-v1',deployment=deployment,origin='https://progress.example.invalid',capability_file='watchdog-read.json',
+            certificate_file='progress.crt',key_file='progress.key',targets={role:dict(pulse_file='private-'+('observer-journal' if role=='monitor' else 'paging-state')+'/watchdog.json',owner=501) for role in ('monitor','pager')}),
+        'watchdog.example.json':dict(format='native-independent-watchdog-v1',deployment=deployment,agent=peer('progress','watchdog-read'),
+            provider=dict(origin='https://api.telegram.org',key_file='watchdog-telegram.json',ca_file='telegram-ca.crt',ca_sha256='REVIEWED_CA_SHA256'),
+            primary_integration_sha256='PRIMARY_PAGER_INTEGRATION_SHA256',root='private-watchdog-state',interval_seconds=2,stale_seconds=15,backlog_seconds=60,startup_seconds=60),
     }
 
 
@@ -113,7 +131,7 @@ def checked(path):
  if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0,os.getuid()) or meta.st_mode&0o022:raise ValueError('unsafe monitoring bundle file')
  return path.read_bytes()
 manifest=json.loads(checked(root/'MANIFEST.json'))
-if set(manifest)!={'format','files'} or manifest['format']!='native-monitor-bundle-v2' or set(manifest['files'])!=set(names) or set(p.name for p in root.iterdir())!=set(names)|{'MANIFEST.json'}:raise ValueError('unexpected monitoring inventory')
+if set(manifest)!={'format','files'} or manifest['format']!='native-monitor-bundle-v3' or set(manifest['files'])!=set(names) or set(p.name for p in root.iterdir())!=set(names)|{'MANIFEST.json'}:raise ValueError('unexpected monitoring inventory')
 for name in names:
  raw=checked(root/name)
  if manifest['files'][name]!={'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}:raise ValueError('monitoring bundle changed')
@@ -125,7 +143,7 @@ except Exception:
  print('monitoring_failed; original evidence retained',file=sys.stderr);sys.exit(1)
 '''.replace('NAMES',repr(names))
     payload['run.py']=entry.encode()
-    manifest={'format':'native-monitor-bundle-v2','files':{name:{'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(payload.items())}}
+    manifest={'format':'native-monitor-bundle-v3','files':{name:{'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(payload.items())}}
     payload['MANIFEST.json']=(json.dumps(manifest,sort_keys=True,indent=2)+'\n').encode()
     output.mkdir(mode=0o755)
     for name,raw in payload.items():

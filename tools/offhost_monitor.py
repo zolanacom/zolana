@@ -104,9 +104,9 @@ def binding(config):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('export','receive','watch','check','keygen','page','page-retry'))
+    parser.add_argument('action',choices=('export','receive','watch','check','keygen','page','page-retry','watchdog-agent','watchdog','watchdog-retry'))
     parser.add_argument('--config',type=Path)
-    parser.add_argument('--deployment');parser.add_argument('--role',choices=('health-read','alert-write'))
+    parser.add_argument('--deployment');parser.add_argument('--role',choices=('health-read','alert-write','watchdog-read'))
     parser.add_argument('--output',type=Path)
     parser.add_argument('--duration',type=int,default=60)
     parser.add_argument('--allow-network',action='store_true')
@@ -121,11 +121,14 @@ def main():
         atomic(args.output,{'format':'native-monitor-capability-v1','deployment':args.deployment,'role':args.role,'token':secrets.token_hex(32)},0o600)
         print(json.dumps({'created':True,'role':args.role,'spending_or_rpc_capability':False}));return
     if args.config is None:raise ValueError('monitoring role requires a private config')
+    if not 0<=args.duration<=600 or (args.duration==0 and not args.allow_network):raise ValueError('local rehearsal requires a finite 1–600 second duration')
+    if args.bind!='127.0.0.1' and not args.allow_network:raise ValueError('external bind requires explicit network authorization')
     if args.action in ('page','page-retry'):
         from human_paging import run
         return run(args.config,args.duration,args.allow_network,retry_blocked=args.action=='page-retry')
-    if not 0<=args.duration<=600 or (args.duration==0 and not args.allow_network):raise ValueError('local rehearsal requires a finite 1–600 second duration')
-    if args.bind!='127.0.0.1' and not args.allow_network:raise ValueError('external bind requires explicit network authorization')
+    if args.action.startswith('watchdog'):
+        from watchdog_monitor import run
+        return run(args.action,args.config,args.duration,args.allow_network,args.bind)
     config=load_config(args.config,args.allow_network)
     expected={'export':'native-health-exporter-v1','receive':'native-alert-receiver-v1','watch':'native-offhost-monitor-v1','check':'native-offhost-monitor-v1'}[args.action]
     if config['format']!=expected:raise ValueError('wrong role config')
@@ -136,16 +139,25 @@ def main():
     if args.action in ('watch','check'):
         source,alerts=clients(config,args.allow_network)
         journal=Journal(config['journal'],binding=binding(config))
+        from watchdog_progress import Progress
+        progress=None;failed=True
         try:
+            progress=Progress(journal.root,config['deployment'],'monitor')
             watch=Watch(journal,source,alerts,expect_running=config['expect_running']);last=None
             while not stopping.is_set() and time.monotonic()<deadline:
                 result=watch.sample();watch.deliver()
+                pending=[e for e in journal.state['events'] if not e['delivered']]
+                progress.complete(len(pending),min(e['at'] for e in pending) if pending else None,'delivery_retrying' if watch.delivery=='retrying' else None)
                 status=dict(state=result['state'],code=result['code'],delivery=watch.delivery,
                             pending=sum(not e['delivered'] for e in journal.state['events']))
                 if status!=last:print(json.dumps(status,sort_keys=True),flush=True);last=status
-                if args.action=='check':return
+                if args.action=='check':failed=False;return
                 stopping.wait(config['interval_seconds'])
-        finally:journal.close()
+            failed=False
+        finally:
+            try:
+                if progress is not None:progress.close(failed)
+            finally:journal.close()
     else:
         role='health-read' if args.action=='export' else 'alert-write'
         token=capability(config['capability_file'],config['deployment'],role)

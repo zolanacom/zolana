@@ -21,7 +21,9 @@ CODES = {'monitor_probe_failed', 'heartbeat_missing', 'heartbeat_invalid', 'hear
          'service_paused', 'retention_failed', 'finality_timeout', 'validator_exited',
          'ingress_exited', 'startup_failed', 'cleanup_failed', 'health_unavailable',
          'disk_low', 'test_complete', 'service_failed', 'service_not_ready',
-         'remote_unavailable', 'remote_invalid'}
+         'remote_unavailable', 'remote_invalid', 'watchdog_unavailable','watchdog_invalid',
+         'monitor_missing','monitor_invalid','monitor_stale','monitor_stopped','monitor_startup_stalled','monitor_backlog','monitor_blocked',
+         'pager_missing','pager_invalid','pager_stale','pager_stopped','pager_startup_stalled','pager_backlog','pager_blocked'}
 
 
 def public_event(event):

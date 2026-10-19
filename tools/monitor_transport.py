@@ -111,7 +111,7 @@ class Client:
         self.context.load_verify_locations(cadata=ca.decode('ascii'));self.context.set_alpn_protocols(['http/1.1'])
 
     def request(self,path,payload):
-        if path!=('/v1/health' if self.role=='health-read' else '/v1/alerts'):raise ValueError('monitor capability cannot use this route')
+        if path!={'health-read':'/v1/health','alert-write':'/v1/alerts','watchdog-read':'/v1/watchdog'}.get(self.role):raise ValueError('monitor capability cannot use this route')
         raw=encode(payload)
         if len(raw)>LIMIT:raise ValueError('monitoring payload exceeds bound')
         connection=HTTPSConnection(self.origin.hostname,self.origin.port or 443,timeout=self.timeout,context=self.context)
@@ -275,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
         raw=encode(value);self.send_response(status);self.send_header('Content-Type','application/json')
         self.send_header('Content-Length',str(len(raw)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(raw)
     def do_POST(self):
-        expected='/v1/health' if self.server.role=='health-read' else '/v1/alerts'
+        expected={'health-read':'/v1/health','alert-write':'/v1/alerts','watchdog-read':'/v1/watchdog'}.get(self.server.role)
         if (self.path!=expected or self.headers.get_all('Host')!=[self.server.authority] or
                 len(self.headers.get_all('Authorization',[]))!=1 or
                 not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+self.server.token)):
