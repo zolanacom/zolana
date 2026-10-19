@@ -1,6 +1,7 @@
 """Read-only local health observer with a durable, at-least-once stdout outbox."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,17 @@ CODES = {'monitor_probe_failed', 'heartbeat_missing', 'heartbeat_invalid', 'hear
          'clock_invalid', 'publisher_mismatch', 'startup_stalled', 'finality_stalled',
          'service_paused', 'retention_failed', 'finality_timeout', 'validator_exited',
          'ingress_exited', 'startup_failed', 'cleanup_failed', 'health_unavailable',
-         'disk_low', 'test_complete', 'service_failed', 'service_not_ready'}
+         'disk_low', 'test_complete', 'service_failed', 'service_not_ready',
+         'remote_unavailable', 'remote_invalid'}
+
+
+def public_event(event):
+    if (not isinstance(event,dict) or set(event)!={'id','sequence','kind','code','at'} or
+            type(event['sequence']) is not int or not 0<event['sequence']<2**63 or
+            not isinstance(event['id'],str) or not re.fullmatch('[0-9a-f]{32}:'+str(event['sequence']),event['id']) or
+            event['kind'] not in ('incident','recovered','operator_paused') or event['code'] not in CODES or not timestamp(event['at'])):
+        raise ValueError('invalid public alert event')
+    return event
 
 
 def launch_probe():
@@ -32,7 +43,7 @@ def launch_probe():
 
 
 class Journal:
-    def __init__(self, root):
+    def __init__(self, root, binding=None):
         self.root = Path(root)
         if not self.root.exists(): self.root.mkdir(mode=0o700)
         directory(self.root, os.getuid(), 0o700)
@@ -41,6 +52,7 @@ class Journal:
             self._safe(os.fstat(self.lock_fd))
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             path = self.root/'state.json'; marker = self.root/'initialized'
+            fresh=not os.path.lexists(marker) and not os.path.lexists(path)
             if os.path.lexists(marker):
                 if self._load(marker, 128)!={'format':'native-operator-initialized-v1'}:
                     raise ValueError('invalid monitor initialization marker')
@@ -51,6 +63,11 @@ class Journal:
                 self.state = dict(format='native-operator-journal-v1', journal=secrets.token_hex(16),
                     next_sequence=1, incident=None, events=[], last_wall=None, pid=None, loaded_since=None, ready_pid=None)
                 self.save(); atomic(marker, {'format':'native-operator-initialized-v1'}, 0o600)
+            route=self.root/'route.json'
+            if binding is None:
+                if os.path.lexists(route):raise ValueError('remote-bound journal requires its original route')
+            elif fresh:atomic(route,binding,0o600)
+            elif self._load(route)!=binding:raise ValueError('monitor route changed; preserve pending delivery')
         except BaseException:
             os.close(self.lock_fd); raise
 
@@ -108,19 +125,35 @@ class Journal:
         return event
 
     def deliver(self, stream):
+        if os.path.lexists(self.root/'route.json'):raise ValueError('remote outbox cannot be acknowledged by stdout')
         for event in self.state['events']:
             if not event['delivered']:
                 public={k:v for k,v in event.items() if k!='delivered'}
                 stream.write(json.dumps(public, sort_keys=True)+'\n'); stream.flush()
                 event['delivered']=True; self.save()
 
-    def close(self): os.close(self.lock_fd)
+    def deliver_remote(self, sender):
+        if not os.path.lexists(self.root/'route.json'):raise ValueError('remote delivery needs a bound route')
+        for event in self.state['events']:
+            if not event['delivered']:
+                public=public_event({k:v for k,v in event.items() if k!='delivered'})
+                digest=hashlib.sha256(json.dumps(public,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+                receipt=sender(public)
+                if not isinstance(receipt,dict) or receipt.get('durable') is not True or receipt!={'id':public['id'],'sha256':digest,'durable':True}:
+                    raise ValueError('unverified durable alert receipt')
+                event['delivered']=True;self.save()
+                return True  # One bounded attempt per observation cycle.
+        return False
+
+    def close(self):
+        if self.lock_fd is not None:os.close(self.lock_fd);self.lock_fd=None
 
 
 class Monitor:
-    def __init__(self, journal, heartbeat, owner, probe=launch_probe, grace=30, stale=15, finality=60, startup=180):
+    def __init__(self, journal, heartbeat, owner, probe=launch_probe, grace=30, stale=15, finality=60, startup=180, reader=None):
         self.journal=journal; self.heartbeat=Path(heartbeat); self.owner=owner; self.probe=probe
         self.grace=grace; self.stale=stale; self.finality=finality; self.startup=startup
+        self.reader=reader if reader is not None else lambda:read(self.heartbeat,self.owner)
 
     def sample(self, now=None):
         now=time.time() if now is None else now
@@ -141,7 +174,7 @@ class Monitor:
                     state['loaded_since']=now; state['ready_pid']=None
                 state['pid']=job['pid']
                 grace=state['ready_pid'] is None and now-state['loaded_since'] < self.grace
-                try: data=read(self.heartbeat,self.owner)
+                try: data=self.reader()
                 except FileNotFoundError: data=None; code=None if grace else 'heartbeat_missing'
                 except Exception: data=None; code='heartbeat_invalid'
                 if data is not None:
@@ -155,9 +188,12 @@ class Monitor:
                         elif data['sampled_at'] is None or data['finality_progress_at'] is None or now-data['sampled_at']>self.stale or now-data['finality_progress_at']>self.finality: code='finality_stalled'
                         else: healthy=True; state['ready_pid']=job['pid']
                     elif now-min(data['phase_since'],state['loaded_since'])>self.startup: code='startup_stalled'
+        return self.transition(code,healthy,paused,now)
+
+    def transition(self,code,healthy,paused,now):
         # A process restart alone is never a recovery. Only ready or an explicit
         # unloaded launchd job can resolve an existing incident.
-        incident=state['incident']
+        state=self.journal.state;incident=state['incident']
         if code and (incident is None or incident['code']!=code):
             event=self.journal.event('incident',code,now); state['incident']={'code':code,'id':event['id']}
         elif (healthy or paused) and incident is not None:
