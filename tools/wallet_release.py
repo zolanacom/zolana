@@ -31,6 +31,31 @@ P256=bytes.fromhex('3059301306072a8648ce3d020106082a8648ce3d03010703420004')
 DOMAIN=b'native-wallet-release-signature-v1\x00'
 EXECUTABLES={'bin/native-wallet','start-wallet.command'}
 REQUIRED=EXECUTABLES|{'runtime/wallet_launch.py','runtime/wallet_ui.py','wallet-profile.json','LICENSE','THIRD_PARTY.md','AGAVE-LICENSE','README.txt','assets/index.html','assets/style.css','assets/app.js','DEPENDENCIES.json'}
+BUILD_KINDS=('local-development','path-remapped-development')
+
+
+def generic_paths_absent(raw):
+    prefixes=tuple('/'+part+'/' for part in ('Users','home','private/var/folders','var/folders','private/tmp','tmp'))
+    if any(prefix.encode(codec) in raw for prefix in prefixes for codec in ('utf-8','utf-16-le','utf-16-be')):
+        raise ValueError('artifact contains a personal or temporary path')
+
+
+def build_metadata(value,binary):
+    keys={'format','recipe','binary_sha256','binary_size','source_sha256','cargo_lock_sha256','source_commit','source_dirty','rustc_release','rustc_commit','target','profile','jobs','offline','path_audit','linkage','probes','canonical_prefixes'}
+    if (not isinstance(value,dict) or set(value)!=keys or value['format']!='native-wallet-build-v1' or value['recipe']!='path-remapped-wallet-v1' or
+            any(not hex64(value[k]) for k in ('binary_sha256','source_sha256','cargo_lock_sha256')) or type(value['binary_size']) is not int or value['binary_size']!=len(binary) or value['binary_sha256']!=sha(binary) or
+            not isinstance(value['source_commit'],str) or re.fullmatch('[0-9a-f]{40}',value['source_commit']) is None or type(value['source_dirty']) is not bool or
+            value['rustc_release']!='1.92.0' or not isinstance(value['rustc_commit'],str) or re.fullmatch('[0-9a-f]{40}',value['rustc_commit']) is None or value['target']!='aarch64-apple-darwin' or
+            value['profile']!='wallet-release' or type(value['jobs']) is not int or value['jobs']!=1 or value['offline'] is not True or
+            encode(value['path_audit'])!=encode({'format':'native-path-audit-v1','known_roots_absent':True,'generic_personal_paths_absent':True,'encodings':['utf-8','utf-16-le','utf-16-be']}) or
+            encode(value['probes'])!=encode({'rust_file_macro':True,'rust_panic_location':True,'native_file_macro':True,'probe_binary_paths_clean':True}) or
+            value['canonical_prefixes']!={'home':'/native/home','temporary':'/native/tmp','build':'/native/build','source':'/native/src','cargo':'/native/cargo','toolchain':'/native/toolchain'}):raise ValueError('invalid or mismatched wallet build receipt')
+    item=value['linkage']
+    if (not isinstance(item,dict) or set(item)!={'system_only','libraries','rpaths','debug_segments','uuid_commands','native_signature'} or item['system_only'] is not True or
+            any(type(item[k]) is not int or item[k]!=0 for k in ('rpaths','debug_segments','uuid_commands')) or item['native_signature']!='toolchain-ad-hoc' or
+            not isinstance(item['libraries'],list) or not 1<=len(item['libraries'])<=32 or any(not isinstance(p,str) or len(p)>512 or not p.startswith(('/usr/lib/','/System/Library/Frameworks/')) or '..' in PurePosixPath(p).parts for p in item['libraries'])):raise ValueError('invalid wallet build linkage receipt')
+    generic_paths_absent(binary)
+    return value
 
 
 def encode(value):return (json.dumps(value,sort_keys=True,indent=2,allow_nan=False)+'\n').encode()
@@ -116,7 +141,7 @@ def descriptor(value):
             not sequence(value['sequence']) or any(not hex64(value[k]) for k in ('key_sha256','archive_sha256','manifest_sha256','profile_sha256')) or
             type(value['archive_size']) is not int or not 1<=value['archive_size']<=ARCHIVE_LIMIT or
             value['platform'] not in ('darwin-arm64','darwin-x86_64','linux-aarch64','linux-x86_64') or
-            not isinstance(value['source_commit'],str) or re.fullmatch('[0-9a-f]{40}',value['source_commit']) is None or value['binary_kind']!='local-development'):
+            not isinstance(value['source_commit'],str) or re.fullmatch('[0-9a-f]{40}',value['source_commit']) is None or value['binary_kind'] not in BUILD_KINDS):
         raise ValueError('invalid local release descriptor')
     return value
 
@@ -129,18 +154,22 @@ def safe_name(name):
 
 def inventory(files):
     if 'MANIFEST.json' not in files or not REQUIRED<=set(files):raise ValueError('wallet release missing required files')
-    if any(name not in REQUIRED|{'MANIFEST.json'} and not name.startswith('notices/') for name in files):raise ValueError('file outside wallet release allowlist')
+    if any(name not in REQUIRED|{'MANIFEST.json','BUILD.json'} and not name.startswith('notices/') for name in files):raise ValueError('file outside wallet release allowlist')
     raw=files['MANIFEST.json']
     if len(raw)>1_000_000:raise ValueError('manifest exceeds limit')
     manifest=decode(raw)
     if (not isinstance(manifest,dict) or set(manifest)!={'format','platform','source_commit','source_dirty','binary_kind','files'} or
-            manifest['format']!='native-wallet-bundle-v1' or type(manifest['source_dirty']) is not bool or manifest['binary_kind']!='local-development' or
+            manifest['format']!='native-wallet-bundle-v1' or type(manifest['source_dirty']) is not bool or manifest['binary_kind'] not in BUILD_KINDS or
             not isinstance(manifest['files'],dict) or set(manifest['files'])!=set(files)-{'MANIFEST.json'}):raise ValueError('invalid wallet manifest inventory')
     for name,item in manifest['files'].items():
         if (not safe_name(name) or not isinstance(item,dict) or set(item)!={'size','sha256'} or type(item['size']) is not int or
                 item['size']!=len(files[name]) or item['sha256']!=sha(files[name])):raise ValueError('wallet file digest mismatch')
     profile=decode(files['wallet-profile.json'])
     if not isinstance(profile,dict) or profile.get('format')!='native-wallet-profile-v1':raise ValueError('invalid public wallet profile')
+    if manifest['binary_kind']=='path-remapped-development':
+        if 'BUILD.json' not in files or len(files['BUILD.json'])>16384 or manifest['platform']!='darwin-arm64':raise ValueError('missing or incompatible remapped build receipt')
+        build_metadata(decode(files['BUILD.json']),files['bin/native-wallet'])
+    elif 'BUILD.json' in files:raise ValueError('development build cannot claim a remapped receipt')
     return manifest
 
 

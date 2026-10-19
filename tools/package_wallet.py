@@ -77,8 +77,18 @@ def main():
     parser.add_argument("--faucet", help="explicit test faucet endpoint; uses the selected transport")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=PROJECT / "target/debug/native-wallet")
+    parser.add_argument("--build-receipt", type=Path, help="reviewed path-remapped development build receipt; digest and current native sources must match")
     args = parser.parse_args()
-    if args.binary.resolve() == (PROJECT / "target/debug/native-wallet").resolve():
+    receipt=None
+    if args.build_receipt:
+        from wallet_release import build_metadata,decode,read
+        from wallet_build import sources
+        receipt=read(args.build_receipt,16384)
+        value=build_metadata(decode(receipt),read(args.binary,64*1024*1024))
+        records,source_sha=sources()
+        if value['source_sha256']!=source_sha or value['cargo_lock_sha256']!=records['Cargo.lock']['sha256']:
+            raise ValueError("build receipt does not match current native source inputs")
+    elif args.binary.resolve() == (PROJECT / "target/debug/native-wallet").resolve():
         subprocess.run(["sh", "tools/dev.sh", "build", "--offline", "--locked", "-p", "native-wallet", "--bin", "native-wallet"], cwd=PROJECT, check=True)
     profile = public_profile(json.loads(args.network.read_text()), args.label, args.rpc, args.transport)
     if args.faucet:
@@ -107,12 +117,16 @@ def main():
             raise ValueError("bundle input must be a regular file: " + destination)
         files[destination] = source.read_bytes()
     files["wallet-profile.json"] = encode(profile)
+    if receipt is not None:
+        files["BUILD.json"]=receipt
+        from wallet_build import path_audit
+        for raw in files.values():path_audit(raw,{'checkout':PROJECT.resolve(),'home':Path.home().resolve()})
     files["start-wallet.command"] = b'#!/bin/sh\nset -eu\nexec python3 -B "$(dirname -- "$0")/runtime/wallet_launch.py" "$@"\n'
     modes = {"bin/native-wallet": 0o755, "start-wallet.command": 0o755}
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT, text=True).strip()
     dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=PROJECT))
     files["MANIFEST.json"] = encode({"format": "native-wallet-bundle-v1", "platform": f"{platform.system().lower()}-{platform.machine().lower()}",
-        "source_commit": revision, "source_dirty": dirty, "binary_kind": "local-development",
+        "source_commit": revision, "source_dirty": dirty, "binary_kind": "path-remapped-development" if receipt is not None else "local-development",
         "files": {name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()} for name, data in sorted(files.items())}})
     data = archive(files, modes)
     args.output.parent.mkdir(parents=True, exist_ok=True)

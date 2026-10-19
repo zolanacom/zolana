@@ -32,6 +32,16 @@ opt-level = 2
 [profile.dev.package.native-wallet]
 opt-level = 2
 
+# Separate, bounded release candidate; never replaces local debug artifacts.
+[profile.wallet-release]
+inherits = "release"
+opt-level = 2
+debug = 0
+strip = "symbols"
+incremental = false
+codegen-units = 1
+lto = false
+
 [patch.crates-io]
 # Match the imported validator's concurrency and QUIC fixes.
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }

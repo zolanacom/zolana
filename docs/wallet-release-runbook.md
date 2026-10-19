@@ -1,6 +1,6 @@
 # Authenticated offline wallet releases and recoverable updates
 
-Use this workflow to prepare and rehearse signed standalone wallet downloads locally. No upload, public release, production publisher identity, Apple certificate or hosted network is created. The first implementation accepts only the existing `local-development` build kind. Native path remapping, Apple signing/notarization and production review remain separate release gates.
+Use this workflow to prepare and rehearse signed standalone wallet downloads locally. No upload, public release, production publisher identity, Apple certificate or hosted network is created. It accepts `local-development` and the separately inspected `path-remapped-development` kind. The [path-remapped builder](path-remapped-wallet-runbook.md) prepares the latter with a signed-inventory build receipt. Production release review, Apple signing/notarization and key custody remain separate gates.
 
 The trust bootstrap matters: obtain the reviewed `wallet_release.py` verifier and publisher fingerprint independently of the downloaded wallet. A verifier or public key supplied only alongside a replaced archive can also be replaced. This source tool is standalone, uses Python 3.9+ plus `/usr/bin/openssl`, and does not import another project module. Running the wallet still requires Python 3.10+ and its supported host platform. Retain/review the verifier SHA-256 through a trusted channel. No automated downloader or trust-on-first-use is installed.
 
@@ -9,6 +9,8 @@ The signing algorithm is P-256 ECDSA with SHA-256 via the operating system OpenS
 Keep signing keys outside the download and installation, owned by their operator at 0600. Provision production custody separately. A local rehearsal can generate a new disposable named-curve key in a new private directory; the automated rehearsal does this without displaying it. The signer accepts an existing encrypted PEM key with `--password-file`, an owner-only bounded file. Passwords never appear in command arguments or environment variables. Neither test credentials nor a production private key belong in Git.
 
 Create the existing allowlisted deterministic archive with `tools/package_wallet.py`. Preserve notices and the exact reviewed public profile. The signed descriptor binds both archive bytes and the embedded manifest/profile, platform, channel, sequence and source commit. Changing a label, endpoint, CA or network changes the profile pin; it requires a separately reviewed trust migration rather than an ordinary update. No wallet runtime is executed to verify a downloaded release.
+
+For a remapped candidate, supply both the builder's `native-wallet` and `--build-receipt BUILD.json` when packaging. Receipt/binary/current native-source mismatch fails before the candidate's offline profile parser runs. The updated verifier requires the receipt in the manifest and validates its binary binding and declared inspection policy. Older trusted verifiers refuse this new kind; obtain/review the updated verifier independently before using it. A receipt is not a compiler attestation or independent security review.
 
 Sign into a new output path:
 
