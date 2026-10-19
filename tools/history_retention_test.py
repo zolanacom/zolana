@@ -141,6 +141,9 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'collection_failed'): self.worker.collect()
         self.assertEqual(self.worker.info['phase'], 'blocked'); self.assertFalse(self.worker.healthy())
         self.assertEqual((self.worker.mirror / 'manifest.json').read_bytes(), original)
+        diagnostic=json.loads((self.root/'history-collector-error.json').read_text())
+        self.assertEqual(diagnostic['returncode'],1)
+        self.assertEqual((self.root/'history-collector-error.json').stat().st_mode&0o777,0o600)
 
     def test_pruning_gap_blocks_before_starting_collector(self):
         self.worker.query = lambda method, params: 5

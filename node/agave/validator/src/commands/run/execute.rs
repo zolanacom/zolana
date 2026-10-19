@@ -563,6 +563,7 @@ pub fn execute(
         require_tower: matches.is_present("require_tower"),
         tower_storage,
         halt_at_slot: value_t!(matches, "dev_halt_at_slot", Slot).ok(),
+        native_restart_checkpoint: matches.is_present("native_restart_checkpoint"),
         max_genesis_archive_unpacked_size: MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
         expected_genesis_hash: matches
             .value_of("expected_genesis_hash")
@@ -1015,9 +1016,17 @@ pub fn execute(
     vote_quic_server_config.num_threads = tpu_vote_transaction_receive_threads;
 
     let local_fault_network = node.info.gossip().is_some_and(|a| a.ip().is_loopback())
-        && node.info.tvu(Protocol::UDP).is_some_and(|a| a.ip().is_loopback())
-        && node.info.tpu(Protocol::UDP).is_some_and(|a| a.ip().is_loopback());
-    if let Err(error) = super::local_fault::enable(&ledger_path, &validator_config, local_fault_network) {
+        && node
+            .info
+            .tvu(Protocol::UDP)
+            .is_some_and(|a| a.ip().is_loopback())
+        && node
+            .info
+            .tpu(Protocol::UDP)
+            .is_some_and(|a| a.ip().is_loopback());
+    if let Err(error) =
+        super::local_fault::enable(&ledger_path, &validator_config, local_fault_network)
+    {
         error!("Refusing local fault configuration: {error}");
         exit(1);
     }

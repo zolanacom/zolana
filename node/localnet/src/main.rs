@@ -52,20 +52,9 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-// Slot numbers can skip; an absent range is not an unverified ledger tail.
-// Only one metadata child of the frozen checkpoint is allowed.
-fn restart_child_parent(
-    tip: u64,
-    parent: u64,
-    intermediate: bool,
-    dead: bool,
-    duplicate: bool,
-) -> Result<u64> {
-    if parent >= tip || intermediate || dead || duplicate {
-        return Err("complex/dead/duplicate restart tail; manual ledger repair required".into());
-    }
-    Ok(parent)
-}
+mod tail_diagnostic;
+
+mod restart_tail;
 
 // Primary RocksDB access rejects inspection while a validator owns the ledger.
 // No slots, hashes, or tower lockouts are altered by this inspection.
@@ -85,43 +74,41 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
     )?;
     let blockstore = Blockstore::open(&root.join(name))?;
     let highest_stored_slot = blockstore.highest_slot()?.ok_or("empty restart ledger")?;
-    let mut complete_tail = None;
-    let slot = if blockstore.get_bank_hash(highest_stored_slot).is_some() {
-        highest_stored_slot
-    } else {
-        // A shutdown may leave one partial child after skipped slots. Keep its
-        // shreds: upstream next_leader_slot skips slots with existing shreds.
-        // Never rewind/delete it, and refuse more complex tails or forks.
-        let meta = blockstore
-            .meta(highest_stored_slot)?
-            .ok_or("missing tip metadata")?;
-        let parent = meta.parent_slot.ok_or("restart child has no parent")?;
-        let intermediate = blockstore
-            .slot_meta_iterator(parent.saturating_add(1))?
-            .any(|(slot, _)| slot < highest_stored_slot);
-        let parent = restart_child_parent(
-            highest_stored_slot,
-            parent,
-            intermediate,
-            blockstore.is_dead(highest_stored_slot),
-            blockstore.has_duplicate_shreds_in_slot(highest_stored_slot),
-        )?;
-        if meta.is_full() {
-            if !replay_plan {
-                return Err("restart requires verified replay of a fully received unfrozen child; run the local tail replay helper while both validators are stopped".into());
-            }
-            complete_tail = Some(highest_stored_slot);
+    let (vote_slot, vote_hash) = tower.last_voted_slot_hash().ok_or("empty voting tower")?;
+    if blockstore.get_bank_hash(vote_slot) != Some(vote_hash) {
+        return Err("signed tower vote does not match retained bank hash".into());
+    }
+    let floor = tower.root().max(blockstore.max_root());
+    let mut nodes = std::collections::BTreeMap::new();
+    for (slot, meta) in blockstore.slot_meta_iterator(floor)? {
+        nodes.insert(
+            slot,
+            restart_tail::Meta {
+                parent: meta.parent_slot,
+                full: meta.is_full(),
+                frozen: blockstore.get_bank_hash(slot).is_some(),
+                dead: blockstore.is_dead(slot),
+                duplicate: blockstore.has_duplicate_shreds_in_slot(slot),
+            },
+        );
+        if nodes.len() > 4096 {
+            return Err("unrooted restart inventory exceeds limit".into());
         }
-        parent
-    };
+    }
+    let tail = restart_tail::plan(&nodes, vote_slot, floor)?;
+    let slot = tail.checkpoint;
+    let complete_tail = tail.complete_child;
+    // Unfrozen records stay in place for normal post-barrier verification.
+    // Managed launches MUST use --native-restart-checkpoint, which enforces
+    // this frozen bank before gossip coordination and original tower restore.
+    let _ = replay_plan;
     let bank_hash = blockstore
         .get_bank_hash(slot)
         .ok_or("restart tip has no adjacent frozen checkpoint; refusing rollback")?;
     if blockstore.is_dead(slot) || blockstore.has_duplicate_shreds_in_slot(slot) {
         return Err("restart checkpoint is dead or has duplicate shreds".into());
     }
-    if tower.last_voted_slot().is_none_or(|vote| vote > slot)
-        || tower.root() >= slot
+    if tower.root() >= slot
         || blockstore.max_root() >= slot
     {
         return Err(
@@ -132,8 +119,9 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
     if blockstore.get_bank_hash(vote_slot) != Some(vote_hash) {
         return Err("signed tower vote does not match retained bank hash".into());
     }
-    let mut ancestor = slot;
-    while ancestor > vote_slot {
+    let mut ancestor = slot.max(vote_slot);
+    let lower = slot.min(vote_slot);
+    while ancestor > lower {
         let parent = blockstore
             .meta(ancestor)?
             .and_then(|meta| meta.parent_slot)
@@ -143,12 +131,20 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
         }
         ancestor = parent;
     }
-    if ancestor != vote_slot {
-        return Err("checkpoint is not descended from the signed tower vote".into());
+    if ancestor != lower {
+        return Err("checkpoint and signed tower vote are not on the same branch".into());
     }
     let mut hashes = serde_json::Map::new();
     let mut shreds = serde_json::Map::new();
+    let mut dead_slots = Vec::new();
+    let mut duplicate_slots = Vec::new();
     for (stored_slot, _) in blockstore.slot_meta_iterator(0)? {
+        if blockstore.is_dead(stored_slot) {
+            dead_slots.push(stored_slot);
+        }
+        if blockstore.has_duplicate_shreds_in_slot(stored_slot) {
+            duplicate_slots.push(stored_slot);
+        }
         if let Some(hash) = blockstore.get_bank_hash(stored_slot) {
             hashes.insert(stored_slot.to_string(), json!(hash.to_string()));
         }
@@ -181,8 +177,14 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
             "slot": slot, "bank_hash": bank_hash.to_string(), "tower_root": tower.root(),
             "highest_stored_slot": highest_stored_slot,
             "complete_tail_replay_slot": complete_tail,
+            "retained_partial_slots":tail.partial,"retained_competing_slots":tail.competing,
+            "retained_rejected_slots":tail.rejected,
+            "retained_complete_slots":tail.complete,
+            "startup_replay_checkpoint":slot,
+            "retained_future_tower_vote":(vote_slot>slot).then_some(vote_slot),
             "blockstore_root": blockstore.max_root(),
             "frozen_hashes": hashes, "shred_digests": shreds,
+            "dead_slots":dead_slots,"duplicate_slots":duplicate_slots,
             "last_vote": tower.last_voted_slot(), "identity": identity.pubkey().to_string(),
             "genesis_hash": genesis.hash().to_string(),
             "shred_version": solana_shred_version::compute_shred_version(&genesis.hash(), None)
@@ -999,6 +1001,14 @@ fn main() -> Result<()> {
             true,
         );
     }
+    if command == "diagnose-restart" {
+        let index = args.next().ok_or("expected validator index")?.parse()?;
+        let name = args.next().ok_or("expected ledger name")?;
+        if args.next().is_some() {
+            return Err("unexpected diagnostic argument".into());
+        }
+        return tail_diagnostic::inspect(&root, index, &name);
+    }
     if command == "prepare-recovery" {
         let name = args.next().unwrap_or_else(|| "ledger-recovered".to_owned());
         if !name.starts_with("ledger-recovered")
@@ -1030,24 +1040,5 @@ fn main() -> Result<()> {
         "recovery-check" => recovery_check(&root, &rpc, &peer),
         "replay-check" => replay_check(&root, &rpc, &peer),
         _ => Err("unknown localnet command".into()),
-    }
-}
-
-#[cfg(test)]
-mod restart_tail_tests {
-    use super::*;
-    #[test]
-    fn skipped_slot_child_keeps_parent_and_rejects_complex_or_invalid_tails() {
-        assert_eq!(restart_child_parent(12, 8, false, false, false).unwrap(), 8);
-        assert_eq!(restart_child_parent(9, 8, false, false, false).unwrap(), 8);
-        for (tip, parent, intermediate, dead, duplicate) in [
-            (12, 8, true, false, false),
-            (12, 8, false, true, false),
-            (12, 8, false, false, true),
-            (8, 8, false, false, false),
-            (7, 8, false, false, false),
-        ] {
-            assert!(restart_child_parent(tip, parent, intermediate, dead, duplicate).is_err());
-        }
     }
 }

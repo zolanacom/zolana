@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 
 class RuntimeRetentionTests(unittest.TestCase):
-    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False):
+    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False, tail=False, restart=False):
         events = []
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); root = base / '.data/s20'; root.mkdir(parents=True)
@@ -20,7 +20,9 @@ class RuntimeRetentionTests(unittest.TestCase):
             shutdown.set.side_effect = lambda:setattr(shutdown.is_set, 'return_value', True)
             handlers = {}
             children = [Mock(pid=100), Mock(pid=101)]
-            for child in children: child.poll.return_value = None
+            for child in children: child.poll.return_value = None; child.restart_tip=None
+            if restart:
+                for child in children:child.restart_tip=8
             def stop(_, index): events.append('stop'+str(index)); children[index].poll.return_value = 0
             retention = Mock(); retention.healthy.return_value = failure != 'background'
             def begin():
@@ -37,7 +39,7 @@ class RuntimeRetentionTests(unittest.TestCase):
             def opening(**_): events.append('ingress-open'); return ingress
             namespace = dict(BASE=base, ROOT=root, WALLET=base/'wallet', load=Mock(),
                 start=lambda _, index, **kw: children[index], stop=stop, wait_rpc=Mock(), quiet=Mock(), save=Mock(),
-                rpc=Mock(), prepare=Mock(), print=Mock(),
+                rpc=Mock(), prepare=Mock(), print=Mock(),wait_fresh_finality=Mock(side_effect=lambda *args:events.append('fresh-finality')),
                 os=SimpleNamespace(nice=Mock(),getpid=lambda:1,getpgid=lambda p:p,getuid=lambda:450,getgid=lambda:450),
                 threading=SimpleNamespace(Event=lambda:shutdown), signal=SimpleNamespace(SIGTERM=15,SIGINT=2,signal=lambda number,callback:handlers.update({number:callback})),
                 shutil=SimpleNamespace(disk_usage=lambda _:SimpleNamespace(free=4*1024**3)),
@@ -47,11 +49,11 @@ class RuntimeRetentionTests(unittest.TestCase):
             exec(compile(ast.Module(body=[function],type_ignores=[]),'service_runtime.py','exec'), namespace)
             modules = {'history_retention': SimpleNamespace(Retention=Mock(return_value=retention)),
                        'service_ingress': SimpleNamespace(Ingress=opening),
-                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
+                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-restart-tail-test-v1' if tail else 'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
             with patch.dict('sys.modules', modules):
                 if close_failure:
                     with self.assertRaisesRegex(RuntimeError,'cleanup failed'):namespace['supervise']()
-                else: namespace['supervise'](retention_test=expired_after_start and not archival,archival_test=archival)
+                else: namespace['supervise'](retention_test=expired_after_start and not archival and not tail,archival_test=archival,tail_test=tail)
         return events
 
     def test_verified_initial_mirror_precedes_ingress_and_normal_shutdown_stops_everything(self):
@@ -76,6 +78,24 @@ class RuntimeRetentionTests(unittest.TestCase):
     def test_archival_rehearsal_has_its_own_finite_session_and_cleans_both_validators(self):
         self.assertEqual(self.exercise(archival=True),['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
         self.assertEqual(self.exercise(archival=True,expired_after_start=True),['retention-start','retention-close','stop1','stop0'])
+
+    def test_tail_rehearsal_uses_its_own_deadline_and_stops_both_validators(self):
+        self.assertEqual(self.exercise(tail=True),['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
+        self.assertEqual(self.exercise(tail=True,expired_after_start=True),['retention-start','retention-close','stop1','stop0'])
+
+    def test_restarted_cluster_requires_fresh_finality_before_retention_and_ingress(self):
+        self.assertEqual(self.exercise(tail=True,restart=True),['fresh-finality','retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
+
+    def test_fresh_finality_rejects_stale_or_unconverged_slots_and_obeys_deadline(self):
+        function=next(node for node in ast.parse(Path(__file__).with_name('service_runtime.py').read_text()).body if isinstance(node,ast.FunctionDef) and node.name=='wait_fresh_finality')
+        query=Mock(side_effect=[[3,3],[27,4],[21,25]])
+        clock=SimpleNamespace(monotonic=Mock(side_effect=[0,0,1,2]),time=lambda:100,sleep=Mock())
+        scope={'slots':query,'time':clock}
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'service_runtime.py','exec'),scope)
+        self.assertEqual(scope['wait_fresh_finality'](8,200),[21,25]);self.assertEqual(query.call_count,3)
+        clock.monotonic=Mock(side_effect=[0,0]);query.reset_mock()
+        with self.assertRaisesRegex(RuntimeError,'fresh converged finality'):scope['wait_fresh_finality'](8,99)
+        query.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

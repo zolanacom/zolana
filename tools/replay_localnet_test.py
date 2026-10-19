@@ -25,16 +25,23 @@ class OfflineReplayTests(unittest.TestCase):
                 prepare(Path("unused"))
             launch.assert_not_called()
 
-    def test_multiple_unfrozen_children_require_manual_repair(self):
+    def test_multiple_unfrozen_children_are_retained_without_offline_execution(self):
         with patch("replay_localnet.load", return_value={}), patch("replay_localnet.plan", side_effect=[state(9), state(9)]), patch("replay_localnet.subprocess.Popen") as launch:
-            with self.assertRaisesRegex(RuntimeError, "multiple"):
-                prepare(Path("unused"))
+            result=prepare(Path("unused"));self.assertTrue(result['native_restart_checkpoint_required'])
+            self.assertEqual(result['retained_complete_children'],[9,9])
             launch.assert_not_called()
 
     def test_uncorroborated_child_is_never_executed_automatically(self):
         with patch("replay_localnet.load", return_value={}), patch("replay_localnet.plan", side_effect=[state(), state(9)]), patch("replay_localnet.subprocess.Popen") as launch:
-            with self.assertRaisesRegex(RuntimeError, "no frozen bank hash"):
-                prepare(Path("unused"))
+            result=prepare(Path("unused"));self.assertTrue(result['native_restart_checkpoint_required'])
+            self.assertEqual(result['retained_complete_children'],[9])
+            launch.assert_not_called()
+
+    def test_complete_descendant_chain_requires_native_checkpoint_without_offline_guess(self):
+        descendant={**state(), 'retained_complete_slots':[9,10]}
+        with patch("replay_localnet.load", return_value={}), patch("replay_localnet.plan", side_effect=[descendant,state()]), patch("replay_localnet.subprocess.Popen") as launch:
+            result=prepare(Path('unused'))
+            self.assertEqual(result,{'replayed':False,'retained_complete_children':[9,10],'native_restart_checkpoint_required':True})
             launch.assert_not_called()
 
     def test_plan_authenticates_genesis_and_validator_identity(self):

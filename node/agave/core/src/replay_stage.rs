@@ -269,6 +269,7 @@ pub struct ReplayStageConfig {
     pub leader_schedule_cache: Arc<LeaderScheduleCache>,
     pub block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     pub wait_for_vote_to_start_leader: bool,
+    pub native_restart_checkpoint: bool,
     pub tower_storage: Arc<dyn TowerStorage>,
     // Stops voting until this slot has been reached. Should be used to avoid
     // duplicate voting which can lead to slashing.
@@ -571,6 +572,7 @@ impl ReplayStage {
             leader_schedule_cache,
             block_commitment_cache,
             wait_for_vote_to_start_leader,
+            native_restart_checkpoint,
             tower_storage,
             wait_to_vote_slot,
             replay_forks_threads,
@@ -724,7 +726,7 @@ impl ReplayStage {
 
                 let mut generate_new_bank_forks_time =
                     Measure::start("generate_new_bank_forks_time");
-                Self::generate_new_bank_forks(
+                Self::generate_new_bank_forks_with_restart_guard(
                     &blockstore,
                     &bank_forks,
                     &leader_schedule_cache,
@@ -732,6 +734,7 @@ impl ReplayStage {
                     &slot_status_notifier,
                     &mut progress,
                     &mut replay_timing,
+                    native_restart_checkpoint,
                 );
                 generate_new_bank_forks_time.stop();
 
@@ -4103,6 +4106,7 @@ impl ReplayStage {
         Ok(())
     }
 
+    #[cfg(test)]
     fn generate_new_bank_forks(
         blockstore: &Blockstore,
         bank_forks: &RwLock<BankForks>,
@@ -4111,6 +4115,28 @@ impl ReplayStage {
         slot_status_notifier: &Option<SlotStatusNotifier>,
         progress: &mut ProgressMap,
         replay_timing: &mut ReplayLoopTiming,
+    ) {
+        Self::generate_new_bank_forks_with_restart_guard(
+            blockstore,
+            bank_forks,
+            leader_schedule_cache,
+            rpc_subscriptions,
+            slot_status_notifier,
+            progress,
+            replay_timing,
+            false,
+        )
+    }
+
+    fn generate_new_bank_forks_with_restart_guard(
+        blockstore: &Blockstore,
+        bank_forks: &RwLock<BankForks>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
+        rpc_subscriptions: Option<&RpcSubscriptions>,
+        slot_status_notifier: &Option<SlotStatusNotifier>,
+        progress: &mut ProgressMap,
+        replay_timing: &mut ReplayLoopTiming,
+        native_restart_checkpoint: bool,
     ) {
         // Find the next slot that chains to the old slot
         let mut generate_new_bank_forks_read_lock =
@@ -4147,6 +4173,21 @@ impl ReplayStage {
             for child_slot in children {
                 if forks.get(child_slot).is_some() || new_banks.contains_key(&child_slot) {
                     trace!("child already active or frozen {child_slot}");
+                    continue;
+                }
+                if native_restart_checkpoint
+                    && blockstore.get_bank_hash(child_slot).is_some()
+                    && blockstore
+                        .meta(child_slot)
+                        .expect("Db error")
+                        .is_none_or(|meta| !meta.is_full())
+                {
+                    // A crash can save a frozen hash/vote before the final
+                    // broadcast batch. An incomplete Bank here would falsely
+                    // supply ancestors for that restored stray vote and prevent
+                    // normal tower recovery. Keep all shreds/hash/tower lockouts;
+                    // repair may complete the slot, then normal replay admits it.
+                    trace!("native restart defers incomplete previously frozen slot {child_slot}");
                     continue;
                 }
                 let leader = leader_schedule_cache
@@ -4539,18 +4580,69 @@ pub(crate) mod tests {
 
         // Insert shreds for slot NUM_CONSECUTIVE_LEADER_SLOTS,
         // chaining to slot 1
-        let (shreds, _) = make_slot_entries(
+        let (mut shreds, _) = make_slot_entries(
             NUM_CONSECUTIVE_LEADER_SLOTS, // slot
             1,                            // parent_slot
-            8,                            // num_entries
+            128,                          // num_entries: multiple real data shreds
         );
+        assert!(shreds.len() > 1);
+        let last_shred = shreds.pop().expect("complete test slot");
         blockstore.insert_shreds(shreds, None, false).unwrap();
+        let stored_hash = Hash::new_unique();
+        blockstore.insert_bank_hash(NUM_CONSECUTIVE_LEADER_SLOTS, stored_hash, false);
+        assert!(!blockstore
+            .meta(NUM_CONSECUTIVE_LEADER_SLOTS)
+            .unwrap()
+            .unwrap()
+            .is_full());
         assert!(bank_forks
             .read()
             .unwrap()
             .get(NUM_CONSECUTIVE_LEADER_SLOTS)
             .is_none());
         let mut replay_timing = ReplayLoopTiming::default();
+        ReplayStage::generate_new_bank_forks_with_restart_guard(
+            &blockstore,
+            &bank_forks,
+            &leader_schedule_cache,
+            rpc_subscriptions.as_deref(),
+            &None,
+            &mut progress,
+            &mut replay_timing,
+            true,
+        );
+        assert!(bank_forks
+            .read()
+            .unwrap()
+            .get(NUM_CONSECUTIVE_LEADER_SLOTS)
+            .is_none());
+        assert_eq!(
+            blockstore.get_bank_hash(NUM_CONSECUTIVE_LEADER_SLOTS),
+            Some(stored_hash)
+        );
+        blockstore
+            .insert_shreds(vec![last_shred], None, false)
+            .unwrap();
+        assert!(blockstore
+            .meta(NUM_CONSECUTIVE_LEADER_SLOTS)
+            .unwrap()
+            .unwrap()
+            .is_full());
+        ReplayStage::generate_new_bank_forks_with_restart_guard(
+            &blockstore,
+            &bank_forks,
+            &leader_schedule_cache,
+            rpc_subscriptions.as_deref(),
+            &None,
+            &mut progress,
+            &mut replay_timing,
+            true,
+        );
+        assert!(bank_forks
+            .read()
+            .unwrap()
+            .get(NUM_CONSECUTIVE_LEADER_SLOTS)
+            .is_some());
         ReplayStage::generate_new_bank_forks(
             &blockstore,
             &bank_forks,

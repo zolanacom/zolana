@@ -749,6 +749,13 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("native_restart_checkpoint")
+            .long("native-restart-checkpoint")
+            .requires_all(&["wait_for_supermajority","require_tower","expected_bank_hash","expected_genesis_hash"])
+            .conflicts_with_all(&["dev_halt_at_slot","warp_slot","hard_forks"])
+            .help("Bound startup replay at the frozen, hash-pinned coordinated checkpoint while retaining later fork records; preserve the original tower"),
+    )
+    .arg(
         Arg::with_name("wait_for_supermajority")
             .long("wait-for-supermajority")
             .requires("expected_bank_hash")

@@ -181,6 +181,7 @@ def start(root, index, archive=False, coordinated=False, faults=False, new_sessi
         args += ["--entrypoint", f"127.0.0.1:{18000+shift}"]
     if checkpoint:
         args += ["--wait-for-supermajority", str(checkpoint["slot"]),
+                 "--native-restart-checkpoint",
                  "--expected-bank-hash", checkpoint["bank_hash"],
                  "--expected-shred-version", str(checkpoint["shred_version"])]
         if not index:
@@ -199,6 +200,7 @@ def start(root, index, archive=False, coordinated=False, faults=False, new_sessi
     launched.touch(mode=0o600, exist_ok=True)
     with (root / f"validator-{index}.console.log").open("ab") as output:
         process = subprocess.Popen(args, cwd=PROJECT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=new_session)
+    process.restart_tip = checkpoint['highest_stored_slot'] if checkpoint else None
     (root / f"validator-{index}.pid").write_text(str(process.pid))
     (root / f"validator-{index}.command.json").write_text(json.dumps(args, indent=2))
     transport=f"private Unix socket rpc-{port(index,shift)}.sock" if config.get("raw_rpc_host_isolation") else f"http://127.0.0.1:{port(index,shift)}"

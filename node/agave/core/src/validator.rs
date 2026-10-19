@@ -1,5 +1,7 @@
 //! The `validator` module hosts all the validator microservices.
 
+mod native_restart;
+
 pub use solana_perf::report_target_features;
 use {
     crate::{
@@ -228,6 +230,7 @@ pub struct GeneratorConfig {
 
 pub struct ValidatorConfig {
     pub halt_at_slot: Option<Slot>,
+    pub native_restart_checkpoint: bool,
     pub expected_genesis_hash: Option<Hash>,
     pub expected_bank_hash: Option<Hash>,
     pub expected_shred_version: Option<u16>,
@@ -310,6 +313,7 @@ impl ValidatorConfig {
 
         Self {
             halt_at_slot: None,
+            native_restart_checkpoint: false,
             expected_genesis_hash: None,
             expected_bank_hash: None,
             expected_shred_version: None,
@@ -1546,6 +1550,7 @@ impl Validator {
                 repair_validators: config.repair_validators.clone(),
                 repair_whitelist: config.repair_whitelist.clone(),
                 wait_for_vote_to_start_leader,
+                native_restart_checkpoint: config.native_restart_checkpoint,
                 replay_forks_threads: config.replay_forks_threads,
                 replay_transactions_threads: config.replay_transactions_threads,
                 shred_sigverify_threads: config.tvu_shred_sigverify_threads,
@@ -1952,6 +1957,11 @@ fn post_process_restored_tower(
         if let Some(hard_fork_restart_slot) =
             maybe_cluster_restart_with_hard_fork(config, root_bank.slot())
         {
+            if config.native_restart_checkpoint {
+                return Err(crate::consensus::TowerError::HardFork(
+                    hard_fork_restart_slot,
+                ));
+            }
             // intentionally fail to restore tower; we're supposedly in a new hard fork; past
             // out-of-chain vote state doesn't make sense at all
             // what if --wait-for-supermajority again if the validator restarted?
@@ -2087,8 +2097,28 @@ fn load_blockstore(
 
     let blockstore = Arc::new(blockstore);
     let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
+    let native_limit = native_restart::checkpoint(native_restart::Inputs {
+        enabled: config.native_restart_checkpoint,
+        slot: config.wait_for_supermajority,
+        require_tower: config.require_tower,
+        genesis_pinned: config.expected_genesis_hash.is_some(),
+        hash_pinned: config.expected_bank_hash.is_some(),
+        stored_hash_matches: config.wait_for_supermajority.is_some_and(|slot| {
+            blockstore
+                .get_bank_hash(slot)
+                .is_some_and(|hash| Some(hash) == config.expected_bank_hash)
+        }),
+        root: original_blockstore_root,
+        override_mode: config.halt_at_slot.is_some()
+            || config.warp_slot.is_some()
+            || config
+                .new_hard_forks
+                .as_ref()
+                .is_some_and(|forks| !forks.is_empty()),
+    })?;
     let halt_at_slot = config
         .halt_at_slot
+        .or(native_limit)
         .or_else(|| blockstore.highest_slot().unwrap_or(None));
 
     let process_options = blockstore_processor::ProcessOptions {
@@ -2141,6 +2171,8 @@ fn load_blockstore(
             exit,
         )
         .map_err(|err| err.to_string())?;
+
+    native_restart::check_loaded_root(native_limit, bank_forks.read().unwrap().root())?;
 
     // Before replay starts, set the callbacks in each of the banks in BankForks so that
     // all dropped banks come through the `pruned_banks_receiver` channel. This way all bank
@@ -2624,7 +2656,12 @@ fn wait_for_supermajority(
 
             let bank = bank_forks.read().unwrap().working_bank();
             match wait_for_supermajority_slot.cmp(&bank.slot()) {
-                std::cmp::Ordering::Less => return Ok(false),
+                std::cmp::Ordering::Less => {
+                    if config.native_restart_checkpoint {
+                        return Err(ValidatorError::Other("native restart advanced past its pinned checkpoint before the stake barrier".into()));
+                    }
+                    return Ok(false);
+                }
                 std::cmp::Ordering::Greater => {
                     return Err(ValidatorError::NotEnoughLedgerData(
                         bank.slot(),

@@ -96,7 +96,7 @@ class ConsensusStorageTests(unittest.TestCase):
             (root / "consensus-0").mkdir()
             (root / "consensus-0/tower-fixture.bin").write_bytes(b"signed fixture")
             (root / "network.json").write_text(json.dumps({"fixture_keys_are_public": True, "pool_format": "NPOOL003", "genesis_hash": "genesis"}))
-            state = {"slot": 100, "bank_hash": "checkpoint", "shred_version": 123}
+            state = {"slot": 100, "highest_stored_slot":105, "bank_hash": "checkpoint", "shred_version": 123}
             with patch("localnet.socket.socket"), patch("localnet.subprocess.Popen") as launch, patch("localnet.restart_state", return_value=state):
                 launch.return_value.pid = 123
                 start(root, 0, coordinated=True)
@@ -104,6 +104,8 @@ class ConsensusStorageTests(unittest.TestCase):
                 for flag, value in [("--wait-for-supermajority", "100"), ("--expected-bank-hash", "checkpoint"), ("--expected-shred-version", "123")]:
                     self.assertEqual(args[args.index(flag) + 1], value)
                 self.assertIn("--require-tower", args)
+                self.assertIn("--native-restart-checkpoint", args)
+                self.assertEqual(launch.return_value.restart_tip,105)
                 self.assertNotIn("--no-wait-for-vote-to-start-leader", args)
 
     def test_startup_requires_new_finalization_from_both_peers(self):

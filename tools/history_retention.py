@@ -231,13 +231,17 @@ class Retention:
                 try:
                     while True:
                         try:
-                            stdout, _ = child.communicate(timeout=.25)
+                            stdout, stderr = child.communicate(timeout=.25)
                             break
                         except subprocess.TimeoutExpired:
                             self.resources()
                             if self.stop.is_set() or time.monotonic() > end:
                                 raise ValueError('retention_collection_interrupted')
                     if child.returncode or len(stdout) > 4096:
+                        # Keep bounded operator diagnostics inside the private
+                        # service root; never expose them through the gateway.
+                        atomic(self.root/'history-collector-error.json',json.dumps({'format':'native-history-collector-error-v1',
+                            'returncode':child.returncode,'stderr':stderr[-4096:],'recorded_at':time.time()},sort_keys=True).encode())
                         raise ValueError('retention_collection_failed')
                     result = json.loads(stdout)
                     if not isinstance(result, dict) or result.get('manifest_committed') is not True or not natural(result.get('finalized_slot')) or result['finalized_slot'] < current:

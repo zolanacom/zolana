@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay one received/unfrozen child offline; never delete shreds or reset towers."""
+"""Optionally replay a corroborated child; otherwise retain it for pinned startup."""
 import argparse
 import fcntl
 import json
@@ -30,14 +30,19 @@ def prepare(root):
     before = [plan(root, i) for i in [0, 1]]
     candidates = [i for i in [0, 1] if before[i]["complete_tail_replay_slot"] is not None]
     if not candidates:
+        complete=[slot for state in before for slot in state.get('retained_complete_slots',[])]
+        if complete:return {"replayed":False,"retained_complete_children":complete,"native_restart_checkpoint_required":True}
         return {"replayed": False}
     if len(candidates) != 1:
-        raise RuntimeError("multiple unfrozen tails require explicit ledger repair")
+        return {"replayed":False,"retained_complete_children":[before[i]["complete_tail_replay_slot"] for i in candidates],"native_restart_checkpoint_required":True}
     index = candidates[0]
     slot = before[index]["complete_tail_replay_slot"]
     expected = before[1-index]["frozen_hashes"].get(str(slot))
     if expected is None:
-        raise RuntimeError("peer has no frozen bank hash for this child; refusing uncorroborated replay")
+        # Do not guess its bank hash or discard the full block. The mandatory
+        # native startup cap leaves it intact until normal verified replay
+        # resumes after the original frozen checkpoint/stake barrier.
+        return {"replayed":False,"retained_complete_children":[slot],"native_restart_checkpoint_required":True}
     # Keep the corroborating peer stopped while the selected child owns its
     # own ledger lock. Concurrent normal launches must fail instead of racing it.
     with (ledger(root,1-index) / "ledger.lock").open("a+") as peer_lock:
