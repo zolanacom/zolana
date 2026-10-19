@@ -105,8 +105,20 @@ class ConsensusStorageTests(unittest.TestCase):
                     self.assertEqual(args[args.index(flag) + 1], value)
                 self.assertIn("--require-tower", args)
                 self.assertIn("--native-restart-checkpoint", args)
+                self.assertIn("--native-durable-votes",args)
                 self.assertEqual(launch.return_value.restart_tip,105)
                 self.assertNotIn("--no-wait-for-vote-to-start-leader", args)
+                state.update(genesis_hash='genesis',restart_ancestors={'100':{'bank_hash':'checkpoint'}})
+                shared={'slot':100,'bank_hash':'checkpoint','genesis_hash':'genesis'}
+                start(root,0,coordinated=True,epoch_horizon=shared)
+                args=launch.call_args.args[0]
+                self.assertIn('--native-restart-epoch-horizon',args)
+                self.assertEqual(args[args.index('--native-restart-epoch-anchor-slot')+1],'100')
+                self.assertEqual(args[args.index('--native-restart-epoch-anchor-hash')+1],'checkpoint')
+                launch.reset_mock()
+                with self.assertRaisesRegex(RuntimeError,'peer-corroborated'):
+                    start(root,0,coordinated=True,epoch_horizon={**shared,'bank_hash':'other'})
+                launch.assert_not_called()
 
     def test_startup_requires_new_finalization_from_both_peers(self):
         with patch("localnet.rpc", side_effect=[100, 101, 110, 111]) as query, patch("localnet.time.sleep"):

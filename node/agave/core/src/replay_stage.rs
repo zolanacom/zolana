@@ -29,6 +29,7 @@ use {
             },
         },
         unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes,
+        validator::native_restart::{durable_vote_ready, StoredReplay},
         voting_service::VoteOp,
         window_service::DuplicateSlotReceiver,
     },
@@ -270,6 +271,7 @@ pub struct ReplayStageConfig {
     pub block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
     pub wait_for_vote_to_start_leader: bool,
     pub native_restart_checkpoint: bool,
+    pub native_durable_votes: bool,
     pub tower_storage: Arc<dyn TowerStorage>,
     // Stops voting until this slot has been reached. Should be used to avoid
     // duplicate voting which can lead to slashing.
@@ -573,6 +575,7 @@ impl ReplayStage {
             block_commitment_cache,
             wait_for_vote_to_start_leader,
             native_restart_checkpoint,
+            native_durable_votes,
             tower_storage,
             wait_to_vote_slot,
             replay_forks_threads,
@@ -589,6 +592,21 @@ impl ReplayStage {
             banking_tracer,
             snapshot_controller,
         } = config;
+
+        // Capture before this ReplayStage can start any new producer Bank.
+        // Historical local-leader slots need verified replay after the startup
+        // bound; ordinary live TPU banks must retain their existing fast path.
+        let stored_replay = if native_restart_checkpoint {
+            let root = bank_forks.read().unwrap().root();
+            StoredReplay::capture(
+                blockstore
+                    .slot_meta_iterator(root)
+                    .map_err(|e| e.to_string())?
+                    .map(|(slot, _)| slot),
+            )?
+        } else {
+            StoredReplay::default()
+        };
 
         let ReplaySenders {
             rpc_subscriptions,
@@ -771,6 +789,7 @@ impl ReplayStage {
                     &prioritization_fee_cache,
                     &mut purge_repair_slot_counter,
                     Some(&mut tbft_structs),
+                    &stored_replay,
                 );
                 replay_active_banks_time.stop();
 
@@ -951,6 +970,24 @@ impl ReplayStage {
                     &tbft_structs.heaviest_subtree_fork_choice,
                 );
                 select_vote_and_reset_forks_time.stop();
+
+                let vote_bank = vote_bank.filter(|(bank, _)| {
+                    durable_vote_ready(native_durable_votes, || {
+                        std::iter::once(bank.slot())
+                            .chain(
+                                bank.parents()
+                                    .iter()
+                                    .map(|parent| parent.slot())
+                                    .filter(|slot| *slot > forks_root),
+                            )
+                            .all(|slot| {
+                                blockstore
+                                    .meta(slot)
+                                    .expect("native vote ledger metadata read failed")
+                                    .is_some_and(|meta| meta.is_full())
+                            })
+                    })
+                });
 
                 if vote_bank.is_none() {
                     Self::maybe_refresh_last_vote(
@@ -2874,6 +2911,7 @@ impl ReplayStage {
         log_messages_bytes_limit: Option<usize>,
         active_bank_slots: &[Slot],
         prioritization_fee_cache: &PrioritizationFeeCache,
+        stored_replay: &StoredReplay,
     ) -> Vec<ReplaySlotFromBlockstore> {
         // Make mutable shared structures thread safe.
         let progress = RwLock::new(progress);
@@ -2941,7 +2979,14 @@ impl ReplayStage {
                     let replay_progress = bank_progress.replay_progress.clone();
                     drop(progress_lock);
 
-                    if bank.collector_id() != my_pubkey {
+                    if bank.collector_id() != my_pubkey
+                        || stored_replay.admits(bank.slot(), || {
+                            blockstore
+                                .meta(bank.slot())
+                                .expect("Db error")
+                                .is_some_and(|meta| meta.is_full())
+                        })
+                    {
                         let mut replay_blockstore_time =
                             Measure::start("replay_blockstore_into_bank");
                         let blockstore_result = Self::replay_blockstore_into_bank(
@@ -2989,6 +3034,7 @@ impl ReplayStage {
         log_messages_bytes_limit: Option<usize>,
         bank_slot: Slot,
         prioritization_fee_cache: &PrioritizationFeeCache,
+        stored_replay: &StoredReplay,
     ) -> ReplaySlotFromBlockstore {
         let mut replay_result = ReplaySlotFromBlockstore {
             is_slot_dead: false,
@@ -3031,7 +3077,14 @@ impl ReplayStage {
                 )
             });
 
-            if bank.collector_id() != my_pubkey {
+            if bank.collector_id() != my_pubkey
+                || stored_replay.admits(bank.slot(), || {
+                    blockstore
+                        .meta(bank.slot())
+                        .expect("Db error")
+                        .is_some_and(|meta| meta.is_full())
+                })
+            {
                 let mut replay_blockstore_time = Measure::start("replay_blockstore_into_bank");
                 let blockstore_result = Self::replay_blockstore_into_bank(
                     &bank,
@@ -3157,6 +3210,17 @@ impl ReplayStage {
                     }
                 }
 
+                // A previously frozen local-leader block loaded after the
+                // native startup bound is replayed from disk. Its stored hash
+                // must survive verification. Retain leader classification:
+                // original broadcast shreds need no retransmitter signature.
+                let replayed_local_leader =
+                    bank.collector_id() == my_pubkey && replay_result.replay_result.is_some();
+                let stored_leader_hash = if replayed_local_leader {
+                    blockstore.get_bank_hash(bank.slot())
+                } else {
+                    None
+                };
                 let is_leader_block = bank.collector_id() == my_pubkey;
                 let block_id = if !is_leader_block {
                     // If the block does not have at least DATA_SHREDS_PER_FEC_BLOCK correctly retransmitted
@@ -3192,6 +3256,14 @@ impl ReplayStage {
                 // Freeze the bank before sending to any auxiliary threads
                 // that may expect to be operating on a frozen bank
                 bank.freeze();
+                if let Some(expected) = stored_leader_hash {
+                    assert_eq!(
+                        bank.hash(),
+                        expected,
+                        "native restart stored leader bank hash mismatch at slot {}",
+                        bank.slot()
+                    );
+                }
                 datapoint_info!(
                     "bank_frozen",
                     ("slot", bank_slot, i64),
@@ -3383,6 +3455,7 @@ impl ReplayStage {
         prioritization_fee_cache: &PrioritizationFeeCache,
         purge_repair_slot_counter: &mut PurgeRepairSlotCounter,
         tbft_structs: Option<&mut TowerBFTStructures>,
+        stored_replay: &StoredReplay,
     ) -> bool /* completed a bank */ {
         let active_bank_slots = bank_forks.read().unwrap().active_bank_slots();
         let num_active_banks = active_bank_slots.len();
@@ -3410,6 +3483,7 @@ impl ReplayStage {
                     log_messages_bytes_limit,
                     &active_bank_slots,
                     prioritization_fee_cache,
+                    stored_replay,
                 )
             }
             ForkReplayMode::Serial | ForkReplayMode::Parallel(_) => active_bank_slots
@@ -3430,6 +3504,7 @@ impl ReplayStage {
                         log_messages_bytes_limit,
                         *bank_slot,
                         prioritization_fee_cache,
+                        stored_replay,
                     )
                 })
                 .collect(),

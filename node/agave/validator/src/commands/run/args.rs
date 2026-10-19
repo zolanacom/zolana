@@ -755,6 +755,15 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .conflicts_with_all(&["dev_halt_at_slot","warp_slot","hard_forks"])
             .help("Bound startup replay at the frozen, hash-pinned coordinated checkpoint while retaining later fork records; preserve the original tower"),
     )
+    .arg(Arg::with_name("native_durable_votes").long("native-durable-votes").help("Wait for complete local block data and unrooted ancestry before recording a native-chain vote"))
+    .arg(
+        Arg::with_name("native_restart_epoch_horizon")
+            .long("native-restart-epoch-horizon")
+            .requires_all(&["native_restart_checkpoint","native_restart_epoch_anchor_slot","native_restart_epoch_anchor_hash"])
+            .help("Open at most one additional leader-schedule epoch from the hash-pinned restart Bank; never advance ledger roots or reset the tower"),
+    )
+    .arg(Arg::with_name("native_restart_epoch_anchor_slot").long("native-restart-epoch-anchor-slot").takes_value(true).validator(is_slot).requires("native_restart_epoch_horizon"))
+    .arg(Arg::with_name("native_restart_epoch_anchor_hash").long("native-restart-epoch-anchor-hash").takes_value(true).validator(hash_validator).requires("native_restart_epoch_horizon"))
     .arg(
         Arg::with_name("wait_for_supermajority")
             .long("wait-for-supermajority")

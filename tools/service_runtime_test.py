@@ -39,7 +39,7 @@ class RuntimeRetentionTests(unittest.TestCase):
             def opening(**_): events.append('ingress-open'); return ingress
             namespace = dict(BASE=base, ROOT=root, WALLET=base/'wallet', load=Mock(),
                 start=lambda _, index, **kw: children[index], stop=stop, wait_rpc=Mock(), quiet=Mock(), save=Mock(),
-                rpc=Mock(), prepare=Mock(), print=Mock(),wait_fresh_finality=Mock(side_effect=lambda *args:events.append('fresh-finality')),
+                rpc=Mock(), prepare=Mock(return_value={'replayed':False}), print=Mock(),enable_replay_diagnostics=Mock(),wait_fresh_finality=Mock(side_effect=lambda *args:events.append('fresh-finality')),
                 os=SimpleNamespace(nice=Mock(),getpid=lambda:1,getpgid=lambda p:p,getuid=lambda:450,getgid=lambda:450),
                 threading=SimpleNamespace(Event=lambda:shutdown), signal=SimpleNamespace(SIGTERM=15,SIGINT=2,signal=lambda number,callback:handlers.update({number:callback})),
                 shutil=SimpleNamespace(disk_usage=lambda _:SimpleNamespace(free=4*1024**3)),

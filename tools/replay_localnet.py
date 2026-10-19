@@ -24,25 +24,52 @@ def plan(root, index):
     return state
 
 
+def shared_checkpoint(config,states):
+    if config.get('key_mode')!='local-testnet-rehearsal-v1' or len(states)!=2:return None
+    identities=config.get('identities',[])
+    if len(identities)!=2 or any(s.get('identity')!=identities[i] or s.get('genesis_hash')!=config.get('genesis_hash') for i,s in enumerate(states)):return None
+    for state in states:
+        if type(state.get('slot')) is not int or state['slot']<=0 or not isinstance(state.get('bank_hash'),str):return None
+        if state.get('restart_ancestors',{}).get(str(state['slot']),{}).get('bank_hash')!=state['bank_hash']:return None
+        if type(state.get('root_epoch')) is not int or type(state.get('root_leader_schedule_epoch')) is not int:return None
+    first,second=states;common=set(first['restart_ancestors'])&set(second['restart_ancestors'])
+    for key in sorted(common,key=int,reverse=True):
+        a,b=first['restart_ancestors'][key],second['restart_ancestors'][key];slot=int(key)
+        if (slot>min(s['slot'] for s in states) or a!=b or not isinstance(a.get('bank_hash'),str)
+            or type(a.get('epoch')) is not int or type(a.get('leader_schedule_epoch')) is not int):continue
+        if a['epoch']>min(s['root_epoch']+1 for s in states) or a['leader_schedule_epoch']>min(s['root_leader_schedule_epoch']+1 for s in states):continue
+        return {'slot':slot,'bank_hash':a['bank_hash'],'genesis_hash':config['genesis_hash']}
+    return None
+
+
 def prepare(root):
     """Both PRIMARY blockstore inspections must succeed before any replay starts."""
     config = load(root)
     before = [plan(root, i) for i in [0, 1]]
+    def result(value):
+        checkpoint=shared_checkpoint(config,before)
+        if checkpoint:value['native_epoch_horizon_checkpoint']=checkpoint
+        return value
     candidates = [i for i in [0, 1] if before[i]["complete_tail_replay_slot"] is not None]
     if not candidates:
         complete=[slot for state in before for slot in state.get('retained_complete_slots',[])]
-        if complete:return {"replayed":False,"retained_complete_children":complete,"native_restart_checkpoint_required":True}
-        return {"replayed": False}
+        if complete:return result({"replayed":False,"retained_complete_children":complete,"native_restart_checkpoint_required":True})
+        return result({"replayed": False})
     if len(candidates) != 1:
-        return {"replayed":False,"retained_complete_children":[before[i]["complete_tail_replay_slot"] for i in candidates],"native_restart_checkpoint_required":True}
+        return result({"replayed":False,"retained_complete_children":[before[i]["complete_tail_replay_slot"] for i in candidates],"native_restart_checkpoint_required":True})
     index = candidates[0]
     slot = before[index]["complete_tail_replay_slot"]
     expected = before[1-index]["frozen_hashes"].get(str(slot))
+    if (before[index].get('complete_tail_replay_epoch') is not None and
+        before[index]['complete_tail_replay_epoch']>min(s.get('root_leader_schedule_epoch',2**64-1) for s in before)):
+        # Startup verifies this full child using the shared, pinned ancestor's
+        # epoch stakes; never guess a future schedule in an inspection halt.
+        return result({'replayed':False,'retained_complete_children':[slot],'native_restart_checkpoint_required':True})
     if expected is None:
         # Do not guess its bank hash or discard the full block. The mandatory
         # native startup cap leaves it intact until normal verified replay
         # resumes after the original frozen checkpoint/stake barrier.
-        return {"replayed":False,"retained_complete_children":[slot],"native_restart_checkpoint_required":True}
+        return result({"replayed":False,"retained_complete_children":[slot],"native_restart_checkpoint_required":True})
     # Keep the corroborating peer stopped while the selected child owns its
     # own ledger lock. Concurrent normal launches must fail instead of racing it.
     with (ledger(root,1-index) / "ledger.lock").open("a+") as peer_lock:
@@ -111,6 +138,8 @@ def _replay(root,config,before,index,slot,expected):
     result = {"replayed": True, "validator": index, "slot": slot, "bank_hash": expected,
               "retained_shreds_and_frozen_hashes_unchanged": True, "signed_towers_unchanged": True, "sponsor_reservations_unchanged": True,
               "inspection_rpc_never_used_for_payments": True}
+    checkpoint=shared_checkpoint(config,after)
+    if checkpoint:result['native_epoch_horizon_checkpoint']=checkpoint
     private_new(directory / "after.json", json.dumps(after).encode())
     private_new(directory / "result.json", json.dumps(result).encode())
     print(json.dumps(result), flush=True)

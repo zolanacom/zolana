@@ -836,6 +836,7 @@ pub struct ProcessOptions {
     pub run_verification: bool,
     pub full_leader_cache: bool,
     pub halt_at_slot: Option<Slot>,
+    pub native_restart_schedule_anchor: Option<(Slot, Hash, u64)>,
     pub slot_callback: Option<ProcessSlotCallback>,
     pub new_hard_forks: Option<Vec<Slot>>,
     pub debug_keys: Option<Arc<HashSet<Pubkey>>>,
@@ -1781,6 +1782,18 @@ fn process_next_slots(
     pending_slots: &mut Vec<(SlotMeta, Bank, Hash)>,
     opts: &ProcessOptions,
 ) -> result::Result<(), BlockstoreProcessorError> {
+    if let Some((slot, hash, root_epoch)) = opts.native_restart_schedule_anchor {
+        if bank.slot() == slot {
+            assert_eq!(
+                bank.hash(),
+                hash,
+                "native restart schedule anchor hash mismatch"
+            );
+            leader_schedule_cache
+                .enable_native_restart_horizon(bank, root_epoch)
+                .expect("native restart schedule anchor policy rejected");
+        }
+    }
     if meta.next_slots.is_empty() {
         return Ok(());
     }

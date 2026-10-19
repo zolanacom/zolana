@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from replay_localnet import plan, prepare
+from replay_localnet import plan, prepare, shared_checkpoint
 
 
 def state(tail=None, frozen=None):
@@ -14,6 +14,25 @@ def state(tail=None, frozen=None):
 
 
 class OfflineReplayTests(unittest.TestCase):
+    def test_epoch_horizon_requires_same_frozen_checkpoint_from_both_original_identities(self):
+        config={'key_mode':'local-testnet-rehearsal-v1','genesis_hash':'genesis','identities':['a','b']}
+        descriptor={'bank_hash':'same','epoch':49,'leader_schedule_epoch':50}
+        first={'slot':6399,'bank_hash':'same','genesis_hash':'genesis','identity':'a','root_epoch':48,'root_leader_schedule_epoch':49,'restart_ancestors':{'6399':descriptor}}
+        second={**first,'identity':'b'}
+        self.assertEqual(shared_checkpoint(config,[first,second]),{'slot':6399,'bank_hash':'same','genesis_hash':'genesis'})
+        for change in [{'slot':6398},{'bank_hash':'other'},{'identity':'a'},{'genesis_hash':'other'}]:
+            self.assertIsNone(shared_checkpoint(config,[first,{**second,**change}]))
+        self.assertIsNone(shared_checkpoint({**config,'key_mode':'fixture'},[first,second]))
+
+    def test_epoch_anchor_survives_an_early_future_epoch_crash_with_different_tips(self):
+        config={'key_mode':'local-testnet-rehearsal-v1','genesis_hash':'genesis','identities':['a','b']}
+        anchor={'bank_hash':'ancestor','epoch':49,'leader_schedule_epoch':50}
+        first={'slot':6400,'bank_hash':'new','genesis_hash':'genesis','identity':'a','root_epoch':48,'root_leader_schedule_epoch':49,
+            'restart_ancestors':{'6400':{'bank_hash':'new','epoch':50,'leader_schedule_epoch':51},'6321':anchor}}
+        second={**first,'slot':6399,'bank_hash':'old','identity':'b','restart_ancestors':{'6399':{'bank_hash':'old','epoch':49,'leader_schedule_epoch':50},'6321':anchor}}
+        self.assertEqual(shared_checkpoint(config,[first,second]),{'slot':6321,'bank_hash':'ancestor','genesis_hash':'genesis'})
+        changed={**second,'restart_ancestors':{**second['restart_ancestors'],'6321':{**anchor,'bank_hash':'other'}}}
+        self.assertIsNone(shared_checkpoint(config,[first,changed]))
     def test_no_replay_is_started_when_both_tips_are_frozen(self):
         with patch("replay_localnet.load", return_value={}), patch("replay_localnet.plan", side_effect=[state(), state()]), patch("replay_localnet.subprocess.Popen") as launch:
             self.assertEqual(prepare(Path("unused")), {"replayed": False})

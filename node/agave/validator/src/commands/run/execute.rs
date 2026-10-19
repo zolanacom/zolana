@@ -564,6 +564,15 @@ pub fn execute(
         tower_storage,
         halt_at_slot: value_t!(matches, "dev_halt_at_slot", Slot).ok(),
         native_restart_checkpoint: matches.is_present("native_restart_checkpoint"),
+        native_durable_votes: matches.is_present("native_durable_votes"),
+        native_restart_epoch_horizon: if matches.is_present("native_restart_epoch_horizon") {
+            Some((
+                value_t_or_exit!(matches, "native_restart_epoch_anchor_slot", Slot),
+                value_t_or_exit!(matches, "native_restart_epoch_anchor_hash", Hash),
+            ))
+        } else {
+            None
+        },
         max_genesis_archive_unpacked_size: MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
         expected_genesis_hash: matches
             .value_of("expected_genesis_hash")

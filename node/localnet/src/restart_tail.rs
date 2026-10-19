@@ -68,10 +68,6 @@ pub fn plan(nodes: &BTreeMap<u64, Meta>, vote: u64, floor: u64) -> Result<Plan, 
                 }
                 checkpoint = Some(slot);
             }
-        } else if node.frozen && !voted_path.contains(&slot) {
-            if !node.full {
-                return Err("frozen restart bank has incomplete metadata".into());
-            }
         }
     }
     let checkpoint = checkpoint.ok_or("signed vote has no complete frozen restart ancestor")?;
@@ -243,5 +239,17 @@ mod tests {
         assert!(result.competing.contains(&6180));
         nodes.get_mut(&6174).unwrap().dead = true;
         assert!(plan(&nodes, 6174, 6122).is_err());
+    }
+
+    #[test]
+    fn an_old_cached_partial_hash_is_retained_after_voting_moves_to_another_branch() {
+        let mut nodes = original();
+        nodes.get_mut(&6174).unwrap().full = false;
+        nodes.insert(6180, meta(6173, true, true));
+        let before = format!("{nodes:?}");
+        let result = plan(&nodes, 6180, 6122).unwrap();
+        assert_eq!(result.checkpoint, 6180);
+        assert!(result.competing.contains(&6174));
+        assert_eq!(format!("{nodes:?}"), before);
     }
 }

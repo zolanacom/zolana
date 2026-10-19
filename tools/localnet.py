@@ -116,7 +116,7 @@ def restart_state(root, index):
     return state
 
 
-def start(root, index, archive=False, coordinated=False, faults=False, new_session=True):
+def start(root, index, archive=False, coordinated=False, faults=False, new_session=True, epoch_horizon=None):
     config = load(root)
     shift=offset(config)
     private = config.get("key_mode") == "local-testnet-rehearsal-v1"
@@ -150,7 +150,13 @@ def start(root, index, archive=False, coordinated=False, faults=False, new_sessi
             raise RuntimeError("snapshot ledger requires a saved tower")
         subprocess.run([str(LAB), "bootstrap-check", str(root), path.name], check=True, capture_output=True, timeout=30)
     checkpoint = restart_state(root, index) if coordinated and has_tower else None
+    if epoch_horizon is not None:
+        if (not checkpoint or type(epoch_horizon) is not dict or set(epoch_horizon)!={'slot','bank_hash','genesis_hash'}
+            or checkpoint.get('genesis_hash')!=epoch_horizon['genesis_hash']
+            or checkpoint.get('restart_ancestors',{}).get(str(epoch_horizon['slot']),{}).get('bank_hash')!=epoch_horizon['bank_hash']):
+            raise RuntimeError('native epoch horizon requires the same peer-corroborated frozen checkpoint')
     args = [str(VALIDATOR), "--ledger", str(path),
+        "--native-durable-votes",
         "--identity", str(root / f"identity-{index}.keypair.json"),
         "--tower", str(tower),
         "--vote-account", config["vote_accounts"][index] if private else str(root / f"vote-{index}.keypair.json"),
@@ -184,6 +190,8 @@ def start(root, index, archive=False, coordinated=False, faults=False, new_sessi
                  "--native-restart-checkpoint",
                  "--expected-bank-hash", checkpoint["bank_hash"],
                  "--expected-shred-version", str(checkpoint["shred_version"])]
+        if epoch_horizon is not None:args += ['--native-restart-epoch-horizon','--native-restart-epoch-anchor-slot',str(epoch_horizon['slot']),
+            '--native-restart-epoch-anchor-hash',epoch_horizon['bank_hash']]
         if not index:
             args += ["--entrypoint", f"127.0.0.1:{19000+shift}"]
         # Retain the signed inputs for review. Never copy, delete or reset a tower.

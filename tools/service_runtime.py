@@ -102,6 +102,13 @@ def wait_fresh_finality(after, test_deadline=None):
     raise RuntimeError('preserved restart did not reach fresh converged finality')
 
 
+def enable_replay_diagnostics():
+    from localnet import ledger
+    for i in [0,1]:
+        subprocess.run([str(VALIDATOR),'--ledger',str(ledger(ROOT,i)),'set-log-filter',
+            'warn,solana_core::replay_stage=info,solana_core::consensus=info'],capture_output=True,check=True,timeout=10)
+
+
 def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False):
     if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test:os.nice(10)
     load(ROOT)
@@ -149,9 +156,11 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
             print('Service kept paused: less than 1.5 GiB free; private state retained.',flush=True)
             while not shutdown.wait(5):pass
             return
-        if any((ROOT/f'consensus-{i}').exists() for i in [0,1]):prepare(ROOT)
-        for i in [0,1]:children[i]=start(ROOT,i,coordinated=True,new_session=False);wait_rpc(ROOT,i)
+        epoch_horizon=None
+        if any((ROOT/f'consensus-{i}').exists() for i in [0,1]):epoch_horizon=prepare(ROOT).get('native_epoch_horizon_checkpoint')
+        for i in [0,1]:children[i]=start(ROOT,i,coordinated=True,new_session=False,epoch_horizon=epoch_horizon);wait_rpc(ROOT,i)
         quiet(ROOT)
+        if tail_test:enable_replay_diagnostics()
         save(ROOT/'service-instance.json',{'supervisor':os.getpid(),'validators':[p.pid for p in children],'started_at':time.time(),'uid':os.getuid(),'gid':os.getgid(),'process_groups':[os.getpgid(p.pid) for p in children]})
         tips=[p.restart_tip for p in children if p.restart_tip is not None]
         if tips:

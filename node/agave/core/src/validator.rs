@@ -1,6 +1,6 @@
 //! The `validator` module hosts all the validator microservices.
 
-mod native_restart;
+pub(crate) mod native_restart;
 
 pub use solana_perf::report_target_features;
 use {
@@ -231,6 +231,8 @@ pub struct GeneratorConfig {
 pub struct ValidatorConfig {
     pub halt_at_slot: Option<Slot>,
     pub native_restart_checkpoint: bool,
+    pub native_restart_epoch_horizon: Option<(Slot, Hash)>,
+    pub native_durable_votes: bool,
     pub expected_genesis_hash: Option<Hash>,
     pub expected_bank_hash: Option<Hash>,
     pub expected_shred_version: Option<u16>,
@@ -314,6 +316,8 @@ impl ValidatorConfig {
         Self {
             halt_at_slot: None,
             native_restart_checkpoint: false,
+            native_restart_epoch_horizon: None,
+            native_durable_votes: false,
             expected_genesis_hash: None,
             expected_bank_hash: None,
             expected_shred_version: None,
@@ -1335,6 +1339,25 @@ impl Validator {
             rpc_override_health_check,
             &start_progress,
         )?;
+        if let Some((anchor_slot, anchor_hash)) = config.native_restart_epoch_horizon {
+            let forks = bank_forks.read().unwrap();
+            if let Some(bank) = forks.get(anchor_slot) {
+                if bank.hash() != anchor_hash {
+                    return Err(ValidatorError::Other(
+                        "native schedule anchor hash mismatch".into(),
+                    )
+                    .into());
+                }
+                leader_schedule_cache
+                    .enable_native_restart_horizon(&bank, forks.root_bank().epoch())
+                    .map_err(ValidatorError::Other)?;
+            } else if anchor_slot > forks.root() {
+                return Err(ValidatorError::Other(
+                    "native schedule anchor was not replayed".into(),
+                )
+                .into());
+            }
+        }
 
         let blockstore_metric_report_service =
             BlockstoreMetricReportService::new(blockstore.clone(), exit.clone());
@@ -1551,6 +1574,7 @@ impl Validator {
                 repair_whitelist: config.repair_whitelist.clone(),
                 wait_for_vote_to_start_leader,
                 native_restart_checkpoint: config.native_restart_checkpoint,
+                native_durable_votes: config.native_durable_votes,
                 replay_forks_threads: config.replay_forks_threads,
                 replay_transactions_threads: config.replay_transactions_threads,
                 shred_sigverify_threads: config.tvu_shred_sigverify_threads,
@@ -2097,6 +2121,9 @@ fn load_blockstore(
 
     let blockstore = Arc::new(blockstore);
     let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
+    if config.native_restart_epoch_horizon.is_some() && !config.native_restart_checkpoint {
+        return Err("native restart epoch horizon requires the pinned native checkpoint".into());
+    }
     let native_limit = native_restart::checkpoint(native_restart::Inputs {
         enabled: config.native_restart_checkpoint,
         slot: config.wait_for_supermajority,
@@ -2116,6 +2143,33 @@ fn load_blockstore(
                 .as_ref()
                 .is_some_and(|forks| !forks.is_empty()),
     })?;
+    if let Some((anchor_slot, anchor_hash)) = config.native_restart_epoch_horizon {
+        if blockstore.get_bank_hash(anchor_slot) != Some(anchor_hash)
+            || !blockstore
+                .meta(anchor_slot)
+                .map_err(|e| e.to_string())?
+                .is_some_and(|meta| meta.is_full())
+        {
+            return Err("native schedule anchor must be a retained complete frozen Bank".into());
+        }
+        let mut ancestor = native_limit.ok_or("native schedule anchor needs checkpoint")?;
+        let mut count = 0;
+        while ancestor > anchor_slot && count < 4096 {
+            let parent = blockstore
+                .meta(ancestor)
+                .map_err(|e| e.to_string())?
+                .and_then(|meta| meta.parent_slot)
+                .ok_or("native schedule anchor ancestry missing")?;
+            if parent >= ancestor {
+                return Err("invalid native schedule ancestry".into());
+            }
+            ancestor = parent;
+            count += 1;
+        }
+        if ancestor != anchor_slot {
+            return Err("native schedule anchor is not on checkpoint ancestry".into());
+        }
+    }
     let halt_at_slot = config
         .halt_at_slot
         .or(native_limit)
@@ -2124,6 +2178,15 @@ fn load_blockstore(
     let process_options = blockstore_processor::ProcessOptions {
         run_verification: config.run_verification,
         halt_at_slot,
+        native_restart_schedule_anchor: config.native_restart_epoch_horizon.map(|(slot, hash)| {
+            (
+                slot,
+                hash,
+                genesis_config
+                    .epoch_schedule
+                    .get_epoch(original_blockstore_root),
+            )
+        }),
         new_hard_forks: config.new_hard_forks.clone(),
         debug_keys: config.debug_keys.clone(),
         accounts_db_config: config.accounts_db_config.clone(),

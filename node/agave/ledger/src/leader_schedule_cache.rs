@@ -16,6 +16,9 @@ use {
     },
 };
 
+#[path = "native_restart_schedule.rs"]
+mod native_restart_schedule;
+
 type CachedSchedules = (HashMap<Epoch, Arc<LeaderSchedule>>, VecDeque<u64>);
 const MAX_SCHEDULES: usize = 10;
 
@@ -32,6 +35,7 @@ pub struct LeaderScheduleCache {
     pub cached_schedules: RwLock<CachedSchedules>,
     epoch_schedule: EpochSchedule,
     max_epoch: RwLock<Epoch>,
+    native_restart_horizon: RwLock<Option<Epoch>>,
     max_schedules: CacheCapacity,
     fixed_schedule: Option<Arc<FixedSchedule>>,
 }
@@ -46,6 +50,7 @@ impl LeaderScheduleCache {
             cached_schedules: RwLock::new((HashMap::new(), VecDeque::new())),
             epoch_schedule,
             max_epoch: RwLock::new(0),
+            native_restart_horizon: RwLock::new(None),
             max_schedules: CacheCapacity::default(),
             fixed_schedule: None,
         };
@@ -86,10 +91,65 @@ impl LeaderScheduleCache {
             old_max_epoch
         };
 
+        let horizon = *self.native_restart_horizon.read().unwrap();
+        if let Some(epoch) = horizon.filter(|epoch| new_max_epoch >= *epoch) {
+            let pinned = self
+                .get_epoch_leader_schedule(epoch)
+                .expect("native restart schedule missing");
+            let rooted = leader_schedule_utils::leader_schedule(epoch, root_bank)
+                .expect("rooted restart schedule unavailable");
+            assert!(
+                (0..self.epoch_schedule.get_slots_in_epoch(epoch)).all(|i| pinned[i] == rooted[i]),
+                "rooted leader schedule differs from pinned native restart schedule"
+            );
+            *self.native_restart_horizon.write().unwrap() = None;
+        }
+
         // Calculate the epoch as soon as it's rooted
         if new_max_epoch > old_max_epoch {
             self.compute_epoch_schedule(new_max_epoch, root_bank);
         }
+    }
+
+    /// Does not change BankForks roots, blockstore roots, stake or tower votes.
+    /// Caller must have checked the pinned Bank hash and coordinated stake gate.
+    pub fn enable_native_restart_horizon(
+        &self,
+        bank: &Bank,
+        root_epoch: Epoch,
+    ) -> Result<(), String> {
+        if self.fixed_schedule.is_some() {
+            return Err("native restart cannot override a fixed leader schedule".into());
+        }
+        let root_max = *self.max_epoch.read().unwrap();
+        let requested = self.epoch_schedule.get_leader_schedule_epoch(bank.slot());
+        if let Some(epoch) = native_restart_schedule::horizon(
+            root_epoch,
+            bank.epoch(),
+            root_max,
+            requested,
+            bank.is_frozen(),
+        )? {
+            let computed = self
+                .compute_epoch_schedule(epoch, bank)
+                .ok_or("pinned restart Bank has no epoch stake schedule")?;
+            let cached = self
+                .get_epoch_leader_schedule(epoch)
+                .ok_or("native restart schedule cache missing")?;
+            if !(0..self.epoch_schedule.get_slots_in_epoch(epoch)).all(|i| computed[i] == cached[i])
+            {
+                return Err("native restart schedule cache differs from pinned Bank".into());
+            }
+            *self.native_restart_horizon.write().unwrap() = Some(epoch);
+        }
+        Ok(())
+    }
+
+    fn visible_max_epoch(&self) -> Epoch {
+        native_restart_schedule::visible(
+            *self.max_epoch.read().unwrap(),
+            *self.native_restart_horizon.read().unwrap(),
+        )
     }
 
     pub fn slot_leader_at(&self, slot: Slot, bank: Option<&Bank>) -> Option<Pubkey> {
@@ -113,7 +173,7 @@ impl LeaderScheduleCache {
         max_slot_range: u64,
     ) -> Option<(Slot, Slot)> {
         let (epoch, start_index) = bank.get_epoch_and_slot_index(current_slot + 1);
-        let max_epoch = *self.max_epoch.read().unwrap();
+        let max_epoch = self.visible_max_epoch();
         if epoch > max_epoch {
             debug!(
                 "Requested next leader in slot: {} of unconfirmed epoch: {}",
@@ -175,7 +235,7 @@ impl LeaderScheduleCache {
         let cache_result = self.slot_leader_at_no_compute(slot);
         // Forbid asking for slots in an unconfirmed epoch
         let bank_epoch = self.epoch_schedule.get_epoch_and_slot_index(slot).0;
-        if bank_epoch > *self.max_epoch.read().unwrap() {
+        if bank_epoch > self.visible_max_epoch() {
             debug!("Requested leader in slot: {slot} of unconfirmed epoch: {bank_epoch}");
             return None;
         }
