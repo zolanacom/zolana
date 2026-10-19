@@ -173,12 +173,14 @@ def main():
     parser.add_argument("--port", type=int, default=8780)
     parser.add_argument("--tls-cert",type=Path)
     parser.add_argument("--tls-key",type=Path)
+    parser.add_argument("--listener-config",type=Path,help="reviewed direct HTTPS binding; default remains loopback-only")
+    parser.add_argument("--listener-sha256",help="independently reviewed exact configuration file digest")
     args = parser.parse_args()
     app = Faucet(args.root, args.password_file)
     info=app.command("access-info")  # Missing/partial admission state fails before listening.
     from service_tls import listener
     endpoint=info['faucet_audience'] if info.get('invite_required') else f'http://127.0.0.1:{args.port}'
-    server=listener(endpoint,args.port,Handler,app,args.tls_cert,args.tls_key)
+    server=listener(endpoint,args.port,Handler,app,args.tls_cert,args.tls_key,args.listener_config,args.listener_sha256)
     worker = threading.Thread(target=app.work, daemon=True)
     worker.start()
     try:

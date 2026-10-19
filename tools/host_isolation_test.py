@@ -35,7 +35,7 @@ class HostIsolationTests(unittest.TestCase):
             port=impostor.getsockname()[1];self.doc['sockets'][str(port)]=str(self.path);self.write(self.key,self.doc)
             client=Operator(f'http://127.0.0.1:{port}',self.key)
             with self.assertRaises((ValueError,OSError)):client.forward(b'{}',timeout=.2)
-            with self.assertRaises(TimeoutError):impostor.accept()
+            with self.assertRaises((TimeoutError,socket.timeout)):impostor.accept()
             with self.assertRaises(ValueError):Operator('http://127.0.0.1:1',self.key)
     def test_real_unix_http_forwarding_refuses_redirect_and_unsafe_socket(self):
         with socket.socket(socket.AF_UNIX) as server:

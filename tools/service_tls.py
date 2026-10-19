@@ -45,7 +45,12 @@ class TLSServer(BoundedServer):
         super().process_request_thread(secure,address)
 
 
-def listener(endpoint,port,handler,app,cert=None,key=None):
+def listener(endpoint,port,handler,app,cert=None,key=None,listener_config=None,listener_sha256=None):
+    if listener_config is not None or listener_sha256 is not None:
+        if listener_config is None or listener_sha256 is None:
+            raise ValueError('direct TLS requires both reviewed configuration and digest')
+        from direct_tls import listener as direct_listener
+        return direct_listener(endpoint,port,handler,app,cert,key,listener_config,listener_sha256)
     parsed=urllib.parse.urlsplit(endpoint)
     if parsed.hostname!='127.0.0.1' or parsed.port!=port or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ValueError('listener must match its exact pinned loopback audience')

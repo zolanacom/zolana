@@ -174,12 +174,14 @@ def main():
     parser.add_argument("--archive-rpc",help="fixed operator-only canonical archive RPC; never supplied by a client")
     parser.add_argument("--tls-cert",type=Path)
     parser.add_argument("--tls-key",type=Path)
+    parser.add_argument("--listener-config",type=Path,help="reviewed direct HTTPS binding; default remains loopback-only")
+    parser.add_argument("--listener-sha256",help="independently reviewed exact configuration file digest")
     args = parser.parse_args()
     # Reuse the bounded, owner-only operator service interface; no worker starts here.
     faucet = Faucet(args.root, args.password_file)
     app = Gateway(faucet,history_root=args.history,archive_rpc=args.archive_rpc)
     from service_tls import listener
-    server=listener(app.info['rpc_audience'],args.port,Handler,app,args.tls_cert,args.tls_key)
+    server=listener(app.info['rpc_audience'],args.port,Handler,app,args.tls_cert,args.tls_key,args.listener_config,args.listener_sha256)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
