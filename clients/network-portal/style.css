@@ -1,12 +1,12 @@
 :root {
   color-scheme:dark;
-  --bg:#000000;
-  --fg:#f5f4ef;
-  --muted:#a4a49b;
-  --line:#30302b;
-  --accent:#ffc21a;
-  --surface:#121210;
-  --amber:#ffc21a;
+  --bg:#100d16;
+  --fg:#f3f0f7;
+  --muted:#a299af;
+  --line:#332b3c;
+  --accent:#bfa6ee;
+  --surface:#191420;
+  --amber:#e4b36c;
   font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
   font-synthesis:none
 }
@@ -97,9 +97,9 @@ button[hidden],[hidden] {
   display:flex;
   align-items:center;
   gap:17px;
-  font-size:32px;
-  font-weight:700;
-  letter-spacing:-.045em
+  font-size:25px;
+  font-weight:500;
+  letter-spacing:.07em
 }
 
 .ticker {
@@ -111,7 +111,7 @@ button[hidden],[hidden] {
 }
 
 .brand-mark {
-  width:44px;
+  width:32px;
   height:auto;
   display:block;
   flex-shrink:0
@@ -121,7 +121,7 @@ button[hidden],[hidden] {
   display:flex;
   gap:40px;
   font-size:14px;
-  color:#b5b5ac;
+  color:#b8b0c3;
   height:100%;
   align-items:center
 }
@@ -146,22 +146,20 @@ button[hidden],[hidden] {
 }
 
 .wallet-button {
-  border:1px solid #ffc21a;
-  background:var(--accent);
-  color:#000;
+  border:1px solid #beb5ca;
+  background:transparent;
   border-radius:28px;
-  font-size:14px;
-  font-weight:600;
-  padding:10px 22px;
+  font-size:13px;
+  padding:8px 19px;
   white-space:nowrap
 }
 
 .wallet-button:hover {
-  background:#ffcf4d
+  background:#292232
 }
 
 .hero {
-  height:454px;
+  min-height:470px;
   position:relative;
   display:flex;
   align-items:center
@@ -170,15 +168,15 @@ button[hidden],[hidden] {
 .hero-copy {
   position:relative;
   z-index:1;
-  width:55%;
+  width:57%;
   padding-bottom:12px
 }
 
 .hero h1 {
-  font-size:clamp(72px,8.65vw,132px);
+  font-size:clamp(64px,6.25vw,96px);
   line-height:.94;
   letter-spacing:-.065em;
-  font-weight:700;
+  font-weight:600;
   margin:4px 0 25px
 }
 
@@ -199,9 +197,9 @@ button[hidden],[hidden] {
 
 .primary {
   background:var(--accent);
-  color:#000000;
+  color:#130c20;
   border:0;
-  border-radius:20px;
+  border-radius:32px;
   display:inline-flex;
   align-items:center;
   justify-content:center;
@@ -214,7 +212,7 @@ button[hidden],[hidden] {
 }
 
 .primary:hover {
-  background:#ffcf4d
+  background:#cfb8fb
 }
 
 .primary svg {
@@ -227,7 +225,7 @@ button[hidden],[hidden] {
   padding:8px 0;
   background:none;
   border:0;
-  color:#e3e3db;
+  color:#d6c6ed;
   font-size:15px
 }
 
@@ -235,15 +233,16 @@ button[hidden],[hidden] {
   color:var(--fg)
 }
 
-.hero-mark {
+.veil {
   position:absolute;
   z-index:0;
-  right:5.5%;
-  top:38px;
-  width:34%;
-  height:auto;
+  right:0;
+  top:0;
+  width:55%;
+  height:100%;
   object-fit:contain;
-  pointer-events:none
+  pointer-events:none;
+  mix-blend-mode:lighten
 }
 
 .status-rail {
@@ -259,7 +258,7 @@ button[hidden],[hidden] {
 }
 
 .rail-inner>div+div {
-  border-left:1px solid #363630;
+  border-left:1px solid #423648;
   padding-left:44px
 }
 
@@ -267,7 +266,7 @@ button[hidden],[hidden] {
   display:flex;
   gap:17px;
   align-items:center;
-  color:#bdbdb4;
+  color:#c0b6cf;
   font-size:14px
 }
 
@@ -281,11 +280,11 @@ button[hidden],[hidden] {
 }
 
 .status-dot.unknown {
-  background:#8c8c84
+  background:#8f879a
 }
 
 .status-dot.running {
-  background:#b7d6a4
+  background:#9ed9b9
 }
 
 .measurement {
@@ -293,7 +292,7 @@ button[hidden],[hidden] {
   flex-direction:column;
   font-size:13px;
   line-height:1.4;
-  color:#a4a49b
+  color:#aaa0b8
 }
 
 .measurement strong {
@@ -320,13 +319,13 @@ button[hidden],[hidden] {
   font-size:40px;
   line-height:1.2;
   letter-spacing:-.05em;
-  font-weight:600;
+  font-weight:500;
   margin:0
 }
 
 .search {
   display:flex;
-  border:1px solid #3a3a32;
+  border:1px solid #3a3044;
   border-radius:28px;
   padding:10px 16px;
   align-items:center;
@@ -360,7 +359,7 @@ button[hidden],[hidden] {
 }
 
 .search input::placeholder {
-  color:#a4a49b
+  color:#a399b0
 }
 
 .source-note {
@@ -371,7 +370,7 @@ button[hidden],[hidden] {
 }
 
 .source-note strong {
-  color:#ffc21a;
+  color:#d5c0f2;
   font-weight:500
 }
 
@@ -394,7 +393,7 @@ button[hidden],[hidden] {
   background:none;
   padding:0 0 11px;
   font-size:14px;
-  color:#b5b5ac;
+  color:#b8adc6;
   position:relative
 }
 
@@ -415,7 +414,7 @@ button[hidden],[hidden] {
 .refresh {
   border:0;
   background:none;
-  color:#b5b5ac;
+  color:#b8adc6;
   display:flex;
   align-items:center;
   gap:12px;
@@ -430,7 +429,7 @@ button[hidden],[hidden] {
 
 .notice {
   margin:0;
-  color:#ffbf90;
+  color:#d9bca4;
   font-size:13px
 }
 
@@ -452,7 +451,7 @@ table {
 
 thead {
   font-size:13px;
-  color:#a4a49b
+  color:#b1a5bf
 }
 
 th {
@@ -463,7 +462,7 @@ th {
 
 td {
   height:53px;
-  border-bottom:1px solid #282823;
+  border-bottom:1px solid #282130;
   padding:8px 12px 8px 0
 }
 
@@ -484,13 +483,13 @@ th:last-child,td:last-child {
 }
 
 tbody tr:hover {
-  background:#121210
+  background:#18121f
 }
 
 .data-link {
   border:0;
   background:none;
-  color:#e8d28e;
+  color:#d6c1f6;
   font:inherit;
   padding:0;
   text-align:left;
@@ -510,7 +509,7 @@ tbody tr:hover {
 }
 
 .recorded {
-  color:#b5b5ac;
+  color:#b5a6c5;
   font-size:12px;
   display:inline-flex;
   align-items:center;
@@ -521,7 +520,7 @@ tbody tr:hover {
   content:"";
   width:5px;
   height:5px;
-  background:#9c9c90;
+  background:#a99ac0;
   border-radius:50%
 }
 
@@ -547,10 +546,10 @@ tbody tr:hover {
 
 .load-more {
   display:block;
-  border:1px solid #424238;
+  border:1px solid #4a3b58;
   background:none;
   border-radius:25px;
-  color:#e0e0d7;
+  color:#d8c9eb;
   padding:9px 24px;
   margin:24px auto 0;
   font-size:13px
@@ -558,7 +557,7 @@ tbody tr:hover {
 
 .footer {
   border-top:1px solid var(--line);
-  color:#a4a49b;
+  color:#a197b0;
   font-size:12px
 }
 
@@ -586,7 +585,7 @@ tbody tr:hover {
 }
 
 .back-button {
-  border:1px solid #424238;
+  border:1px solid #44364f;
   background:none;
   border-radius:24px;
   padding:7px 16px;
@@ -603,7 +602,7 @@ tbody tr:hover {
 .detail-grid dt,.detail-grid dd {
   margin:0;
   padding:14px 0;
-  border-bottom:1px solid #282823;
+  border-bottom:1px solid #2b2333;
   font-size:14px
 }
 
@@ -628,7 +627,7 @@ tbody tr:hover {
 
 .content-copy {
   max-width:780px;
-  color:#b5b5ac;
+  color:#b9afc7;
   font-size:17px;
   line-height:1.8;
   margin:22px 0 30px
@@ -656,7 +655,7 @@ tbody tr:hover {
 
 .fact p {
   margin:0;
-  color:#b5b5ac;
+  color:#b9afc7;
   font-size:15px;
   line-height:1.8;
   max-width:670px
@@ -679,9 +678,9 @@ tbody tr:hover {
 }
 
 dialog {
-  background:#121210;
+  background:#191321;
   color:var(--fg);
-  border:1px solid #424238;
+  border:1px solid #4a3b58;
   border-radius:22px;
   padding:42px;
   width:min(640px,calc(100vw - 32px));
@@ -691,7 +690,7 @@ dialog {
 }
 
 dialog::backdrop {
-  background:#000000c9;
+  background:#08050dbd;
   backdrop-filter:blur(7px)
 }
 
@@ -706,7 +705,7 @@ dialog h2 {
 dialog p {
   font-size:15px;
   line-height:1.8;
-  color:#c7c7bd
+  color:#c9bed5
 }
 
 .dialog-symbol {
@@ -725,7 +724,7 @@ dialog p {
   font-size:29px;
   font-weight:300;
   line-height:1;
-  color:#c7c7bd;
+  color:#c9bed5;
   padding:6px
 }
 
@@ -777,7 +776,7 @@ dialog p {
   top:-100px;
   background:var(--accent);
   padding:12px;
-  color:#000000;
+  color:#100d16;
   z-index:5
 }
 
@@ -787,10 +786,7 @@ dialog p {
 
 @media(min-width:1700px) {
   .hero {
-    height:500px
-  }
-  .hero-mark {
-    top:44px
+    min-height:500px
   }
 }
 
@@ -802,19 +798,14 @@ dialog p {
     gap:24px
   }
   .hero {
-    height:420px
+    min-height:420px
   }
   .hero h1 {
-    font-size:100px
+    font-size:clamp(48px,6.45vw,72px)
   }
   .hero p {
     font-size:18px;
     max-width:350px
-  }
-  .hero-mark {
-    right:0;
-    width:35%;
-    top:58px
   }
   .rail-inner>div+div {
     padding-left:24px
@@ -844,7 +835,7 @@ dialog p {
     gap:12px
   }
   .brand-mark {
-    width:34px
+    width:28px;
   }
   .ticker {
     font-size:10px;
@@ -872,7 +863,7 @@ dialog p {
     right:8px
   }
   .hero {
-    height:540px;
+    min-height:570px;
     align-items:flex-start;
     padding-top:27px
   }
@@ -881,7 +872,7 @@ dialog p {
     padding:0
   }
   .hero h1 {
-    font-size:clamp(67px,17vw,99px);
+    font-size:clamp(36px,11.5vw,51px);
     letter-spacing:-.065em;
     margin:8px 0 20px
   }
@@ -901,12 +892,12 @@ dialog p {
   .plain {
     font-size:13px
   }
-  .hero-mark {
-    width:210px;
-    max-width:65%;
-    height:auto;
-    right:20px;
-    top:315px
+  .veil {
+    width:100%;
+    height:260px;
+    right:0;
+    top:300px;
+    object-position:right center
   }
   .rail-inner {
     grid-template-columns:1fr 1fr;
@@ -1064,17 +1055,8 @@ dialog p {
 
 @media(min-width:1101px) {
   .hero h1 {
-    font-weight:700;
+    font-weight:600;
     letter-spacing:-.035em
-  }
-}
-
-@media(min-width:1101px) and (max-width:1699px) {
-  .hero {
-    height:454px
-  }
-  .hero-copy {
-    transform:none
   }
 }
 

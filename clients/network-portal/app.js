@@ -75,7 +75,7 @@ async function route() {
   $('hero').hidden = state.route !== 'network';
   $('explorer-toolbar').hidden = !explorer; $('search-form').hidden = !explorer; $('load-more').hidden=true;
   $('page-title').textContent = {network:'Inside the network',explorer:'Explorer',validators:'The network behind Zolana',build:'Build on Zolana'}[state.route];
-  document.title = `${state.route === 'network' ? 'Zolana — Private by protocol' : `${$('page-title').textContent} — Zolana`}`;
+  document.title = `${state.route === 'network' ? 'Zolana — A chain for private payments' : `${$('page-title').textContent} — Zolana`}`;
   if (explorer) {
     const currentHash=location.hash;
     await activity();

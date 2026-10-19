@@ -1,14 +1,14 @@
 :root {
   color-scheme:dark;
-  --ink:#f5f4ef;
-  --muted:#a4a49b;
-  --accent:#ffc21a;
-  --panel:#121210;
-  --line:#44443a;
-  --success:#b7d6a4;
+  --ink:#f3f0f7;
+  --muted:#a299af;
+  --accent:#bfa6ee;
+  --panel:#191420;
+  --line:#4a3b58;
+  --success:#9ed9b9;
   font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
   color:var(--ink);
-  background:#000;
+  background:#100d16;
   font-synthesis:none;
 }
 * {
@@ -27,7 +27,7 @@ header {
   justify-content:space-between;
   gap:16px;
   font-size:18px;
-  color:#a4a49b;
+  color:#a299af;
 }
 #network-label {
   max-width:60%;
@@ -47,7 +47,6 @@ header {
 }
 .wordmark img { width:44px; height:auto; }
 #previous-wallet { color:var(--accent); font-size:16px; text-underline-offset:4px; }
-.introduction-mark { display:block; width:180px; height:auto; margin:0 0 36px; }
 main {
   max-width:1536px;
   min-height:calc(100svh - 188px);
@@ -82,7 +81,7 @@ h1 {
 }
 .panel {
   background:var(--panel);
-  border:1px solid #363630;
+  border:1px solid #332b3c;
   border-radius:16px;
   padding:48px 54px;
   min-width:0;
@@ -116,12 +115,12 @@ input,textarea {
   max-width:100%;
   border:1px solid var(--line);
   border-radius:9px;
-  background:#080808;
+  background:#100d16;
   padding:15px 16px;
   min-height:64px;
 }
 input:focus,textarea:focus {
-  outline:3px solid #ffc21a2c;
+  outline:3px solid #bfa6ee2c;
   border-color:var(--accent);
 }
 textarea {
@@ -139,16 +138,16 @@ textarea {
   cursor:pointer;
 }
 .primary {
-  color:#000;
+  color:#130c20;
   background:var(--accent);
   border:1px solid var(--accent);
   margin-top:34px;
 }
-.primary:hover { background:#ffcf4d; border-color:#ffcf4d; }
+.primary:hover { background:#cfb8fb; border-color:#cfb8fb; }
 .secondary:hover { border-color:var(--accent); }
 .secondary {
   color:var(--ink);
-  border:1px solid #69695f;
+  border:1px solid #746580;
   background:transparent;
   margin-top:18px;
 }
@@ -157,7 +156,7 @@ button:disabled {
   cursor:wait;
 }
 button:focus-visible,a:focus-visible {
-  outline:3px solid #ffc21a80;
+  outline:3px solid #bfa6ee80;
   outline-offset:4px;
 }
 .hint {
@@ -209,7 +208,7 @@ footer {
   line-height:1.7;
   overflow-wrap:anywhere;
   max-width:100%;
-  background:#080808;
+  background:#100d16;
   padding:16px;
   border:1px solid var(--line);
   border-radius:9px;
@@ -225,7 +224,7 @@ footer {
   margin-top:24px;
 }
 #notice.error {
-  color:#ffb0a1;
+  color:#f0a4ae;
 }
 #notice.success {
   color:var(--success);
@@ -247,7 +246,7 @@ footer {
   margin-top:2px;
 }
 .receipt {
-  background:#080808;
+  background:#100d16;
   padding:16px;
   border-radius:9px;
   font-size:15px;
@@ -276,7 +275,7 @@ dialog p {
   color:var(--muted);
 }
 dialog::backdrop {
-  background:#000b;
+  background:#08050dbd;
   backdrop-filter:blur(7px);
 }
 .small {
@@ -285,7 +284,7 @@ dialog::backdrop {
 .split {
   margin-top:16px;
   padding-top:18px;
-  border-top:1px solid #44443a;
+  border-top:1px solid #4a3b58;
 }
 .back {
   margin-top:10px;
