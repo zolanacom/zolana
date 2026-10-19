@@ -11,6 +11,12 @@ this archive is for local rehearsal, not an installer ready for distribution.
 1. Extract the archive. Verify the archive SHA-256 against a checksum received
    through a trusted channel. A checksum shipped beside an archive does not
    establish its publisher. Preserve upstream/dependency notices.
+   A separately prepared signed-release workflow can authenticate downloads
+   before execution. Obtain its verifier and publisher/profile pins through an
+   independently authenticated channel, then verify/install/run through that
+   trusted tool. A verifier or key only supplied with this archive is not an
+   independent trust source. This development archive is not an Apple signed
+   or notarized release, and start-wallet.command --verify checks hashes only.
 2. In Terminal run:
      sh start-wallet.command --verify
      sh start-wallet.command --check

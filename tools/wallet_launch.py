@@ -41,7 +41,7 @@ def verify(bundle):
 def main(argv=None):
     sys.dont_write_bytecode = True
     bundle = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="Device-local test wallet; test coins only")
+    parser = argparse.ArgumentParser(description="Device-local test wallet; test coins only", allow_abbrev=False)
     parser.add_argument("--verify", action="store_true", help="verify bundle integrity without a network connection")
     parser.add_argument("--check", action="store_true", help="check the pinned RPC without opening a seed")
     parser.add_argument("--data-dir", type=Path)
@@ -68,6 +68,9 @@ def main(argv=None):
     data = args.data_dir or base / "Zolana Test Wallet" / profile["genesis_hash"]
     if data.resolve().is_relative_to(bundle):
         parser.error("wallet data must be outside the replaceable package directory")
+    # The independently trusted release runner uses isolated Python. Add only
+    # the verified runtime directory, after validating the complete manifest.
+    sys.path.insert(0, str(bundle / "runtime"))
     import wallet_ui
     wallet_ui.ASSETS = bundle / "assets"
     app = wallet_ui.WalletApp.from_profile(network, data, args.profile, binary)
