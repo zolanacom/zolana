@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 
 class RuntimeRetentionTests(unittest.TestCase):
-    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False, tail=False, restart=False, replica=False):
+    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False, tail=False, restart=False, replica=False, health_test=False):
         events = []
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); root = base / '.data/s20'; root.mkdir(parents=True)
@@ -39,21 +39,26 @@ class RuntimeRetentionTests(unittest.TestCase):
             def opening(**_): events.append('ingress-open'); return ingress
             namespace = dict(BASE=base, ROOT=root, WALLET=base/'wallet', load=Mock(),
                 start=lambda _, index, **kw: children[index], stop=stop, wait_rpc=Mock(), quiet=Mock(), save=Mock(),
-                rpc=Mock(), prepare=Mock(return_value={'replayed':False}), print=Mock(),enable_replay_diagnostics=Mock(),wait_fresh_finality=Mock(side_effect=lambda *args:events.append('fresh-finality')),
+                rpc=Mock(), slots=lambda:[10,10], prepare=Mock(return_value={'replayed':False}), print=Mock(),enable_replay_diagnostics=Mock(),wait_fresh_finality=Mock(side_effect=lambda *args:events.append('fresh-finality')),
                 os=SimpleNamespace(nice=Mock(),getpid=lambda:1,getpgid=lambda p:p,getuid=lambda:450,getgid=lambda:450),
                 threading=SimpleNamespace(Event=lambda:shutdown), signal=SimpleNamespace(SIGTERM=15,SIGINT=2,signal=lambda number,callback:handlers.update({number:callback})),
                 shutil=SimpleNamespace(disk_usage=lambda _:SimpleNamespace(free=4*1024**3)),
-                time=SimpleNamespace(time=Mock(side_effect=[100,100,100,700]) if expired_after_start else lambda:100), json=json, math=__import__('math'))
+                time=SimpleNamespace(monotonic=lambda:100,time=Mock(side_effect=[100,100,100,700]) if expired_after_start else lambda:100), json=json, math=__import__('math'))
             source = ast.parse(Path(__file__).with_name('service_runtime.py').read_text())
             function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == 'supervise')
             exec(compile(ast.Module(body=[function],type_ignores=[]),'service_runtime.py','exec'), namespace)
-            modules = {'history_retention': SimpleNamespace(Retention=Mock(return_value=retention)),
+            health=Mock();health.start.return_value=health;health.healthy.return_value=failure!='publisher'
+            modules = {'operator_health':SimpleNamespace(Publisher=Mock(return_value=health)),
+                       'history_retention': SimpleNamespace(Retention=Mock(return_value=retention)),
                        'service_ingress': SimpleNamespace(Ingress=opening),
-                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-history-replica-test-v1' if replica else 'local-restart-tail-test-v1' if tail else 'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
+                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-operator-health-test-v1' if health_test else 'local-history-replica-test-v1' if replica else 'local-restart-tail-test-v1' if tail else 'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
             with patch.dict('sys.modules', modules):
                 if close_failure:
                     with self.assertRaisesRegex(RuntimeError,'cleanup failed'):namespace['supervise']()
-                else: namespace['supervise'](retention_test=expired_after_start and not archival and not tail and not replica,archival_test=archival,tail_test=tail,replica_test=replica)
+                else: namespace['supervise'](retention_test=expired_after_start and not archival and not tail and not replica and not health_test,archival_test=archival,tail_test=tail,replica_test=replica,health_test=health_test)
+            health.close.assert_called_once()
+            if failure=='publisher':health.update.assert_any_call('blocked','health_unavailable')
+            if failure in ('initial','background'):health.update.assert_any_call('blocked','retention_failed')
         return events
 
     def test_verified_initial_mirror_precedes_ingress_and_normal_shutdown_stops_everything(self):
@@ -65,6 +70,12 @@ class RuntimeRetentionTests(unittest.TestCase):
     def test_background_failure_closes_ingress_and_parks_both_nodes(self):
         self.assertEqual(self.exercise(failure='background',waits=(False,True)),
                          ['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
+
+    def test_failed_publisher_parks_owned_workers_and_health_rehearsal_is_finite(self):
+        expected=['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0']
+        self.assertEqual(self.exercise(failure='publisher',waits=(False,True)),expected)
+        self.assertEqual(self.exercise(health_test=True),expected)
+        self.assertEqual(self.exercise(health_test=True,expired_after_start=True),expected[:1]+expected[3:])
 
     def test_cleanup_exception_still_stops_both_validators(self):
         self.assertEqual(self.exercise(close_failure=True),['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])

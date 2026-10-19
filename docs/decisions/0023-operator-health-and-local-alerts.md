@@ -1,0 +1,11 @@
+# Separate public health from private service control
+
+The local service already parks validators and gateway when retained-history verification fails. Operators previously needed administrator access to private status files to distinguish that guard from a dead supervisor. A supervisor also cannot announce its own death. Add an independent observer with no payment or raw-RPC capability.
+
+The service writes a whitelisted public heartbeat in a separately provisioned directory. Code/config remain root-owned; the dedicated service identity can replace its own small status file but desktop applications cannot write it. A background thread publishes liveness independently from RPC work; the supervisor supplies finalized-slot progress and verified lifecycle phases. A blocked/failed reason survives cleanup. A stopped thread or failed publication fails closed in the supervisor while the observer detects stale status.
+
+The observer trusts only the fixed launchd label and the installed service UID. Unloading that job is an intentional operator pause. A loaded process must publish a matching bounded heartbeat. Startup grace is given only before actual health; a healthy publisher that subsequently stops receives no renewed grace. One restart after actual health gets a new startup window, but successive crashes cannot renew it indefinitely. A restart does not resolve the previous incident until the new process has fresh ready-state samples.
+
+The desktop operator owns an exclusive, durable journal and transition outbox. Stable event IDs support deduplication across a crash between stdout flush and acknowledgement. Delivery is at least once, and only local stdout/journal output is implemented. Corruption, deletion after initialization or pending-event capacity exhaustion must fail visibly. Nothing here authorizes webhook/email transmission or adds a persistent privileged command interface.
+
+This status is operational evidence, not a consensus proof or network privacy claim. The observer and service still share a Mac. Independent external observation, remote delivery, retained-history/archive redundancy and review remain testnet deployment gates. No daemon or hosting is part of this change.

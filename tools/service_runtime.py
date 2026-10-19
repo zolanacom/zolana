@@ -109,10 +109,10 @@ def enable_replay_diagnostics():
             'warn,solana_core::replay_stage=info,solana_core::consensus=info'],capture_output=True,check=True,timeout=10)
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False,replica_test=False):
-    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test:os.nice(10)
-    load(ROOT)
-    if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False,replica_test=False,health_test=False):
+    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test or health_test:os.nice(10)
+    from operator_health import Publisher
+    health=Publisher(BASE/'health/heartbeat.json').start()
     children=[None,None];shutdown=threading.Event();ingress=None;retention=None
     def terminate(*_):
         shutdown.set()
@@ -132,33 +132,41 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
                 try:stop(ROOT,i)
                 except Exception:errors.append('validator-'+str(i))
         if errors:raise RuntimeError('owned service cleanup failed: '+','.join(errors))
-    def park(reason):
+    def park(reason,code):
+        health.update('paused' if code=='test_complete' else 'blocked',code)
         pause_owned()
+        health.update(validator_count=0,ingress_ready=False)
         print(reason+'; validators paused and original private state retained.',flush=True)
         while not shutdown.wait(5):pass
 
     try:
+        load(ROOT)
+        if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
         test_deadline=None
-        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test:
+        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test or health_test:
             from service_tls import private_bytes
-            session_name='history-replica-session-030.json' if replica_test else 'restart-tail-session-029.json' if tail_test else 'canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-history-replica-test-v1' if replica_test else 'local-restart-tail-test-v1' if tail_test else 'local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='operator-health-session-031.json' if health_test else 'history-replica-session-030.json' if replica_test else 'restart-tail-session-029.json' if tail_test else 'canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-operator-health-test-v1' if health_test else 'local-history-replica-test-v1' if replica_test else 'local-restart-tail-test-v1' if tail_test else 'local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
                 type(test_deadline) not in (float,int) or not math.isfinite(test_deadline) or test_deadline>time.time()+600):
                 raise ValueError('invalid bounded acknowledgement experiment session')
             if time.time()>=test_deadline:
+                health.update('paused','test_complete')
                 print('Acknowledgement experiment expired; validators kept paused.',flush=True)
                 while not shutdown.wait(5):pass
                 return
         if shutil.disk_usage(ROOT).free<1536*1024*1024:
+            health.update('blocked','disk_low')
             print('Service kept paused: less than 1.5 GiB free; private state retained.',flush=True)
             while not shutdown.wait(5):pass
             return
         epoch_horizon=None
+        health.update('replaying')
         if any((ROOT/f'consensus-{i}').exists() for i in [0,1]):epoch_horizon=prepare(ROOT).get('native_epoch_horizon_checkpoint')
         for i in [0,1]:children[i]=start(ROOT,i,coordinated=True,new_session=False,epoch_horizon=epoch_horizon);wait_rpc(ROOT,i)
+        health.update('syncing',validator_count=2)
         quiet(ROOT)
         if tail_test:enable_replay_diagnostics()
         save(ROOT/'service-instance.json',{'supervisor':os.getpid(),'validators':[p.pid for p in children],'started_at':time.time(),'uid':os.getuid(),'gid':os.getgid(),'process_groups':[os.getpgid(p.pid) for p in children]})
@@ -166,35 +174,61 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
         if tips:
             try:wait_fresh_finality(max(tips),test_deadline)
             except Exception:
-                park('Preserved restart finality deadline')
+                park('Preserved restart finality deadline','finality_timeout')
                 return
         from history_retention import Retention
+        health.update('retaining')
         try:
             retention=Retention(ROOT,WALLET,'http://127.0.0.1:23899',lambda method,params:rpc(23899,method,params),
                 credential=ROOT/'rpc-access.key')
             retention.start()
         except Exception:
-            park('History retention initialization failed')
+            park('History retention initialization failed','retention_failed')
             return
         if shutdown.is_set():return
         if test_deadline is not None and time.time()>=test_deadline:
-            park('Test-duration guard before ingress')
+            park('Test-duration guard before ingress','test_complete')
             return
         if (ROOT/'ingress-setup.json').exists():
             from service_ingress import Ingress
             if json.loads((ROOT/'ingress-setup.json').read_text()).get('phase')=='ready':
                 ingress=Ingress(restore_test=True) if restore_test else Ingress(browser_test=True) if browser_test else Ingress(package_test=True) if package_test else Ingress(ack_test=True) if ack_test else Ingress()
+        health.observe(min(slots()),free_disk_mib=shutil.disk_usage(ROOT).free//1024**2)
+        health.update('ready',ingress_ready=ingress is not None)
+        next_sample=time.monotonic()+5
         while not shutdown.wait(1):
-            if any(p.poll() is not None for p in children):raise RuntimeError('owned validator exited; restart the coordinated service group')
+            if not health.healthy():
+                park('Public health publisher failed','health_unavailable')
+                return
+            if any(p.poll() is not None for p in children):
+                health.update('failed','validator_exited')
+                raise RuntimeError('owned validator exited; restart the coordinated service group')
             if not retention.healthy():
-                park('History retention verification, lag or capacity guard')
+                park('History retention verification, lag or capacity guard','retention_failed')
                 return
-            if ingress is not None and not ingress.healthy():raise RuntimeError('wallet ingress worker exited; restart original service group')
+            if ingress is not None and not ingress.healthy():
+                health.update('failed','ingress_exited')
+                raise RuntimeError('wallet ingress worker exited; restart original service group')
             if shutil.disk_usage(ROOT).free<1024*1024*1024 or (test_deadline is not None and time.time()>=test_deadline):
-                park('Disk or test-duration guard')
+                park('Disk or test-duration guard','disk_low' if shutil.disk_usage(ROOT).free<1024*1024*1024 else 'test_complete')
                 return
+            if time.monotonic()>=next_sample:
+                try:health.observe(min(slots()),free_disk_mib=shutil.disk_usage(ROOT).free//1024**2)
+                except (OSError,ValueError,RuntimeError):pass
+                next_sample=time.monotonic()+5
+    except BaseException:
+        # Keep static causes only; private exceptions remain in private logs.
+        try:
+            if health.data['phase'] not in ('blocked','failed'):health.update('failed','startup_failed')
+        except Exception:pass
+        raise
     finally:
-        pause_owned()
+        try:pause_owned()
+        except BaseException:
+            try:health.update('failed','cleanup_failed')
+            except Exception:pass
+            raise
+        finally:health.close()
 
 
 def args(who,action,extra=(),proxy=False):
@@ -316,6 +350,7 @@ if __name__=='__main__':
     elif action=='run-archival-test':output=supervise(archival_test=True)
     elif action=='run-tail-test':output=supervise(tail_test=True)
     elif action=='run-replica-test':output=supervise(replica_test=True)
+    elif action=='run-health-test':output=supervise(health_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':

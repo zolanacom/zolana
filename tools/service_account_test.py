@@ -65,6 +65,38 @@ class ServiceIsolationTests(unittest.TestCase):
             with self.assertRaises(PermissionError):service.install(Path('unused'),'a'*64,501)
             with self.assertRaises(PermissionError):service.update(Path('unused'),'a'*64)
             with self.assertRaises(PermissionError):service.acceptance()
+    def test_public_health_provision_is_exact_and_rejects_occupied_unsafe_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config={'uid':os.getuid(),'gid':os.getgid()}
+            with patch.object(service,'INSTALL',root),patch.object(service.os,'chown'):
+                self.assertTrue(service.provision_health(config));self.assertFalse(service.provision_health(config))
+                service.check_health_directory(root,config)
+                (root/'health').chmod(0o777)
+                with self.assertRaises(ValueError):service.provision_health(config)
+                (root/'health').rmdir();(root/'health').symlink_to(root)
+                with self.assertRaises(ValueError):service.provision_health(config)
+                (root/'health').unlink()
+                with patch.object(service.os,'chown',side_effect=OSError('provision failed')):
+                    with self.assertRaises(OSError):service.provision_health(config)
+                self.assertFalse((root/'health').exists())
+    def test_failed_upgrade_removes_only_new_health_directory_and_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source';source.mkdir()
+            for name in service.FILES:
+                path=source/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('fixture '+name)
+            installed=root/'installed';bundle=root/'bundle';service.prepare(source,installed)
+            legacy=json.loads((installed/'MANIFEST.json').read_text());legacy['format']='native-service-bundle-v6'
+            legacy['files']={n:v for n,v in legacy['files'].items() if n in service.V6_FILES}
+            for name in set(service.FILES)-set(service.V6_FILES):(installed/name).unlink()
+            manifest=installed/'MANIFEST.json';manifest.chmod(0o600);manifest.write_text(json.dumps(legacy))
+            before=manifest.read_bytes();report=service.prepare(source,bundle)
+            (installed/'.data').mkdir();private=installed/'.data/original';private.write_text('preserve')
+            config={'uid':os.getuid(),'gid':os.getgid()}
+            with patch.object(service,'INSTALL',installed),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service.os,'chown'),patch.object(service,'verify_install',side_effect=[config,ValueError('new seal failed')]),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=113)),patch.object(service,'command') as command:
+                with self.assertRaisesRegex(ValueError,'new seal failed'):service.update(bundle,report['manifest_sha256'])
+                command.assert_not_called()
+            self.assertFalse((installed/'health').exists());self.assertFalse((installed/'tools/operator_health.py').exists())
+            self.assertEqual(manifest.read_bytes(),before);self.assertEqual(private.read_text(),'preserve')
     def test_reviewed_update_preserves_private_state_and_rolls_back_failed_verification(self):
         for fail in [False,True]:
             with self.subTest(failed_verification=fail),tempfile.TemporaryDirectory() as directory:
@@ -78,7 +110,7 @@ class ServiceIsolationTests(unittest.TestCase):
                     (source/file).write_bytes(b'reviewed replacement')
                     report=service.prepare(source,bundle)
                     checks=[{},ValueError('new seal invalid')] if fail else [{},{}]
-                    with patch.object(service,'INSTALL',installed),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service,'verify_install',side_effect=checks),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=0)),patch.object(service,'command') as command:
+                    with patch.object(service,'INSTALL',installed),patch.object(service,'provision_health',return_value=False),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service,'verify_install',side_effect=checks),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=0)),patch.object(service,'command') as command:
                         if fail:
                             with self.assertRaises(ValueError):service.update(bundle,report['manifest_sha256'])
                             self.assertEqual((installed/file).read_bytes(),b'old code')
@@ -90,7 +122,7 @@ class ServiceIsolationTests(unittest.TestCase):
                         self.assertEqual(key.read_bytes(),b'original secret')
                         self.assertEqual([call.args[0][1] for call in command.call_args_list],['bootout','bootstrap'])
     def test_reviewed_inventory_upgrade_keeps_paused_service_paused_and_rolls_back_new_files(self):
-        for version,inventory in [(1,service.LEGACY_FILES),(2,service.V2_FILES),(3,service.V3_FILES),(4,service.V4_FILES),(5,service.V5_FILES)]:
+        for version,inventory in [(1,service.LEGACY_FILES),(2,service.V2_FILES),(3,service.V3_FILES),(4,service.V4_FILES),(5,service.V5_FILES),(6,service.V6_FILES)]:
             for fail in (False,True):
                 with self.subTest(failed_verification=fail),tempfile.TemporaryDirectory() as directory:
                     root=Path(directory);source=root/'source';source.mkdir()
@@ -104,16 +136,17 @@ class ServiceIsolationTests(unittest.TestCase):
                     manifest=installed/'MANIFEST.json';manifest.chmod(0o600);manifest.write_text(json.dumps(legacy))
                     report=service.prepare(source,bundle)
                     checks=[{},ValueError('new seal invalid')] if fail else [{},{}]
-                    with patch.object(service,'INSTALL',installed),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service,'verify_install',side_effect=checks),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=113)),patch.object(service,'command') as command:
+                    with patch.object(service,'INSTALL',installed),patch.object(service,'provision_health',return_value=False),patch.object(service,'require_root'),patch.object(service,'trusted'),patch.object(service,'verify_install',side_effect=checks),patch.object(service.subprocess,'run',return_value=SimpleNamespace(returncode=113)),patch.object(service,'command') as command:
                         if fail:
                             with self.assertRaises(ValueError):service.update(bundle,report['manifest_sha256'])
                         else:self.assertTrue(service.update(bundle,report['manifest_sha256'])['service_left_paused'])
                         command.assert_not_called()
-                    self.assertEqual(service.verify_bundle(installed)['format'],'native-service-bundle-v%d'%version if fail else 'native-service-bundle-v6')
+                    self.assertEqual(service.verify_bundle(installed)['format'],'native-service-bundle-v%d'%version if fail else 'native-service-bundle-v7')
                     self.assertEqual((installed/'tools/history_retention.py').exists(),version>=3 or not fail)
                     self.assertEqual((installed/'tools/gateway_history.py').exists(),version>=4 or not fail)
                     self.assertEqual((installed/'tools/gateway_archival.py').exists(),version>=5 or not fail)
-                    self.assertEqual((installed/'tools/history_replica.py').exists(),not fail)
+                    self.assertEqual((installed/'tools/history_replica.py').exists(),version>=6 or not fail)
+                    self.assertEqual((installed/'tools/operator_health.py').exists(),not fail)
                     self.assertEqual((installed/'target/debug/native-faucet').exists(),version>=2 or not fail)
 
 

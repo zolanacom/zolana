@@ -25,12 +25,14 @@ V2_RUNTIME_FILES=LEGACY_RUNTIME_FILES+('service_ingress.py','testnet_gateway.py'
 V3_RUNTIME_FILES=V2_RUNTIME_FILES+('history_retention.py',)
 V4_RUNTIME_FILES=V3_RUNTIME_FILES+('gateway_history.py',)
 V5_RUNTIME_FILES=V4_RUNTIME_FILES+('gateway_archival.py',)
-RUNTIME_FILES=V5_RUNTIME_FILES+('history_replica.py',)
+V6_RUNTIME_FILES=V5_RUNTIME_FILES+('history_replica.py',)
+RUNTIME_FILES=V6_RUNTIME_FILES+('operator_health.py','operator_monitor.py')
 BINARIES=LEGACY_BINARIES+('native-faucet',)
 V2_FILES=tuple('tools/'+n for n in V2_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V3_FILES=tuple('tools/'+n for n in V3_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V4_FILES=tuple('tools/'+n for n in V4_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V5_FILES=tuple('tools/'+n for n in V5_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
+V6_FILES=tuple('tools/'+n for n in V6_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 FILES=tuple('tools/'+n for n in RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 
 
@@ -50,7 +52,7 @@ def verify_bundle(root,expected=None):
     raw=regular(root/'MANIFEST.json',32768)
     if expected is not None and digest(raw)!=expected:raise ValueError('administrator-approved manifest changed')
     manifest=json.loads(raw)
-    inventory={'native-service-bundle-v1':LEGACY_FILES,'native-service-bundle-v2':V2_FILES,'native-service-bundle-v3':V3_FILES,'native-service-bundle-v4':V4_FILES,'native-service-bundle-v5':V5_FILES,'native-service-bundle-v6':FILES}.get(manifest.get('format'))
+    inventory={'native-service-bundle-v1':LEGACY_FILES,'native-service-bundle-v2':V2_FILES,'native-service-bundle-v3':V3_FILES,'native-service-bundle-v4':V4_FILES,'native-service-bundle-v5':V5_FILES,'native-service-bundle-v6':V6_FILES,'native-service-bundle-v7':FILES}.get(manifest.get('format'))
     if set(manifest)!={'format','files'} or inventory is None or set(manifest['files'])!=set(inventory):
         raise ValueError('unexpected bundle inventory')
     for name,value in manifest['files'].items():
@@ -80,7 +82,23 @@ def verify_install(root=INSTALL):
     user=pwd.getpwnam(ACCOUNT);group=grp.getgrnam(ACCOUNT)
     if user.pw_uid!=config['uid'] or user.pw_gid!=config['gid'] or group.gr_gid!=config['gid'] or user.pw_uid==0 or user.pw_shell!='/usr/bin/false':
         raise ValueError('service OS identity differs from sealed installation')
+    if manifest['format']=='native-service-bundle-v7':check_health_directory(root,config)
     return config
+
+
+def check_health_directory(root,config):
+    meta=(root/'health').lstat()
+    if not stat.S_ISDIR(meta.st_mode) or meta.st_uid!=config['uid'] or meta.st_gid!=config['gid'] or stat.S_IMODE(meta.st_mode)!=0o755:
+        raise ValueError('unsafe public health directory')
+
+
+def provision_health(config):
+    path=INSTALL/'health'
+    if os.path.lexists(path):check_health_directory(INSTALL,config);return False
+    path.mkdir(mode=0o755)
+    try:os.chown(path,config['uid'],config['gid']);path.chmod(0o755)
+    except BaseException:path.rmdir();raise
+    return True
 
 
 def launch_config():
@@ -102,7 +120,7 @@ def prepare(source,output):
         with destination.open('xb') as stream:stream.write(data)
         destination.chmod(0o500 if name.startswith('target/') else 0o400)
         records[name]={'size':len(data),'sha256':digest(data)}
-    raw=(json.dumps({'format':'native-service-bundle-v6','files':records},sort_keys=True,indent=2)+'\n').encode()
+    raw=(json.dumps({'format':'native-service-bundle-v7','files':records},sort_keys=True,indent=2)+'\n').encode()
     (output/'MANIFEST.json').write_bytes(raw);(output/'MANIFEST.json').chmod(0o400)
     verify_bundle(output)
     return {'bundle':str(output),'manifest_sha256':digest(raw),'installer_sha256':records['tools/service_account.py']['sha256'],'keys_generated':False,'installed':False}
@@ -125,7 +143,7 @@ def as_service(action,config,extra=()):
 
 def install(bundle,expected,desktop_uid):
     require_root();verify_bundle(bundle,expected)
-    if verify_bundle(bundle,expected)['format']!='native-service-bundle-v6':raise ValueError('new installation requires current bundle inventory')
+    if verify_bundle(bundle,expected)['format']!='native-service-bundle-v7':raise ValueError('new installation requires current bundle inventory')
     if INSTALL.exists() or PLIST.exists():raise ValueError('installation already exists; preserve original service keys/state')
     try:pwd.getpwnam(ACCOUNT)
     except KeyError:pass
@@ -158,6 +176,7 @@ def install(bundle,expected,desktop_uid):
     config={'format':'native-service-install-v1','account':ACCOUNT,'label':LABEL,'uid':selected,'gid':selected,'desktop_uid':desktop_uid,'port_offset':5000}
     (INSTALL/'SERVICE.json').write_text(json.dumps(config,sort_keys=True));(INSTALL/'SERVICE.json').chmod(0o444)
     state=INSTALL/'.data';state.mkdir(mode=0o700);os.chown(state,selected,selected)
+    provision_health(config)
     verify_install();as_service('init',config)
     with PLIST.open('xb') as stream:plistlib.dump(launch_config(),stream)
     PLIST.chmod(0o644);trusted(PLIST)
@@ -167,9 +186,9 @@ def install(bundle,expected,desktop_uid):
 
 def update(bundle,expected):
     """Replace reviewed code only; keep the original account, keys and ledgers."""
-    require_root();verify_install();trusted(PLIST)
+    require_root();config=verify_install();trusted(PLIST)
     old=verify_bundle(INSTALL);new=verify_bundle(bundle,expected)
-    if new['format']!='native-service-bundle-v6':raise ValueError('update requires current bundle inventory')
+    if new['format']!='native-service-bundle-v7':raise ValueError('update requires current bundle inventory')
     changed={name:regular(bundle/name) for name in FILES if old['files'].get(name)!=new['files'][name]}
     for name,data in changed.items():
         if digest(data)!=new['files'][name]['sha256']:raise ValueError('reviewed update changed')
@@ -192,13 +211,16 @@ def update(bundle,expected):
     if active.returncode not in (0,113):raise ValueError('cannot determine original service loaded state')
     was_loaded=active.returncode==0
     if was_loaded:command(['/bin/launchctl','bootout','system',str(PLIST)],timeout=120)
+    health_created=False
     try:
         for name,data in changed.items():replace(name,data)
-        replace('MANIFEST.json',manifest);verify_install()
+        replace('MANIFEST.json',manifest)
+        health_created=provision_health(config);verify_install()
     except BaseException:
         for name,data in original.items():
             if data is None:(INSTALL/name).unlink(missing_ok=True)
             else:replace(name,data)
+        if health_created:(INSTALL/'health').rmdir()
         raise
     finally:
         if was_loaded:command(['/bin/launchctl','bootstrap','system',str(PLIST)],timeout=60)
