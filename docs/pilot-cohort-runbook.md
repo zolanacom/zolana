@@ -47,6 +47,8 @@ The RPC capability is required when the operator RPC is isolated; omitting it is
 
 The prepared receipt contains funding addresses and budgets, with `funded:false`, `installed:false`, `services_started:false`, `published:false`. Back up its original keys, plan, admission/claim/issuance ledgers and all payment journals. Fund and verify the complete conservative budget through a separately reviewed operator ceremony before issuing tester invitations. No automatic refill exists. Configure the isolated service to use this new reviewed root only after the relevant host/TLS/backup/monitoring work; this tool does not replace the installed rehearsal configuration.
 
+[Host/funding preparation](pilot-host-funding-runbook.md) now provides a disabled secret-free role packet, an authority-bound funding intent and native verified initial-balance receipts. This remains separate from the cohort tool's preparation-only audit. Actual host binding, public TLS routing, treasury signing and deployment are not performed by either preparer.
+
 For interrupted setup, rerun the exact prepare command with `--resume`. A completed native init or admission commit resumes with the same keys/policy. An incomplete native seed/admission write fails closed and remains preserved. Never delete a partial directory, marker or ledger to retry with its funded key. Changed plan, profile, native binary, RPC credential or policy refuses recovery. An updated binary needs a separately reviewed migration, not an edited pin.
 
 ## Issue one invitation per named slot
