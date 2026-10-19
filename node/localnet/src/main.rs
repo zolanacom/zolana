@@ -3,6 +3,7 @@ mod fault_lab;
 mod key_setup;
 mod load_lab;
 mod user_send_lab;
+mod pilot_treasury;
 // Exercise the exact validator fault guard in a first-party workspace target.
 #[cfg(test)]
 #[allow(dead_code)]
@@ -866,6 +867,9 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
+    if matches!(command.as_str(), "pilot-treasury-sign" | "pilot-treasury-check") {
+        return pilot_treasury::run(&command, &root, &args.collect::<Vec<_>>());
+    }
     if command == "replay-user-send-check" {
         return user_send_lab::replay(&root, &args.collect::<Vec<_>>());
     }

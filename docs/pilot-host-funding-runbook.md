@@ -72,3 +72,5 @@ The bounded runner creates fresh local keys/ledgers, rejects a real reservoir wi
 Use `--funding-only` for a shorter fresh rehearsal that stops before issuing invitations or sending grants: it tests the same real balances, receipt SIGKILL boundaries, a real both-validator crash/restart, original receipt reuse and a fresh native spendability scan after restart. It preserves the initial pool/two nullifiers and then stops its validators.
 
 See LOCAL-043 validation for actual observations and remaining blockers.
+
+The separate [installation and ten-tester ceremony](pilot-installation-runbook.md) now supplies an explicit sign-once provisioning workflow. `pilot_funding.py` remains read-only: preparing its intent does not authorize a transfer. Only a separately reviewed `pilot_provision.py` digest and an explicit `run` with original operator custody initiate the finite test-unit allocation. Actual host/account installation and external acceptance remain outstanding.
