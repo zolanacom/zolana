@@ -19,6 +19,29 @@ WALLET = PROJECT / 'target/debug/native-wallet'
 PRIVATE_GRANT, GAS_GRANT, PAYMENT_CAP, ATTEMPTS, GAS_FEE_CAP = 1_000_000, 150_000_000, 150_000_000, 3, 10_000
 
 
+def code_bytes(path, maximum):
+    """Hash local developer code or immutable root-owned installed code only.
+
+    Private wallets, policies and capabilities still use the UID-owned reader.
+    A root-owned executable in a user-writable directory is not sealed code.
+    """
+    path=Path(path)
+    with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as source:
+        meta=os.fstat(source.fileno())
+        if not stat.S_ISREG(meta.st_mode) or meta.st_mode&0o022 or not 1<=meta.st_size<=maximum:
+            raise ValueError('unsafe or oversized runtime code input')
+        if meta.st_uid!=os.getuid():
+            if meta.st_uid!=0:raise ValueError('runtime code owner differs')
+            if not path.is_absolute() or path.resolve()!=path:raise ValueError('installed code path must be real')
+            for parent in path.parents:
+                m=parent.lstat()
+                if not stat.S_ISDIR(m.st_mode) or m.st_uid!=0 or m.st_mode&0o022:
+                    raise ValueError('installed code ancestors must be immutable to service users')
+        data=source.read(maximum+1)
+        if len(data)!=meta.st_size:raise ValueError('runtime code changed during read')
+        return data
+
+
 def bounded(value, low, high):
     return type(value) is int and low <= value <= high
 
@@ -113,7 +136,7 @@ def checked(root, expected, faucet=FAUCET, wallet=WALLET):
     marker=private_json(root/'initialized.json')
     if (set(marker)!={'format','plan_sha256','faucet_sha256','wallet_sha256','rpc_access_sha256'} or
             marker['format']!='zolana-pilot-root-v1' or marker['plan_sha256']!=expected or
-            marker['faucet_sha256']!=sha(read(faucet,64*1024*1024)) or marker['wallet_sha256']!=sha(read(wallet,64*1024*1024))):
+            marker['faucet_sha256']!=sha(code_bytes(faucet,64*1024*1024)) or marker['wallet_sha256']!=sha(code_bytes(wallet,64*1024*1024))):
         raise ValueError('pilot identity/binary changed')
     if read(root/'source-profile.json',8192)!=encode(value['source_profile']) or read(root/'tester-profile.json',8192)!=encode(value['tester_profile']):
         raise ValueError('pilot public profile changed')
@@ -153,7 +176,7 @@ def prepare(value, root, expected, password_file, resume=False, faucet=FAUCET, w
         directory(root.parent)
         root.mkdir(mode=0o700); fsync_dir(root.parent)
         create(root/'initialized.json',encode(dict(format='zolana-pilot-root-v1',plan_sha256=expected,
-               faucet_sha256=sha(read(faucet,64*1024*1024)),wallet_sha256=sha(read(wallet,64*1024*1024)),
+               faucet_sha256=sha(code_bytes(faucet,64*1024*1024)),wallet_sha256=sha(code_bytes(wallet,64*1024*1024)),
                rpc_access_sha256=sha(read(rpc_access_file,16384,secret=True)) if rpc_access_file is not None else None)))
         for name,data in [('plan.json',value),('source-profile.json',value['source_profile']),('tester-profile.json',value['tester_profile'])]:
             create(root/name,encode(data))

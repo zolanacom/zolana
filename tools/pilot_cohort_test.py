@@ -285,4 +285,28 @@ with patch.object(p,'native',side_effect=crash):
         self.assertEqual((info['issued'],info['reserved_claims']),(1,0))
 
 
+class RuntimeCodeInputTests(unittest.TestCase):
+    def test_root_owned_immutable_executable_is_readable_without_relaxing_private_inputs(self):
+        import os
+        installed=Path('/usr/bin/true')
+        self.assertEqual(installed.stat().st_uid,0)
+        self.assertEqual(pilot.code_bytes(installed,1024*1024),installed.read_bytes())
+        if os.getuid()!=0:
+            with self.assertRaises(ValueError):read(installed,1024*1024)
+    def test_code_reader_rejects_writes_symlinks_bounds_and_unsealed_root_paths(self):
+        import stat
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix='p45code-',dir='/private/tmp') as folder:
+            root=Path(folder);p=root/'code.py';create(p,b'approved-code')
+            self.assertEqual(pilot.code_bytes(p,100),b'approved-code')
+            with self.assertRaises(ValueError):pilot.code_bytes(p,2)
+            p.chmod(0o666)
+            with self.assertRaises(ValueError):pilot.code_bytes(p,100)
+            p.chmod(0o600);link=root/'link';link.symlink_to(p)
+            with self.assertRaises(OSError):pilot.code_bytes(link,100)
+            if os.getuid()!=0:
+                fake=SimpleNamespace(st_uid=0,st_mode=stat.S_IFREG|0o444,st_size=p.stat().st_size)
+                with patch.object(pilot.os,'fstat',return_value=fake),self.assertRaises(ValueError):pilot.code_bytes(p,100)
+
+
 if __name__=='__main__':unittest.main()
