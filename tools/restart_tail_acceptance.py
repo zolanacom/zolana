@@ -9,6 +9,28 @@ import service_account as service
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def admission_reads_preserved(before,after):
+    """RPC reads consume durable ingress quotas, never membership or faucet grants."""
+    def bucket(a,b):
+        return b['period']>=a['period'] and (b['period']>a['period'] or b['count']>=a['count'])
+    if after['last_time']<before['last_time'] or not bucket(before['global_rpc'],after['global_rpc']):return False
+    def stable(value):
+        value=json.loads(json.dumps(value))
+        for field in ['last_time','global_rpc','edge']:value.pop(field)
+        for invitation in value['invitations']:
+            if invitation.get('member'):invitation['member'].pop('rpc')
+        return value
+    if stable(before)!=stable(after):return False
+    for a,b in zip(before['invitations'],after['invitations']):
+        if a.get('member') and not bucket(a['member']['rpc'],b['member']['rpc']):return False
+    old={(v['channel'],v['peer']):v['bucket'] for v in before['edge']}
+    new={(v['channel'],v['peer']):v['bucket'] for v in after['edge']}
+    current=after['last_time']//60
+    if any(key not in new and value['period']>=current for key,value in old.items()):return False
+    if any(key in old and not bucket(old[key],value) for key,value in new.items()):return False
+    if any(key not in old and key[0]!='rpc' for key in new):return False
+    return True
+
 def write(path,value,owner=None,mode=0o600):
     raw=(json.dumps(value,sort_keys=True,indent=2)+'\n').encode()
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode)
@@ -96,11 +118,7 @@ def main():
         import stat
         receipt=Path('/private/tmp/native-tail-029-g3xxx4ft')/('desktop-recheck'+attempt)/'result.json'
         admission=json.loads((ROOT/'faucet/admission.json').read_text())
-        def members(value):
-            value=json.loads(json.dumps(value))
-            for invitation in value['invitations']:
-                if invitation.get('member'):invitation['member'].pop('rpc',None)
-            return value
+        write(evidence/'admission-before-desktop.json',admission,owner)
         token=os.urandom(24).hex()
         progress({'phase':'desktop_wallet_check_ready','token':token})
         deadline=time.monotonic()+150
@@ -111,11 +129,15 @@ def main():
         with os.fdopen(fd,'rb') as stream:
             info=os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid!=config['desktop_uid'] or info.st_nlink!=1 or info.st_size>8192:raise ValueError('invalid desktop check receipt')
-            value=json.loads(stream.read())
+            raw=stream.read(8193)
+            if len(raw)>8192:raise ValueError('desktop receipt grew beyond bound')
+            value=json.loads(raw)
         if value.get('token')!=token or value.get('status')!='passed' or value.get('original_wallets_unchanged') is not True:raise ValueError('desktop wallet check failed: '+str(value.get('error','invalid receipt')))
         result=value['balances']
         if result!={'alice':895000,'bob':1105000}:raise ValueError('existing invited desktop balances differ')
-        if members(admission)!=members(json.loads((ROOT/'faucet/admission.json').read_text())):raise ValueError('wallet reads changed invitation identity or faucet usage')
+        after=json.loads((ROOT/'faucet/admission.json').read_text())
+        write(evidence/'admission-after-desktop.json',after,owner)
+        if not admission_reads_preserved(admission,after):raise ValueError('wallet reads changed invitation identity or faucet usage')
         return result
     def archive():
         value=json.loads(service.as_service('archival-check',config).stdout)
@@ -186,6 +208,7 @@ def main():
         start();orderly,_=wait(max(v['highest_stored_slot'] for v in crash)+8)
         if orderly['native_state']!=baseline['native_state'] or fixed()!=before_files:raise ValueError('repeated restart changed payment state')
         balances();pages.append(archive())
+        write(evidence/'post-orderly-live.json',dict(orderly,archival_page=pages[-1]),owner)
         if fixed()!=before_files:raise ValueError('restarts changed original private state')
         desktop=desktop_balances() if recheck and int(attempt)>=5 else None
         stop();final=inventory('after-orderly-restart');preserve(crash,final);preserve(initial,final);preserve(original_inventory,final)
