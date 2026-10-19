@@ -295,7 +295,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200,{key:data[key] for key in ('network','genesis_hash')})
         assets = {"/": ("index.html", "text/html; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                  "/style.css": ("style.css", "text/css; charset=utf-8")}
+                  "/style.css": ("style.css", "text/css; charset=utf-8"),
+                  "/zolana-mark.svg": ("zolana-mark.svg", "image/svg+xml"),
+                  "/favicon.svg": ("favicon.svg", "image/svg+xml")}
         if self.path not in assets:
             return self.respond(404, {"error": "Not found."})
         name, mime = assets[self.path]

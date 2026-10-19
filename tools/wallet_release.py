@@ -154,7 +154,8 @@ def safe_name(name):
 
 def inventory(files):
     if 'MANIFEST.json' not in files or not REQUIRED<=set(files):raise ValueError('wallet release missing required files')
-    if any(name not in REQUIRED|{'MANIFEST.json','BUILD.json'} and not name.startswith('notices/') for name in files):raise ValueError('file outside wallet release allowlist')
+    # Optional fixed brand assets keep existing authenticated releases valid.
+    if any(name not in REQUIRED|{'MANIFEST.json','BUILD.json','assets/zolana-mark.svg','assets/favicon.svg'} and not name.startswith('notices/') for name in files):raise ValueError('file outside wallet release allowlist')
     raw=files['MANIFEST.json']
     if len(raw)>1_000_000:raise ValueError('manifest exceeds limit')
     manifest=decode(raw)

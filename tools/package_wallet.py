@@ -111,7 +111,7 @@ def main():
         "LICENSE": PROJECT / "LICENSE", "THIRD_PARTY.md": PROJECT / "THIRD_PARTY.md",
         "AGAVE-LICENSE": PROJECT / "node/agave/LICENSE",
         "README.txt": PROJECT / "docs/tester-wallet-quickstart.txt",
-        **{"assets/" + name: PROJECT / "clients/wallet-ui" / name for name in ("index.html", "style.css", "app.js")},
+        **{"assets/" + name: PROJECT / "clients/wallet-ui" / name for name in ("index.html", "style.css", "app.js", "zolana-mark.svg", "favicon.svg")},
     }.items():
         if source.is_symlink() or not source.is_file():
             raise ValueError("bundle input must be a regular file: " + destination)

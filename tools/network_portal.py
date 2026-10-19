@@ -188,9 +188,10 @@ class Handler(BaseHTTPRequestHandler):
                 params=parse_qs(url.query,keep_blank_values=True,max_num_fields=3)
                 if any(len(v)!=1 for v in params.values()):raise ValueError('duplicate query')
                 return self.respond(200,json.dumps(self.server.app.query(url.path,params),allow_nan=False).encode())
-            paths={'/':'index.html','/style.css':'style.css','/app.js':'app.js','/views.js':'views.js','/veil.png':'veil.png','/favicon.svg':'favicon.svg'}
+            paths={'/':'index.html','/style.css':'style.css','/app.js':'app.js','/views.js':'views.js','/zolana-mark.svg':'zolana-mark.svg','/favicon.svg':'favicon.svg'}
             if url.query or url.path not in paths:return self.respond(404,b'{"error":"Page not found."}')
-            path=ASSETS/paths[url.path];raw=path.read_bytes()
+            root=ASSETS.parent/'wallet-ui' if url.path in ('/zolana-mark.svg','/favicon.svg') else ASSETS
+            path=root/paths[url.path];raw=path.read_bytes()
             self.respond(200,raw,mimetypes.guess_type(path)[0] or 'application/octet-stream')
         except (OSError,ValueError,KeyError,RecursionError):self.respond(400,b'{"error":"History request unavailable. Preserve the selected source and try again."}')
     def do_POST(self):self.respond(405,b'{"error":"This explorer is read-only."}')

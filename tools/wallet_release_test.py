@@ -72,6 +72,15 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(bundle,obj.current());self.assertEqual(obj.state['sequence'],1)
         self.assertEqual((bundle/'bin/native-wallet').stat().st_mode&0o777,0o500)
 
+    def test_brand_assets_are_optional_for_old_releases_and_authenticated_for_new_ones(self):
+        release.inventory(self.files)
+        files=self.mutate(self.files,'assets/zolana-mark.svg',b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+        files=self.mutate(files,'assets/favicon.svg',b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>')
+        paths=self.sign(files=files);obj=self.opened();bundle=obj.install(*paths)
+        self.assertEqual((bundle/'assets/zolana-mark.svg').read_bytes(),files['assets/zolana-mark.svg'])
+        files['assets/favicon.svg']+=b'changed'
+        with self.assertRaisesRegex(ValueError,'digest mismatch'):release.inventory(files)
+
     def test_changed_archive_or_descriptor_or_signature_or_wrong_key_is_denied(self):
         archive_path,descriptor=self.sign();obj=self.opened();original=archive_path.read_bytes()
         archive_path.write_bytes(original+b'changed')

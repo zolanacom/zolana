@@ -1,13 +1,13 @@
 :root {
   color-scheme:dark;
-  --bg:#100d16;
-  --fg:#f3f0f7;
-  --muted:#a299af;
-  --line:#332b3c;
-  --accent:#bfa6ee;
-  --surface:#191420;
-  --amber:#e4b36c;
-  font-family:"Avenir Next",Avenir,"Helvetica Neue",Arial,sans-serif;
+  --bg:#000000;
+  --fg:#f5f4ef;
+  --muted:#a4a49b;
+  --line:#30302b;
+  --accent:#ffc21a;
+  --surface:#121210;
+  --amber:#ffc21a;
+  font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
   font-synthesis:none
 }
 
@@ -97,9 +97,9 @@ button[hidden],[hidden] {
   display:flex;
   align-items:center;
   gap:17px;
-  font-size:25px;
-  font-weight:500;
-  letter-spacing:.07em
+  font-size:32px;
+  font-weight:700;
+  letter-spacing:-.045em
 }
 
 .ticker {
@@ -110,14 +110,10 @@ button[hidden],[hidden] {
   padding-top:4px
 }
 
-.eclipse {
-  width:32px;
-  height:32px;
-  border:1px solid #91899b;
-  border-left:4px solid var(--fg);
-  border-radius:50%;
-  transform:rotate(22deg);
-  display:inline-block;
+.brand-mark {
+  width:44px;
+  height:auto;
+  display:block;
   flex-shrink:0
 }
 
@@ -125,7 +121,7 @@ button[hidden],[hidden] {
   display:flex;
   gap:40px;
   font-size:14px;
-  color:#b8b0c3;
+  color:#b5b5ac;
   height:100%;
   align-items:center
 }
@@ -150,20 +146,22 @@ button[hidden],[hidden] {
 }
 
 .wallet-button {
-  border:1px solid #beb5ca;
-  background:transparent;
+  border:1px solid #ffc21a;
+  background:var(--accent);
+  color:#000;
   border-radius:28px;
-  font-size:13px;
-  padding:8px 19px;
+  font-size:14px;
+  font-weight:600;
+  padding:10px 22px;
   white-space:nowrap
 }
 
 .wallet-button:hover {
-  background:#292232
+  background:#ffcf4d
 }
 
 .hero {
-  height:446px;
+  height:454px;
   position:relative;
   display:flex;
   align-items:center
@@ -180,7 +178,7 @@ button[hidden],[hidden] {
   font-size:clamp(72px,8.65vw,132px);
   line-height:.94;
   letter-spacing:-.065em;
-  font-weight:600;
+  font-weight:700;
   margin:4px 0 25px
 }
 
@@ -201,9 +199,9 @@ button[hidden],[hidden] {
 
 .primary {
   background:var(--accent);
-  color:#130c20;
+  color:#000000;
   border:0;
-  border-radius:32px;
+  border-radius:20px;
   display:inline-flex;
   align-items:center;
   justify-content:center;
@@ -216,7 +214,7 @@ button[hidden],[hidden] {
 }
 
 .primary:hover {
-  background:#cfb8fb
+  background:#ffcf4d
 }
 
 .primary svg {
@@ -229,7 +227,7 @@ button[hidden],[hidden] {
   padding:8px 0;
   background:none;
   border:0;
-  color:#d6c6ed;
+  color:#e3e3db;
   font-size:15px
 }
 
@@ -237,16 +235,15 @@ button[hidden],[hidden] {
   color:var(--fg)
 }
 
-.veil {
+.hero-mark {
   position:absolute;
   z-index:0;
-  right:-38px;
-  top:-35px;
-  width:61%;
-  height:500px;
+  right:5.5%;
+  top:38px;
+  width:34%;
+  height:auto;
   object-fit:contain;
-  pointer-events:none;
-  mix-blend-mode:lighten
+  pointer-events:none
 }
 
 .status-rail {
@@ -262,7 +259,7 @@ button[hidden],[hidden] {
 }
 
 .rail-inner>div+div {
-  border-left:1px solid #423648;
+  border-left:1px solid #363630;
   padding-left:44px
 }
 
@@ -270,7 +267,7 @@ button[hidden],[hidden] {
   display:flex;
   gap:17px;
   align-items:center;
-  color:#c0b6cf;
+  color:#bdbdb4;
   font-size:14px
 }
 
@@ -284,11 +281,11 @@ button[hidden],[hidden] {
 }
 
 .status-dot.unknown {
-  background:#8f879a
+  background:#8c8c84
 }
 
 .status-dot.running {
-  background:#9ed9b9
+  background:#b7d6a4
 }
 
 .measurement {
@@ -296,7 +293,7 @@ button[hidden],[hidden] {
   flex-direction:column;
   font-size:13px;
   line-height:1.4;
-  color:#aaa0b8
+  color:#a4a49b
 }
 
 .measurement strong {
@@ -323,13 +320,13 @@ button[hidden],[hidden] {
   font-size:40px;
   line-height:1.2;
   letter-spacing:-.05em;
-  font-weight:500;
+  font-weight:600;
   margin:0
 }
 
 .search {
   display:flex;
-  border:1px solid #3a3044;
+  border:1px solid #3a3a32;
   border-radius:28px;
   padding:10px 16px;
   align-items:center;
@@ -363,7 +360,7 @@ button[hidden],[hidden] {
 }
 
 .search input::placeholder {
-  color:#a399b0
+  color:#a4a49b
 }
 
 .source-note {
@@ -374,7 +371,7 @@ button[hidden],[hidden] {
 }
 
 .source-note strong {
-  color:#d5c0f2;
+  color:#ffc21a;
   font-weight:500
 }
 
@@ -397,7 +394,7 @@ button[hidden],[hidden] {
   background:none;
   padding:0 0 11px;
   font-size:14px;
-  color:#b8adc6;
+  color:#b5b5ac;
   position:relative
 }
 
@@ -418,7 +415,7 @@ button[hidden],[hidden] {
 .refresh {
   border:0;
   background:none;
-  color:#b8adc6;
+  color:#b5b5ac;
   display:flex;
   align-items:center;
   gap:12px;
@@ -433,7 +430,7 @@ button[hidden],[hidden] {
 
 .notice {
   margin:0;
-  color:#d9bca4;
+  color:#ffbf90;
   font-size:13px
 }
 
@@ -455,7 +452,7 @@ table {
 
 thead {
   font-size:13px;
-  color:#b1a5bf
+  color:#a4a49b
 }
 
 th {
@@ -466,7 +463,7 @@ th {
 
 td {
   height:53px;
-  border-bottom:1px solid #282130;
+  border-bottom:1px solid #282823;
   padding:8px 12px 8px 0
 }
 
@@ -487,13 +484,13 @@ th:last-child,td:last-child {
 }
 
 tbody tr:hover {
-  background:#18121f
+  background:#121210
 }
 
 .data-link {
   border:0;
   background:none;
-  color:#d6c1f6;
+  color:#e8d28e;
   font:inherit;
   padding:0;
   text-align:left;
@@ -513,7 +510,7 @@ tbody tr:hover {
 }
 
 .recorded {
-  color:#b5a6c5;
+  color:#b5b5ac;
   font-size:12px;
   display:inline-flex;
   align-items:center;
@@ -524,7 +521,7 @@ tbody tr:hover {
   content:"";
   width:5px;
   height:5px;
-  background:#a99ac0;
+  background:#9c9c90;
   border-radius:50%
 }
 
@@ -550,10 +547,10 @@ tbody tr:hover {
 
 .load-more {
   display:block;
-  border:1px solid #4a3b58;
+  border:1px solid #424238;
   background:none;
   border-radius:25px;
-  color:#d8c9eb;
+  color:#e0e0d7;
   padding:9px 24px;
   margin:24px auto 0;
   font-size:13px
@@ -561,7 +558,7 @@ tbody tr:hover {
 
 .footer {
   border-top:1px solid var(--line);
-  color:#a197b0;
+  color:#a4a49b;
   font-size:12px
 }
 
@@ -589,7 +586,7 @@ tbody tr:hover {
 }
 
 .back-button {
-  border:1px solid #44364f;
+  border:1px solid #424238;
   background:none;
   border-radius:24px;
   padding:7px 16px;
@@ -606,7 +603,7 @@ tbody tr:hover {
 .detail-grid dt,.detail-grid dd {
   margin:0;
   padding:14px 0;
-  border-bottom:1px solid #2b2333;
+  border-bottom:1px solid #282823;
   font-size:14px
 }
 
@@ -631,7 +628,7 @@ tbody tr:hover {
 
 .content-copy {
   max-width:780px;
-  color:#b9afc7;
+  color:#b5b5ac;
   font-size:17px;
   line-height:1.8;
   margin:22px 0 30px
@@ -659,7 +656,7 @@ tbody tr:hover {
 
 .fact p {
   margin:0;
-  color:#b9afc7;
+  color:#b5b5ac;
   font-size:15px;
   line-height:1.8;
   max-width:670px
@@ -682,9 +679,9 @@ tbody tr:hover {
 }
 
 dialog {
-  background:#191321;
+  background:#121210;
   color:var(--fg);
-  border:1px solid #4a3b58;
+  border:1px solid #424238;
   border-radius:22px;
   padding:42px;
   width:min(640px,calc(100vw - 32px));
@@ -694,7 +691,7 @@ dialog {
 }
 
 dialog::backdrop {
-  background:#08050dbd;
+  background:#000000c9;
   backdrop-filter:blur(7px)
 }
 
@@ -709,11 +706,14 @@ dialog h2 {
 dialog p {
   font-size:15px;
   line-height:1.8;
-  color:#c9bed5
+  color:#c7c7bd
 }
 
 .dialog-symbol {
-  margin-bottom:12px
+  margin-bottom:12px;
+  display:block;
+  width:48px;
+  height:auto
 }
 
 .close-dialog {
@@ -725,7 +725,7 @@ dialog p {
   font-size:29px;
   font-weight:300;
   line-height:1;
-  color:#c9bed5;
+  color:#c7c7bd;
   padding:6px
 }
 
@@ -777,7 +777,7 @@ dialog p {
   top:-100px;
   background:var(--accent);
   padding:12px;
-  color:#100d16;
+  color:#000000;
   z-index:5
 }
 
@@ -789,9 +789,8 @@ dialog p {
   .hero {
     height:500px
   }
-  .veil {
-    height:560px;
-    top:-45px
+  .hero-mark {
+    top:44px
   }
 }
 
@@ -812,11 +811,10 @@ dialog p {
     font-size:18px;
     max-width:350px
   }
-  .veil {
-    right:-32px;
-    width:59%;
-    top:0;
-    height:410px
+  .hero-mark {
+    right:0;
+    width:35%;
+    top:58px
   }
   .rail-inner>div+div {
     padding-left:24px
@@ -845,9 +843,8 @@ dialog p {
     font-size:23px;
     gap:12px
   }
-  .eclipse {
-    width:28px;
-    height:28px
+  .brand-mark {
+    width:34px
   }
   .ticker {
     font-size:10px;
@@ -875,7 +872,7 @@ dialog p {
     right:8px
   }
   .hero {
-    height:570px;
+    height:540px;
     align-items:flex-start;
     padding-top:27px
   }
@@ -904,12 +901,12 @@ dialog p {
   .plain {
     font-size:13px
   }
-  .veil {
-    width:100%;
-    height:260px;
-    right:-18px;
-    top:310px;
-    object-position:right center
+  .hero-mark {
+    width:210px;
+    max-width:65%;
+    height:auto;
+    right:20px;
+    top:315px
   }
   .rail-inner {
     grid-template-columns:1fr 1fr;
@@ -1070,20 +1067,14 @@ dialog p {
     font-weight:700;
     letter-spacing:-.035em
   }
-  .veil {
-    right:-45px;
-    top:-70px;
-    width:69%;
-    height:600px
-  }
 }
 
 @media(min-width:1101px) and (max-width:1699px) {
   .hero {
-    height:470px
+    height:454px
   }
   .hero-copy {
-    transform:translateY(-12px)
+    transform:none
   }
 }
 
