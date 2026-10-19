@@ -1,0 +1,13 @@
+# Prepare Apple distribution on authenticated copies
+
+The tester wallet is a folder containing a native executable and a Python launcher. Prepare a UDIF disk image rather than implying that this is already a self-contained application. Apple documents disk images as notarization containers; standalone executables and ZIP files cannot receive a stapled ticket directly. See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+
+Keep the first implementation local. Independently authenticate a `path-remapped-development` archive against external publisher/profile pins and rollback state, then copy it into a new private preparation directory. Do not select a Developer ID identity, inspect or modify credentials/keychains, request secure timestamps, submit to Apple, staple tickets or run online Gatekeeper assessments. The only executable signing route is ad-hoc signing with timestamping disabled.
+
+Enable hardened runtime with explicit empty entitlements on the copied executable. Verify the actual signature and identity. Bind its pre-sign `BUILD.json` to signed bytes through `APPLE.json`: normalize only the terminal signature blob reference and containing linkedit size fields, while all other code, data and load commands must match. Rebuild the inventory under `apple-signing-rehearsal`, intentionally outside the generic update installer's accepted kinds. Original archive authentication does not authenticate the derived image.
+
+Record phases atomically under an exclusive workspace lock. On incomplete preparation, retain the old attempt and create another derived attempt from the same authenticated input. Completed preparation is idempotent. Read-only image inspection records its image digest, reserved mountpoint and device. Recovery reconciles actual attachments and detaches only that exact owned image/mountpoint/device; unexpected attachments fail closed.
+
+Emit an execution-disabled future Developer ID/notarytool plan. A separate durable local-fixture handoff models ambiguous submission, explicit UUID reconciliation, rejection, stapling and assessment failures. It executes no Apple commands and always records `notarized: false` and `release_ready: false`, including successful fixtures. This validates preparation and failure handling, not live notarization.
+
+Real distribution still requires a reviewed identity, Developer ID signing, secure timestamps, accepted Apple submission, stapled-ticket/Gatekeeper acceptance and independent publisher authentication of final stapled bytes. External Python 3.10+ remains necessary. No application installer, bundled runtime, Apple approval or production-readiness claim is made.
