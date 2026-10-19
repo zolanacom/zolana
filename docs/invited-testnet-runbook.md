@@ -102,3 +102,7 @@ PYTHONPATH=tools RAYON_NUM_THREADS=2 nice -n 15 python3 tools/canonical_archive_
 ```
 
 The runner retains evidence and journals and stops its owned validators in cleanup. It does not start or reset the installed service. Keep validators stopped outside these bounded tests.
+
+### Independent recovery replica
+
+The v6 service can require an independently operated TLS history receiver before reporting retention healthy. Receiver outage fails closed, and the requirement persists across restart. LOCAL-030 passed real process crashes, fresh-seed recovery through a snapshot-only peer with source history unavailable, recovered spending and original-service outage/restart checks. Follow the [replica runbook](history-replica-runbook.md) for finite local rehearsal and credential/pin provisioning. No off-host receiver or permanent operator policy is configured by those tests. Actual separate-host storage, alerting, hosted ingress, release signing and independent review remain necessary before external invitations. Retained ciphertext history still cannot resolve old ambiguous outer transactions without canonical archival RPC.

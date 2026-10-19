@@ -4,7 +4,7 @@ from pathlib import Path
 
 BASE=Path('/Library/NativePayLocal')
 ROOT=BASE/'.data/s20'
-sys.path.insert(0,str(BASE/'tools'))
+if __name__=='__main__':sys.path.insert(0,str(BASE/'tools'))
 import service_account as service
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()

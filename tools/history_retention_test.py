@@ -190,5 +190,52 @@ class WorkerTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 Retention(self.root, self.root / 'binary', 'http://127.0.0.1:18899', lambda *args: 1, **kwargs)
 
+    def replica_policy(self):
+        write(self.root/'history-replica.json',json.dumps({'format':'native-history-replication-v1',
+            'url':'https://127.0.0.1:12345','ca_sha256':'a'*64}).encode())
+
+    def test_configured_replica_ack_precedes_ready_and_uses_no_wallet_keys(self):
+        self.replica_policy()
+        receipt={'durable':True,'manifest_sha256':'verified-remote-checkpoint'}
+        with patch('history_retention.subprocess.Popen',return_value=self.child()), patch('history_replica.replicate',return_value=receipt) as transfer:
+            result=self.worker.collect()
+        self.assertEqual(result['phase'],'ready');self.assertEqual(result['replica'],receipt)
+        self.assertEqual(transfer.call_args.args[:2],(self.worker.mirror,NETWORK))
+        self.assertEqual(transfer.call_args.args[3:5],(self.root/'history-replica.key',self.root/'history-replica-ca.crt'))
+        self.assertIs(transfer.call_args.args[-1],self.worker.stop)
+
+    def test_configured_replica_outage_fails_closed_without_erasing_local_history(self):
+        self.replica_policy();capture(self.worker.primary,self.worker.mirror,NETWORK)
+        original=(self.worker.mirror/'manifest.json').read_bytes()
+        with patch('history_retention.subprocess.Popen',return_value=self.child()), patch('history_replica.replicate',side_effect=OSError('receiver unavailable')):
+            with self.assertRaisesRegex(ValueError,'replica_unavailable'):self.worker.collect()
+        self.assertFalse(self.worker.healthy());self.assertEqual(self.worker.info['phase'],'blocked')
+        self.assertEqual((self.worker.mirror/'manifest.json').read_bytes(),original)
+
+    def test_removing_required_replica_policy_cannot_silently_disable_replication(self):
+        self.replica_policy()
+        with patch('history_retention.subprocess.Popen',return_value=self.child()), patch('history_replica.replicate',return_value={'durable':True}):self.worker.collect()
+        (self.root/'history-replica.json').unlink()
+        with patch('history_retention.subprocess.Popen',return_value=self.child()):
+            with self.assertRaises(FileNotFoundError):self.worker.collect()
+        self.assertFalse(self.worker.healthy())
+
+    def test_invalid_replica_policy_never_calls_transport_or_reports_ready(self):
+        self.replica_policy();value=json.loads((self.root/'history-replica.json').read_bytes());value['ca_sha256']='not-a-pin'
+        write(self.root/'history-replica.json',json.dumps(value).encode())
+        with patch('history_retention.subprocess.Popen',return_value=self.child()), patch('history_replica.replicate') as transfer:
+            with self.assertRaisesRegex(ValueError,'replica_policy_invalid'):self.worker.collect()
+        transfer.assert_not_called();self.assertFalse(self.worker.healthy())
+
+    def test_restart_preserves_required_replica_even_if_configuration_disappears(self):
+        self.replica_policy()
+        with patch('history_retention.subprocess.Popen',return_value=self.child()), patch('history_replica.replicate',return_value={'durable':True}):self.worker.collect()
+        (self.root/'history-replica.json').unlink()
+        restarted=Retention(self.root,self.root/'binary','http://127.0.0.1:18899',lambda method,params:0 if method=='getFirstAvailableBlock' else 1)
+        restarted.resources=lambda:None
+        with patch('history_retention.subprocess.Popen',return_value=self.child()):
+            with self.assertRaises(FileNotFoundError):restarted.collect()
+        self.assertFalse(restarted.healthy());self.assertTrue(restarted.replica_required)
+
 
 if __name__ == '__main__': unittest.main()

@@ -82,6 +82,12 @@ def block_hash(value):
 
 def manifest(path, network, owner=None):
     raw = read(path / 'manifest.json', MAX_MANIFEST, owner)
+    return parse_manifest(raw, network)
+
+
+def parse_manifest(raw, network):
+    if not 0 < len(raw) <= MAX_MANIFEST:
+        raise ValueError('history manifest exceeds bound')
     value = json.loads(raw)
     if not isinstance(value, dict) or set(value) != {'format', 'network', 'segments'} or value['format'] != 'native-payment-history-v1' or value['network'] != network or not isinstance(value['segments'], list) or len(value['segments']) > MAX_SEGMENTS:
         raise ValueError('history manifest identity or capacity mismatch')
@@ -188,6 +194,15 @@ class Retention:
             raise ValueError('invalid bounded retention policy')
         self.interval, self.minimum_free, self.budget = interval, minimum_free, budget
         self.path = self.root / 'history-retention.json'
+        self.replica_config = self.root / 'history-replica.json'
+        self.replica_marker = self.root / 'history-replica-required.json'
+        required = {'format': 'native-required-history-replica-v1'}
+        if os.path.lexists(self.replica_marker):
+            if json.loads(read(self.replica_marker, 1024)) != required:
+                raise ValueError('invalid persistent replica requirement; preserve original policy')
+        elif os.path.lexists(self.replica_config):
+            atomic(self.replica_marker, json.dumps(required).encode())
+        self.replica_required = os.path.lexists(self.replica_marker)
         self.stop = threading.Event(); self.lock = threading.Lock(); self.operation = threading.Lock()
         self.child = None; self.thread = None
         self.info = {'format': 'native-history-retention-v1', 'phase': 'starting', 'last_success': None, 'finalized_slot': 0, 'child_pid': None, 'error': None}
@@ -255,8 +270,31 @@ class Retention:
                 live = self.query('getSlot', [{'commitment': 'finalized'}])
                 if not natural(live) or copied['finalized_slot'] != result['finalized_slot'] or live < copied['finalized_slot'] or live - copied['finalized_slot'] > MAX_LAG:
                     raise ValueError('retention_checkpoint_lag')
+                replica = None
+                if self.replica_required or os.path.lexists(self.replica_config):
+                    self.replica_required = True
+                    if not os.path.lexists(self.replica_marker):
+                        atomic(self.replica_marker, json.dumps({'format':'native-required-history-replica-v1'}).encode())
+                    from history_replica import replicate
+                    policy = json.loads(read(self.replica_config, 4096))
+                    if (not isinstance(policy, dict) or set(policy) != {'format', 'url', 'ca_sha256'}
+                            or policy['format'] != 'native-history-replication-v1'
+                            or not isinstance(policy['ca_sha256'], str)
+                            or re.fullmatch('[0-9a-f]{64}', policy['ca_sha256']) is None):
+                        raise ValueError('retention_replica_policy_invalid')
+                    self.record(phase='replicating')
+                    try:
+                        replica = replicate(self.mirror, self.network, policy['url'],
+                            self.root / 'history-replica.key', self.root / 'history-replica-ca.crt',
+                            policy['ca_sha256'], self.stop)
+                    except Exception:
+                        raise ValueError('retention_replica_unavailable_or_unverified') from None
+                    live = self.query('getSlot', [{'commitment': 'finalized'}])
+                    if not natural(live) or live < copied['finalized_slot'] or live - copied['finalized_slot'] > MAX_LAG:
+                        raise ValueError('retention_replica_checkpoint_lag')
                 self.record(phase='ready', child_pid=None, error=None, last_success=time.time(), live_slot=live, first_available_slot=first,
-                    primary_bytes=usage(self.primary, self.budget), mirror_bytes=usage(self.mirror, self.budget), storage_budget=self.budget, **copied)
+                    primary_bytes=usage(self.primary, self.budget), mirror_bytes=usage(self.mirror, self.budget), storage_budget=self.budget,
+                    replica=replica, **copied)
                 return dict(self.info)
             except BaseException as error:
                 code = str(error) if isinstance(error, ValueError) and str(error).startswith('retention_') else 'retention_verification_failed'
@@ -276,7 +314,7 @@ class Retention:
     def healthy(self):
         with self.lock:
             success = self.info['last_success']
-            return self.info['phase'] in ('ready', 'collecting') and success is not None and 0 <= time.time() - success <= SUCCESS_AGE and (self.thread is None or self.thread.is_alive())
+            return self.info['phase'] in ('ready', 'collecting', 'replicating') and success is not None and 0 <= time.time() - success <= SUCCESS_AGE and (self.thread is None or self.thread.is_alive())
 
     def close(self):
         self.stop.set()

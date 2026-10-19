@@ -109,8 +109,8 @@ def enable_replay_diagnostics():
             'warn,solana_core::replay_stage=info,solana_core::consensus=info'],capture_output=True,check=True,timeout=10)
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False):
-    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test:os.nice(10)
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False,replica_test=False):
+    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test:os.nice(10)
     load(ROOT)
     if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
     children=[None,None];shutdown=threading.Event();ingress=None;retention=None
@@ -139,10 +139,10 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
 
     try:
         test_deadline=None
-        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test:
+        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test:
             from service_tls import private_bytes
-            session_name='restart-tail-session-029.json' if tail_test else 'canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-restart-tail-test-v1' if tail_test else 'local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='history-replica-session-030.json' if replica_test else 'restart-tail-session-029.json' if tail_test else 'canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-history-replica-test-v1' if replica_test else 'local-restart-tail-test-v1' if tail_test else 'local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
@@ -315,6 +315,7 @@ if __name__=='__main__':
     elif action=='run-history-test':output=supervise(history_test=True)
     elif action=='run-archival-test':output=supervise(archival_test=True)
     elif action=='run-tail-test':output=supervise(tail_test=True)
+    elif action=='run-replica-test':output=supervise(replica_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':

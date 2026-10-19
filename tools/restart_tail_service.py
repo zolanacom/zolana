@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 BASE=Path('/Library/NativePayLocal')
-sys.path.insert(0,str(BASE/'tools'))
+if __name__=='__main__':sys.path.insert(0,str(BASE/'tools'))
 import service_account as service
 
 DIAGNOSTIC=BASE/'.diagnostics/LOCAL-029/native-localnet'

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 
 class RuntimeRetentionTests(unittest.TestCase):
-    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False, tail=False, restart=False):
+    def exercise(self, failure=None, waits=(True,), close_failure=False, expired_after_start=False, terminate_during_start=False, archival=False, tail=False, restart=False, replica=False):
         events = []
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); root = base / '.data/s20'; root.mkdir(parents=True)
@@ -49,11 +49,11 @@ class RuntimeRetentionTests(unittest.TestCase):
             exec(compile(ast.Module(body=[function],type_ignores=[]),'service_runtime.py','exec'), namespace)
             modules = {'history_retention': SimpleNamespace(Retention=Mock(return_value=retention)),
                        'service_ingress': SimpleNamespace(Ingress=opening),
-                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-restart-tail-test-v1' if tail else 'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
+                       'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-history-replica-test-v1' if replica else 'local-restart-tail-test-v1' if tail else 'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
             with patch.dict('sys.modules', modules):
                 if close_failure:
                     with self.assertRaisesRegex(RuntimeError,'cleanup failed'):namespace['supervise']()
-                else: namespace['supervise'](retention_test=expired_after_start and not archival and not tail,archival_test=archival,tail_test=tail)
+                else: namespace['supervise'](retention_test=expired_after_start and not archival and not tail and not replica,archival_test=archival,tail_test=tail,replica_test=replica)
         return events
 
     def test_verified_initial_mirror_precedes_ingress_and_normal_shutdown_stops_everything(self):
@@ -82,6 +82,10 @@ class RuntimeRetentionTests(unittest.TestCase):
     def test_tail_rehearsal_uses_its_own_deadline_and_stops_both_validators(self):
         self.assertEqual(self.exercise(tail=True),['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
         self.assertEqual(self.exercise(tail=True,expired_after_start=True),['retention-start','retention-close','stop1','stop0'])
+
+    def test_replica_rehearsal_obeys_its_own_deadline_and_always_pauses_nodes(self):
+        self.assertEqual(self.exercise(replica=True),['retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
+        self.assertEqual(self.exercise(replica=True,expired_after_start=True),['retention-start','retention-close','stop1','stop0'])
 
     def test_restarted_cluster_requires_fresh_finality_before_retention_and_ingress(self):
         self.assertEqual(self.exercise(tail=True,restart=True),['fresh-finality','retention-start','ingress-open','ingress-close','retention-close','stop1','stop0'])
