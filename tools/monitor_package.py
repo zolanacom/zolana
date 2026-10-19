@@ -7,7 +7,7 @@ from pathlib import Path
 import stat
 import zipfile
 
-RUNTIME=('operator_health.py','operator_monitor.py','monitor_transport.py','offhost_monitor.py')
+RUNTIME=('operator_health.py','operator_monitor.py','monitor_transport.py','offhost_monitor.py','human_paging.py')
 README='''# Independent monitoring bundle
 
 This bundle uses Python 3.9+ and its standard library on macOS/Linux. It contains
@@ -17,7 +17,7 @@ the fixed file inventory and every digest before importing application code;
 this is integrity checking, not release signing or a security audit.
 
 Run with: python3 -I /absolute/bundle/run.py ACTION --config /private/config.json
-Actions: export, receive, watch, check. The exporter reads the sanitized heartbeat
+Actions: export, receive, watch, check, page, page-retry. The exporter reads the sanitized heartbeat
 and fixed macOS launchd job. Run it as an unprivileged desktop operator, not as
 the validator/key account. The observer and alert inbox run independently on
 macOS or Linux and need no validator installation or raw RPC access.
@@ -56,9 +56,22 @@ Keep the original route, deployment and CA pins for a pending journal. Changing
 them requires an explicit reviewed migration, not silent redirection.
 
 The receiver's owner-only inbox.json is the remote machine-delivery destination.
-Connecting it to human paging, email, Telegram, Slack or another webhook service
-is a separate operator choice; no accounts/messages or human notifications are
-created here. A durable machine receipt is not proof that a person was notified.
+The page action prepares a downstream PagerDuty Events v2 adapter, with a separate
+private provider integration key and pinned route/cursor. It groups fault updates
+into one open incident per observer stream and resolves the same key on recovery.
+Local mode calls only mock loopback endpoints; live mode additionally allowlists
+https://events.pagerduty.com/v2/enqueue and requires --allow-network. No provider
+key/account is created by this package. Use pager.example.json outside the bundle.
+Provider HTTP 202 acceptance is not proof that a person received/acknowledged a
+page. Configure and test an actual service escalation/contact policy separately.
+Rate limits/retries and pending actions survive restart. Rejected credentials or
+payloads block visibly without discarding pending events. Do not change a pending
+route/integration or reset state to bypass an error. Routing-key rotation needs
+a reviewed migration. Provider-side manual resolution can affect deduplication;
+this adapter does not claim exactly-once human notification.
+After fixing a rejected request, stop the pager and use page-retry with the same
+config to explicitly re-arm that original action; it makes no provider request.
+Then restart page. Restart alone never silently clears a rejected request.
 Keep an independent watchdog for the observer/delivery channel itself.
 
 Local tests do not establish real separate-host availability, power-loss safety,
@@ -75,6 +88,8 @@ def templates():
         'receiver.example.json':dict(format='native-alert-receiver-v1',deployment=deployment,origin='https://alerts.example.invalid',
             capability_file='alert-write.json',certificate_file='alerts.crt',key_file='alerts.key',root='private-alert-inbox'),
         'observer.example.json':dict(format='native-offhost-monitor-v1',deployment=deployment,source=peer('health','health-read'),alerts=peer('alerts','alert-write'),journal='private-observer-journal',interval_seconds=2,expect_running=True),
+        'pager.example.json':dict(format='native-human-pager-config-v1',deployment=deployment,inbox='private-alert-inbox',state='private-paging-state',interval_seconds=2,
+            provider=dict(endpoint='https://events.pagerduty.com/v2/enqueue',ca_file='provider-ca.crt',ca_sha256='REVIEWED_CA_SHA256',routing_key_file='provider-integration.json')),
     }
 
 
@@ -98,7 +113,7 @@ def checked(path):
  if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0,os.getuid()) or meta.st_mode&0o022:raise ValueError('unsafe monitoring bundle file')
  return path.read_bytes()
 manifest=json.loads(checked(root/'MANIFEST.json'))
-if set(manifest)!={'format','files'} or manifest['format']!='native-monitor-bundle-v1' or set(manifest['files'])!=set(names) or set(p.name for p in root.iterdir())!=set(names)|{'MANIFEST.json'}:raise ValueError('unexpected monitoring inventory')
+if set(manifest)!={'format','files'} or manifest['format']!='native-monitor-bundle-v2' or set(manifest['files'])!=set(names) or set(p.name for p in root.iterdir())!=set(names)|{'MANIFEST.json'}:raise ValueError('unexpected monitoring inventory')
 for name in names:
  raw=checked(root/name)
  if manifest['files'][name]!={'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}:raise ValueError('monitoring bundle changed')
@@ -110,7 +125,7 @@ except Exception:
  print('monitoring_failed; original evidence retained',file=sys.stderr);sys.exit(1)
 '''.replace('NAMES',repr(names))
     payload['run.py']=entry.encode()
-    manifest={'format':'native-monitor-bundle-v1','files':{name:{'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(payload.items())}}
+    manifest={'format':'native-monitor-bundle-v2','files':{name:{'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()} for name,raw in sorted(payload.items())}}
     payload['MANIFEST.json']=(json.dumps(manifest,sort_keys=True,indent=2)+'\n').encode()
     output.mkdir(mode=0o755)
     for name,raw in payload.items():

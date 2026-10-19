@@ -1,0 +1,13 @@
+# Add a durable human-paging adapter downstream of the inbox
+
+The durable monitoring inbox proves machine storage, not human notification. Prepare a separately runnable PagerDuty Events API v2 adapter. It owns its provider integration credential and paging state, without wallet keys, validator/RPC access or changing the source service. All development tests use loopback mock providers.
+
+Bind the paging journal to the source inbox/deployment, exact provider endpoint, pinned CA and integration-key fingerprint. Refuse silent destination/key changes. Consume an append-only snapshot without holding the receiver's process lock; validate its identity, schema, per-stream order and accepted canonical prefix on every step. Provider outages or blocked credentials must not stop the receiver from ingesting later events.
+
+Persist each planned action before network I/O, then persist its next retry time before attempting delivery. A stable deduplication key identifies one open outage cycle per observer stream. Subsequent fault-code updates use that key; recovery or explicit operator-pause resolution resolves the same key. A later outage receives a different key. Separate streams cannot resolve one another. Orphan resolutions are recorded as having no active page and make no provider call.
+
+Only a valid HTTP 202 success body with the planned key advances the local cursor. This records provider acceptance, never human receipt/acknowledgement. Crash before send resumes the same plan. Crash after provider acceptance but before local commit resends with the same key. After local commit, restart does not resend. An uncertain state write poisons the relay until restart; either the old pending cursor or new accepted cursor must remain recoverable.
+
+Persist backoff and rate-limit deadlines across restarts. Rejected requests block visibly and retain the pending action; restart alone cannot silently clear rejection. After fixing the cause, `page-retry` explicitly re-arms the same route/action without sending a request. Routing-key rotation or provider migration needs separate review because a recovery sent through another integration may not resolve the original alert.
+
+The v2 standalone monitoring bundle adds only adapter code and an example configuration. No provider account/integration key, service installation or actual human notification is created. Actual escalation/contact configuration, live human acceptance, separate-host operation, independent watchdog, release signing and review remain deployment work. Provider manual resolution, asynchronous processing and notification rules prevent any exactly-once or human-delivery guarantee from these local protocol tests.

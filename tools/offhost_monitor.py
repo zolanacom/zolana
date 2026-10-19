@@ -104,7 +104,7 @@ def binding(config):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('export','receive','watch','check','keygen'))
+    parser.add_argument('action',choices=('export','receive','watch','check','keygen','page','page-retry'))
     parser.add_argument('--config',type=Path)
     parser.add_argument('--deployment');parser.add_argument('--role',choices=('health-read','alert-write'))
     parser.add_argument('--output',type=Path)
@@ -121,6 +121,9 @@ def main():
         atomic(args.output,{'format':'native-monitor-capability-v1','deployment':args.deployment,'role':args.role,'token':secrets.token_hex(32)},0o600)
         print(json.dumps({'created':True,'role':args.role,'spending_or_rpc_capability':False}));return
     if args.config is None:raise ValueError('monitoring role requires a private config')
+    if args.action in ('page','page-retry'):
+        from human_paging import run
+        return run(args.config,args.duration,args.allow_network,retry_blocked=args.action=='page-retry')
     if not 0<=args.duration<=600 or (args.duration==0 and not args.allow_network):raise ValueError('local rehearsal requires a finite 1–600 second duration')
     if args.bind!='127.0.0.1' and not args.allow_network:raise ValueError('external bind requires explicit network authorization')
     config=load_config(args.config,args.allow_network)
