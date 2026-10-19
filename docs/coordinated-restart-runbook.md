@@ -1,4 +1,4 @@
-# Coordinated restart of the disposable local cluster
+# Coordinated restart of a preserved local cluster
 
 An ordinary restart retains Agave's vote-before-leader guard. If the 80% identity restarts, waiting for a new rooted vote can deadlock this two-node fixture. Use the explicit coordinated path when majority stake must restart. It uses the upstream `--wait-for-supermajority`, `--expected-bank-hash`, `--expected-shred-version` and `--require-tower` arguments, plus the opt-in native startup replay bound `--native-restart-checkpoint`. The bound preserves later ledger records for normal verified replay after the stake barrier; it changes startup control, not payment rules or protocol storage.
 
@@ -43,3 +43,7 @@ If the harness is interrupted immediately after its private send, it saves the a
 Everything binds to loopback and stays under ignored `.data`.
 
 A single direct unfrozen complete child can use peer-corroborated, no-voting offline replay. Multiple or uncorroborated complete children stay stored for native checkpoint startup and ordinary post-barrier verification; the helper never guesses their bank hashes. No shreds or towers are discarded. The sealed service always gates both validators and wraps rehearsals in one shared finite deadline; validators remain paused outside explicitly requested tests.
+
+Managed launches use `--native-durable-votes` so new signed votes require complete local data for the candidate and its unrooted ancestry. Native coordinated replay verifies historical local-leader blocks from the captured pre-start slot inventory instead of treating them as live TPU output. An optional `--native-restart-epoch-horizon`, with required ancestor slot/hash pins, opens at most one extra leader-schedule epoch from a shared frozen ancestor. It does not advance roots or replace towers; normal rooted schedules must agree when finality catches up. These custom runtime paths need independent review before external deployment. LOCAL-029 covers actual process SIGKILL and repeated restarts of the preserved installed ledgers; power-loss durability is not established.
+
+The installed-service acceptance performs existing invited-wallet reads in the original desktop session. A root child that merely changes UID does not inherit macOS Documents authorization. The finite controller publishes readiness, then validates a bounded, non-executable result receipt from that desktop check while separately checking invitation membership and faucet state. No persistent privileged command queue or authentication bypass is installed.
