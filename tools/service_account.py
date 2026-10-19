@@ -26,13 +26,15 @@ V3_RUNTIME_FILES=V2_RUNTIME_FILES+('history_retention.py',)
 V4_RUNTIME_FILES=V3_RUNTIME_FILES+('gateway_history.py',)
 V5_RUNTIME_FILES=V4_RUNTIME_FILES+('gateway_archival.py',)
 V6_RUNTIME_FILES=V5_RUNTIME_FILES+('history_replica.py',)
-RUNTIME_FILES=V6_RUNTIME_FILES+('operator_health.py','operator_monitor.py')
+V7_RUNTIME_FILES=V6_RUNTIME_FILES+('operator_health.py','operator_monitor.py')
+RUNTIME_FILES=V7_RUNTIME_FILES+('explorer_model.py','explorer_feed.py')
 BINARIES=LEGACY_BINARIES+('native-faucet',)
 V2_FILES=tuple('tools/'+n for n in V2_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V3_FILES=tuple('tools/'+n for n in V3_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V4_FILES=tuple('tools/'+n for n in V4_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V5_FILES=tuple('tools/'+n for n in V5_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 V6_FILES=tuple('tools/'+n for n in V6_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
+V7_FILES=tuple('tools/'+n for n in V7_RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 FILES=tuple('tools/'+n for n in RUNTIME_FILES)+tuple('target/debug/'+n for n in BINARIES)+('LICENSE','THIRD_PARTY.md','node/agave/LICENSE')
 
 
@@ -52,7 +54,7 @@ def verify_bundle(root,expected=None):
     raw=regular(root/'MANIFEST.json',32768)
     if expected is not None and digest(raw)!=expected:raise ValueError('administrator-approved manifest changed')
     manifest=json.loads(raw)
-    inventory={'native-service-bundle-v1':LEGACY_FILES,'native-service-bundle-v2':V2_FILES,'native-service-bundle-v3':V3_FILES,'native-service-bundle-v4':V4_FILES,'native-service-bundle-v5':V5_FILES,'native-service-bundle-v6':V6_FILES,'native-service-bundle-v7':FILES}.get(manifest.get('format'))
+    inventory={'native-service-bundle-v1':LEGACY_FILES,'native-service-bundle-v2':V2_FILES,'native-service-bundle-v3':V3_FILES,'native-service-bundle-v4':V4_FILES,'native-service-bundle-v5':V5_FILES,'native-service-bundle-v6':V6_FILES,'native-service-bundle-v7':V7_FILES,'native-service-bundle-v8':FILES}.get(manifest.get('format'))
     if set(manifest)!={'format','files'} or inventory is None or set(manifest['files'])!=set(inventory):
         raise ValueError('unexpected bundle inventory')
     for name,value in manifest['files'].items():
@@ -82,7 +84,7 @@ def verify_install(root=INSTALL):
     user=pwd.getpwnam(ACCOUNT);group=grp.getgrnam(ACCOUNT)
     if user.pw_uid!=config['uid'] or user.pw_gid!=config['gid'] or group.gr_gid!=config['gid'] or user.pw_uid==0 or user.pw_shell!='/usr/bin/false':
         raise ValueError('service OS identity differs from sealed installation')
-    if manifest['format']=='native-service-bundle-v7':check_health_directory(root,config)
+    if manifest['format'] in ('native-service-bundle-v7','native-service-bundle-v8'):check_health_directory(root,config)
     return config
 
 
@@ -120,7 +122,7 @@ def prepare(source,output):
         with destination.open('xb') as stream:stream.write(data)
         destination.chmod(0o500 if name.startswith('target/') else 0o400)
         records[name]={'size':len(data),'sha256':digest(data)}
-    raw=(json.dumps({'format':'native-service-bundle-v7','files':records},sort_keys=True,indent=2)+'\n').encode()
+    raw=(json.dumps({'format':'native-service-bundle-v8','files':records},sort_keys=True,indent=2)+'\n').encode()
     (output/'MANIFEST.json').write_bytes(raw);(output/'MANIFEST.json').chmod(0o400)
     verify_bundle(output)
     return {'bundle':str(output),'manifest_sha256':digest(raw),'installer_sha256':records['tools/service_account.py']['sha256'],'keys_generated':False,'installed':False}
@@ -143,7 +145,7 @@ def as_service(action,config,extra=()):
 
 def install(bundle,expected,desktop_uid):
     require_root();verify_bundle(bundle,expected)
-    if verify_bundle(bundle,expected)['format']!='native-service-bundle-v7':raise ValueError('new installation requires current bundle inventory')
+    if verify_bundle(bundle,expected)['format']!='native-service-bundle-v8':raise ValueError('new installation requires current bundle inventory')
     if INSTALL.exists() or PLIST.exists():raise ValueError('installation already exists; preserve original service keys/state')
     try:pwd.getpwnam(ACCOUNT)
     except KeyError:pass
@@ -188,7 +190,7 @@ def update(bundle,expected):
     """Replace reviewed code only; keep the original account, keys and ledgers."""
     require_root();config=verify_install();trusted(PLIST)
     old=verify_bundle(INSTALL);new=verify_bundle(bundle,expected)
-    if new['format']!='native-service-bundle-v7':raise ValueError('update requires current bundle inventory')
+    if new['format']!='native-service-bundle-v8':raise ValueError('update requires current bundle inventory')
     changed={name:regular(bundle/name) for name in FILES if old['files'].get(name)!=new['files'][name]}
     for name,data in changed.items():
         if digest(data)!=new['files'][name]['sha256']:raise ValueError('reviewed update changed')

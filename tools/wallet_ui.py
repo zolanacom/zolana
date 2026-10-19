@@ -34,6 +34,8 @@ class WalletApp:
         if not self.root.is_relative_to(PROJECT / ".data"):
             raise ValueError("wallet UI requires a local .data fixture")
         config = load(self.root)
+        self.genesis_hash = config.get('genesis_hash')
+        self.previous_wallet_port = None
         self.withdrawal_enabled = config.get("recipient_withdrawals") is True
         self.faucet_amount = config.get("faucet_amount", 100)
         if type(self.faucet_amount) is not int or not 1 <= self.faucet_amount <= 1_000_000_000:
@@ -97,6 +99,8 @@ class WalletApp:
                     raise ValueError("wallet data is bound to a different profile; preserve it and select its original profile")
         app.tester = True
         app.network_label = config["label"]
+        app.genesis_hash = config['genesis_hash']
+        app.previous_wallet_port = None
         app.private_setup = True
         app.withdrawal_enabled = True
         app.faucet_amount = 0
@@ -113,7 +117,8 @@ class WalletApp:
                 "pending": Path(str(self.wallet) + ".pending.json").exists(),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
                 "network": self.network_label if self.tester else ("Local testnet rehearsal" if self.private_setup else "Local test network"), "solana_funding_available": False,
-                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True, "test_faucet_available": self.test_faucet, "invite_required": self.invite_required, "testnet_admitted": self.admitted}
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True, "test_faucet_available": self.test_faucet, "invite_required": self.invite_required, "testnet_admitted": self.admitted,
+                "genesis_hash": getattr(self,'genesis_hash',None), "previous_wallet_port": getattr(self,'previous_wallet_port',None)}
 
     def cli(self, command, password, extra=()):
         if not isinstance(password, str) or not 12 <= len(password.encode()) <= 1024:
@@ -285,6 +290,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(403, {"error": "Use the local wallet address."})
         if self.path == "/api/session":
             return self.respond(200, {"token": self.server.app.token, **self.server.app.status()})
+        if self.path == '/api/network':
+            data=self.server.app.status()
+            return self.respond(200,{key:data[key] for key in ('network','genesis_hash')})
         assets = {"/": ("index.html", "text/html; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8")}
@@ -341,6 +349,7 @@ def main(argv=None):
     parser.add_argument("--profile", default="default")
     parser.add_argument("--rpc-index", type=int, choices=[0, 1], default=0)
     parser.add_argument("--sponsor-password-file", type=Path)
+    parser.add_argument('--previous-wallet-port',type=int)
     args = parser.parse_args(argv)
     if not 1024 <= args.port <= 65535 or not 60 <= args.duration <= 3600:
         parser.error("use a nonprivileged port and a session of 60..3600 seconds")
@@ -353,6 +362,9 @@ def main(argv=None):
             parser.error("--data-dir is only for standalone profiles")
         app = WalletApp(args.root, args.profile, args.rpc_index, args.sponsor_password_file)
     children = [None, None]
+    if args.previous_wallet_port is not None:
+        if not 1024<=args.previous_wallet_port<=65535 or args.previous_wallet_port==args.port:parser.error('previous wallet needs a separate local port')
+        app.previous_wallet_port=args.previous_wallet_port
     try:
         if args.start_network:
             from localnet import quiet, start, stop, wait_rpc

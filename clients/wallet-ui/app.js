@@ -291,5 +291,11 @@ async function payment(action, extra = {}) {
 }
 document.querySelector('#privacy').addEventListener('click', () => document.querySelector('#privacy-dialog').showModal());
 document.querySelector('#close-privacy').addEventListener('click', () => document.querySelector('#privacy-dialog').close());
-try { session = await (await fetch('/api/session')).json(); document.querySelector('#network-label').textContent = session.network; welcome(); }
+try {
+  session = await (await fetch('/api/session')).json(); document.querySelector('#network-label').textContent = session.network;
+  if (Number.isInteger(session.previous_wallet_port) && session.previous_wallet_port >= 1024 && session.previous_wallet_port <= 65535) {
+    const previous = document.querySelector('#previous-wallet'); previous.href = `http://127.0.0.1:${session.previous_wallet_port}/`; previous.hidden = false;
+  }
+  welcome();
+}
 catch { message('The local wallet is unavailable. Restart the local wallet session.', 'error'); }

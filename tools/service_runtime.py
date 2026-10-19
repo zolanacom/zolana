@@ -109,18 +109,22 @@ def enable_replay_diagnostics():
             'warn,solana_core::replay_stage=info,solana_core::consensus=info'],capture_output=True,check=True,timeout=10)
 
 
-def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False,replica_test=False,health_test=False):
-    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test or health_test:os.nice(10)
+def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=False,retention_test=False,history_test=False,archival_test=False,tail_test=False,replica_test=False,health_test=False,explorer_test=False):
+    if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test or health_test or explorer_test:os.nice(10)
     from operator_health import Publisher
     health=Publisher(BASE/'health/heartbeat.json').start()
-    children=[None,None];shutdown=threading.Event();ingress=None;retention=None
+    children=[None,None];shutdown=threading.Event();ingress=None;retention=None;explorer=None
     def terminate(*_):
         shutdown.set()
         if retention is not None:retention.stop.set()
     signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
     def pause_owned():
-        nonlocal ingress,retention
+        nonlocal ingress,retention,explorer
         errors=[]
+        if explorer is not None:
+            worker=explorer;explorer=None
+            try:worker.close()
+            except Exception:errors.append('explorer')
         for name,worker in [('ingress',ingress),('retention',retention)]:
             if name=='ingress':ingress=None
             else:retention=None
@@ -143,10 +147,10 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
         load(ROOT)
         if not (BASE/'.data/setup.complete').is_file():raise RuntimeError('setup incomplete; keys cannot be regenerated')
         test_deadline=None
-        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test or health_test:
+        if ack_test or package_test or browser_test or restore_test or retention_test or history_test or archival_test or tail_test or replica_test or health_test or explorer_test:
             from service_tls import private_bytes
-            session_name='operator-health-session-031.json' if health_test else 'history-replica-session-030.json' if replica_test else 'restart-tail-session-029.json' if tail_test else 'canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
-            session_format='local-operator-health-test-v1' if health_test else 'local-history-replica-test-v1' if replica_test else 'local-restart-tail-test-v1' if tail_test else 'local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
+            session_name='explorer-live-session-039.json' if explorer_test else 'operator-health-session-031.json' if health_test else 'history-replica-session-030.json' if replica_test else 'restart-tail-session-029.json' if tail_test else 'canonical-archive-session-028.json' if archival_test else 'gateway-history-session-027.json' if history_test else 'history-retention-session-026.json' if retention_test else 'restore-recovery-session-025.json' if restore_test else 'browser-recovery-session-024.json' if browser_test else 'package-recovery-session-023.json' if package_test else 'gateway-ack-session-022.json'
+            session_format='local-explorer-live-test-v1' if explorer_test else 'local-operator-health-test-v1' if health_test else 'local-history-replica-test-v1' if replica_test else 'local-restart-tail-test-v1' if tail_test else 'local-canonical-archive-test-v1' if archival_test else 'local-gateway-history-test-v1' if history_test else 'local-history-retention-test-v1' if retention_test else 'local-restore-recovery-test-v1' if restore_test else 'local-browser-recovery-test-v1' if browser_test else 'local-package-recovery-test-v1' if package_test else 'local-gateway-ack-test-v1'
             session=json.loads(private_bytes(ROOT/session_name,4096))
             test_deadline=session.get('expires_at')
             if (set(session)!={'format','expires_at'} or session['format']!=session_format or
@@ -195,6 +199,15 @@ def supervise(ack_test=False,package_test=False,browser_test=False,restore_test=
                 ingress=Ingress(restore_test=True) if restore_test else Ingress(browser_test=True) if browser_test else Ingress(package_test=True) if package_test else Ingress(ack_test=True) if ack_test else Ingress()
         health.observe(min(slots()),free_disk_mib=shutil.disk_usage(ROOT).free//1024**2)
         health.update('ready',ingress_ready=ingress is not None)
+        from explorer_feed import Feed
+        operator=Operator('http://127.0.0.1:23899',ROOT/'rpc-access.key')
+        def explorer_rpc(method,params,timeout):
+            if method not in ('getGenesisHash','getSlot','getBlocks','getBlock','getVoteAccounts'):raise ValueError('unapproved explorer read')
+            response=json.loads(operator.forward(json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(),timeout=timeout))
+            if response.get('id')!=1 or response.get('error') is not None or 'result' not in response:raise ValueError('explorer read unavailable')
+            return response['result']
+        config=load(ROOT)
+        explorer=Feed(BASE/'health/explorer.json',{k:config[k] for k in ('network','genesis_hash')},explorer_rpc).start()
         next_sample=time.monotonic()+5
         while not shutdown.wait(1):
             if not health.healthy():
@@ -351,6 +364,7 @@ if __name__=='__main__':
     elif action=='run-tail-test':output=supervise(tail_test=True)
     elif action=='run-replica-test':output=supervise(replica_test=True)
     elif action=='run-health-test':output=supervise(health_test=True)
+    elif action=='run-explorer-test':output=supervise(explorer_test=True)
     elif action=='test-begin':output=test_begin()
     elif action=='test-finish':output=test_finish()
     elif action=='status':

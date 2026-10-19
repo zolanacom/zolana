@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +43,34 @@ class PortalTests(unittest.TestCase):
         signature=block['value']['transactions'][0]['signature'];self.assertEqual(app.query('/api/search',{'q':[signature]})['value']['slot'],4)
         self.assertEqual(app.query('/api/search',{'q':[self.records[1]['blockhash']]})['value']['slot'],4)
         self.assertIsNone(app.query('/api/search',{'q':['900']})['value'])
+
+    def test_live_overlap_is_checked_before_replacing_any_saved_index(self):
+        from explorer_feed import atomic
+        public=self.root/'public';public.mkdir(mode=0o755);path=public/'explorer.json'
+        rows=[]
+        for b in self.records[1:]:
+            row={k:v for k,v in b.items() if k!='transactions'}
+            row.update(status='finalized',transactions=[portal.transaction(tx,b['slot'],i,'finalized') for i,tx in enumerate(b['transactions'])],transaction_count=len(b['transactions']))
+            rows.append(row)
+        # Full blocks may include a vote before the retained payment. Its
+        # canonical full-block position differs from its retained-subset index.
+        payment=rows[0]['transactions'][0];payment['position']=1
+        vote=dict(payment,signature=portal.b58(bytes([6])*64),position=0)
+        rows[0]['transactions'].insert(0,vote);rows[0]['transaction_count']=2
+        value=dict(format='native-explorer-feed-v1',network=self.network,instance='a'*32,sequence=1,published_at=time.time(),sampled_at=time.time()-1,phase='live',observed_finalized_slot=5,blocks=rows,validators=[])
+        atomic(path,value,0o644)
+        app=self.app(feed=path,feed_owner=os.getuid());app.overview()
+        before=copy.deepcopy(app.archive.blocks);self.assertEqual(app.archive.by_slot[4]['status'],'finalized')
+        for mutation in ('fee','transaction_set','blockhash','network','sequence'):
+            bad=copy.deepcopy(value);bad['sequence']=2;bad['published_at']=time.time()
+            if mutation=='fee':bad['blocks'][0]['transactions'][1]['fee_units']+=1
+            elif mutation=='transaction_set':bad['blocks'][0]['transactions']=[];bad['blocks'][0]['transaction_count']=0
+            elif mutation=='blockhash':bad['blocks'][-1]['blockhash']=portal.b58(bytes([33])*32)
+            elif mutation=='network':bad['network']['network'][0]=90
+            else:bad['sequence']=0
+            atomic(path,bad,0o644);app.cached_at=-float('inf')
+            self.assertTrue(app.overview()['feed_error']);self.assertEqual(app.archive.blocks,before)
+        self.assertEqual(portal.Archive(self.history,self.network).blocks[-1]['status'],'recorded')
 
     def test_restart_preserves_exact_index_and_source_bytes_without_opening_unreferenced_files(self):
         sentinel=self.history/'operator.key';sentinel.write_bytes(b'do not open');sentinel.chmod(0o000)

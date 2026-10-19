@@ -37,7 +37,9 @@ class RuntimeRetentionTests(unittest.TestCase):
             ingress = Mock(); ingress.healthy.return_value = True
             ingress.close.side_effect = lambda: events.append('ingress-close')
             def opening(**_): events.append('ingress-open'); return ingress
-            namespace = dict(BASE=base, ROOT=root, WALLET=base/'wallet', load=Mock(),
+            explorer=Mock();explorer.start.return_value=explorer
+            explorer.close.side_effect=lambda:self.assertTrue(all(c.poll() is None for c in children))
+            namespace = dict(BASE=base, ROOT=root, WALLET=base/'wallet', load=Mock(return_value={'network':[7]*32,'genesis_hash':'1'*32}),Operator=Mock(),
                 start=lambda _, index, **kw: children[index], stop=stop, wait_rpc=Mock(), quiet=Mock(), save=Mock(),
                 rpc=Mock(), slots=lambda:[10,10], prepare=Mock(return_value={'replayed':False}), print=Mock(),enable_replay_diagnostics=Mock(),wait_fresh_finality=Mock(side_effect=lambda *args:events.append('fresh-finality')),
                 os=SimpleNamespace(nice=Mock(),getpid=lambda:1,getpgid=lambda p:p,getuid=lambda:450,getgid=lambda:450),
@@ -49,6 +51,7 @@ class RuntimeRetentionTests(unittest.TestCase):
             exec(compile(ast.Module(body=[function],type_ignores=[]),'service_runtime.py','exec'), namespace)
             health=Mock();health.start.return_value=health;health.healthy.return_value=failure!='publisher'
             modules = {'operator_health':SimpleNamespace(Publisher=Mock(return_value=health)),
+                       'explorer_feed':SimpleNamespace(Feed=Mock(return_value=explorer)),
                        'history_retention': SimpleNamespace(Retention=Mock(return_value=retention)),
                        'service_ingress': SimpleNamespace(Ingress=opening),
                        'service_tls': SimpleNamespace(private_bytes=lambda *args:json.dumps({'format':'local-operator-health-test-v1' if health_test else 'local-history-replica-test-v1' if replica else 'local-restart-tail-test-v1' if tail else 'local-canonical-archive-test-v1' if archival else 'local-history-retention-test-v1','expires_at':600}).encode())}
@@ -57,6 +60,8 @@ class RuntimeRetentionTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError,'cleanup failed'):namespace['supervise']()
                 else: namespace['supervise'](retention_test=expired_after_start and not archival and not tail and not replica and not health_test,archival_test=archival,tail_test=tail,replica_test=replica,health_test=health_test)
             health.close.assert_called_once()
+            self.assertEqual(explorer.start.call_count,int('ingress-open' in events))
+            self.assertEqual(explorer.close.call_count,int('ingress-open' in events))
             if failure=='publisher':health.update.assert_any_call('blocked','health_unavailable')
             if failure in ('initial','background'):health.update.assert_any_call('blocked','retention_failed')
         return events

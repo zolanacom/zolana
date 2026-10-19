@@ -154,7 +154,7 @@ class GatewayTests(unittest.TestCase):
 
 class InvitedWalletTests(unittest.TestCase):
     def app(self, directory):
-        profile=dict(label='Invited testnet',invite_required=True,faucet={'transport':'loopback-http','url':'http://127.0.0.1:8780'})
+        profile=dict(label='Invited testnet',genesis_hash='11111111111111111111111111111111',invite_required=True,faucet={'transport':'loopback-http','url':'http://127.0.0.1:8780'})
         result=type('Result',(),dict(returncode=0,stdout=json.dumps(profile)))()
         with patch('wallet_ui.subprocess.run',return_value=result):
             return WalletApp.from_profile(Path('profile.json'),Path(directory)/'client')

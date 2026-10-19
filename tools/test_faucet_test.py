@@ -24,7 +24,7 @@ class DistributionTests(unittest.TestCase):
             self.assertEqual(app.password,'')
 
     def test_standalone_grant_uses_only_own_seed_addresses_and_needs_backup(self):
-        config=dict(label='Distribution',faucet={'transport':'loopback-http','url':'http://127.0.0.1:8780'})
+        config=dict(label='Distribution',genesis_hash='11111111111111111111111111111111',faucet={'transport':'loopback-http','url':'http://127.0.0.1:8780'})
         result=type('Result',(),dict(returncode=0,stdout=json.dumps(config)))()
         with tempfile.TemporaryDirectory() as directory, patch('wallet_ui.subprocess.run',return_value=result):
             app=WalletApp.from_profile(Path('profile.json'),Path(directory)/'client')

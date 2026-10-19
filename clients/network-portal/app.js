@@ -21,7 +21,8 @@ function updateNetwork() {
   $('slot').textContent = number(network.last_observed_slot);
   $('slot').title = network.observed_at ? `Historical observation: ${new Date(network.observed_at*1000).toLocaleString()}` : 'No finality observation';
   $('wallet-description').textContent = network.wallet_genesis_hash && network.genesis_hash && network.wallet_genesis_hash !== network.genesis_hash ? 'Your saved wallet uses a different local test network from this explorer. Open it with its existing network settings. No funds or wallet data will move.' : 'Open the device-local wallet to manage your encrypted wallet, test coins and private payments. Confirm its pinned network before making a payment.';
-  $('source-note').textContent = network.source === 'saved-history' ? `Saved public history · through slot ${number(network.history_tip)} · ${number(network.recorded_blocks)} recorded blocks. Not a live feed.` : 'No history source connected. No live data is implied.';
+  const source = {'live-feed':'Live finalized activity', 'saved-feed':'Saved finalized activity', 'saved-history':'Saved public history'}[network.source];
+  $('source-note').textContent = source ? `${source} · through slot ${number(network.history_tip)} · ${number(network.recorded_blocks)} indexed blocks. Partial coverage: saved history contains payment records; finalized blocks include all transactions.${network.source === 'live-feed' ? ' Updates automatically.' : ' Not a live feed.'}${network.feed_error ? ' Live source unavailable.' : ''}` : 'No history source connected. No live data is implied.';
 }
 function showTabs() {
   for (const kind of ['blocks','transactions']) {
@@ -35,7 +36,7 @@ function showTabs() {
 function renderActivity() {
   state.showingDetail = false;
   showTabs();
-  if (state.network.source !== 'saved-history') {
+  if (state.network.source === 'not-connected') {
     $('view').innerHTML = empty('Nothing hidden about the network.', state.network.phase === 'paused' ? 'Validators are paused. Finalized activity appears here when a public history source is connected.' : 'Connect retained public history to inspect recorded blocks and transactions.');
   } else $('view').innerHTML = table(state.items, state.kind);
   $('load-more').hidden = state.next === null;
@@ -48,13 +49,14 @@ async function activity(append = false) {
     const network = await api('/api/network');
     if (ticket !== state.request) return;
     state.network = network; updateNetwork();
-    if (network.source !== 'saved-history') { state.items=[]; state.next=null; renderActivity(); return; }
+    if (network.source === 'not-connected') { state.items=[]; state.next=null; renderActivity(); return; }
     const page = await api(`/api/${state.kind}?limit=8${append && state.next !== null ? `&before=${state.next}` : ''}`);
     if (ticket !== state.request) return;
     state.items = append ? [...state.items,...page.items] : page.items; state.next = page.next; renderActivity();
     if (append) notice('More recorded activity loaded.');
   } catch (error) {
     if (ticket !== state.request) return;
+    if (state.network) { state.network={...state.network,phase:'unknown',source:state.network.source==='live-feed'?'saved-feed':state.network.source,feed_error:true}; updateNetwork(); }
     notice(error.name === 'AbortError' ? 'The request took too long. Refresh to try again.' : error.message);
     if (!state.network) $('view').innerHTML = empty('The portal is offline.', 'The local portal service is unavailable. Your wallet is separate and remains on this device.');
   } finally {
@@ -93,7 +95,7 @@ async function route() {
 async function search(value, navigate = true) {
   const query = String(value).trim(); notice();
   if (!/^(?:[0-9]{1,16}|[1-9A-HJ-NP-Za-km-z]{32,88})$/.test(query)) { notice('Enter a slot number, block hash or transaction signature.'); return; }
-  if (!state.network || state.network.source !== 'saved-history') { notice('Saved history is not connected. No result can be checked yet.'); return; }
+  if (!state.network || state.network.source === 'not-connected') { notice('Public history is not connected. No result can be checked yet.'); return; }
   if (navigate && location.hash !== `#explorer/${query}`) { location.hash=`explorer/${query}`; return; }
   const ticket = ++state.request;
   $('view').setAttribute('aria-busy','true'); $('load-more').hidden=true;
@@ -130,4 +132,9 @@ $('view').addEventListener('click',async event=>{
   }
 });
 window.addEventListener('hashchange',route);
+setInterval(()=>{
+  if (document.hidden || document.querySelector('dialog[open]') || $('view').getAttribute('aria-busy') === 'true' || state.showingDetail || state.items.length>8) return;
+  if ((state.route==='network' || state.route==='explorer') && !location.hash.includes('/')) activity();
+  else if (state.route==='validators' || state.route==='build') route();
+},5000);
 route();

@@ -122,7 +122,7 @@ class ServiceIsolationTests(unittest.TestCase):
                         self.assertEqual(key.read_bytes(),b'original secret')
                         self.assertEqual([call.args[0][1] for call in command.call_args_list],['bootout','bootstrap'])
     def test_reviewed_inventory_upgrade_keeps_paused_service_paused_and_rolls_back_new_files(self):
-        for version,inventory in [(1,service.LEGACY_FILES),(2,service.V2_FILES),(3,service.V3_FILES),(4,service.V4_FILES),(5,service.V5_FILES),(6,service.V6_FILES)]:
+        for version,inventory in [(1,service.LEGACY_FILES),(2,service.V2_FILES),(3,service.V3_FILES),(4,service.V4_FILES),(5,service.V5_FILES),(6,service.V6_FILES),(7,service.V7_FILES)]:
             for fail in (False,True):
                 with self.subTest(failed_verification=fail),tempfile.TemporaryDirectory() as directory:
                     root=Path(directory);source=root/'source';source.mkdir()
@@ -141,12 +141,13 @@ class ServiceIsolationTests(unittest.TestCase):
                             with self.assertRaises(ValueError):service.update(bundle,report['manifest_sha256'])
                         else:self.assertTrue(service.update(bundle,report['manifest_sha256'])['service_left_paused'])
                         command.assert_not_called()
-                    self.assertEqual(service.verify_bundle(installed)['format'],'native-service-bundle-v%d'%version if fail else 'native-service-bundle-v7')
+                    self.assertEqual(service.verify_bundle(installed)['format'],'native-service-bundle-v%d'%version if fail else 'native-service-bundle-v8')
                     self.assertEqual((installed/'tools/history_retention.py').exists(),version>=3 or not fail)
                     self.assertEqual((installed/'tools/gateway_history.py').exists(),version>=4 or not fail)
                     self.assertEqual((installed/'tools/gateway_archival.py').exists(),version>=5 or not fail)
                     self.assertEqual((installed/'tools/history_replica.py').exists(),version>=6 or not fail)
-                    self.assertEqual((installed/'tools/operator_health.py').exists(),not fail)
+                    self.assertEqual((installed/'tools/operator_health.py').exists(),version>=7 or not fail)
+                    self.assertEqual((installed/'tools/explorer_feed.py').exists(),not fail)
                     self.assertEqual((installed/'target/debug/native-faucet').exists(),version>=2 or not fail)
 
 

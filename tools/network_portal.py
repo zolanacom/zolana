@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Read-only Zolana portal over a pinned public-history snapshot; no RPC keys."""
+"""Read-only Zolana portal over pinned history and finalized metadata; no RPC keys."""
 import argparse
-import base64
+import copy
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -15,33 +15,10 @@ from urllib.parse import parse_qs, urlsplit
 from history_retention import MAX_SEGMENT, STORE_BUDGET, block_hash, directory, manifest, natural, read
 from operator_health import read as read_health
 from operator_monitor import launch_probe
+from explorer_model import b58,transaction
+from explorer_feed import read as read_feed
 
 ASSETS=Path(__file__).resolve().parents[1]/'clients/network-portal'
-ALPHABET='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-
-
-def b58(raw):
-    number=int.from_bytes(raw,'big');result=''
-    while number:number,index=divmod(number,58);result=ALPHABET[index]+result
-    return '1'*(len(raw)-len(raw.lstrip(b'\0')))+result
-
-
-def transaction(value,slot,position):
-    if not isinstance(value,dict) or not isinstance(value.get('transaction'),list) or len(value['transaction'])!=2 or value['transaction'][1]!='base64' or not isinstance(value.get('meta'),dict):raise ValueError('unsupported recorded transaction')
-    encoded=value['transaction'][0]
-    if not isinstance(encoded,str) or not 1<=len(encoded)<=2*1024*1024:raise ValueError('recorded transaction exceeds bounds')
-    raw=base64.b64decode(encoded,validate=True)
-    # Solana short-vector signature count, followed by 64-byte signatures.
-    count=0;cursor=0
-    for shift in (0,7,14):
-        if cursor>=len(raw):raise ValueError('truncated signature vector')
-        byte=raw[cursor];cursor+=1;count|=(byte&127)<<shift
-        if byte<128:break
-    else:raise ValueError('invalid signature vector')
-    if not 1<=count<=64 or cursor+count*64>=len(raw) or raw[:cursor]!=(bytes([count]) if count<128 else b''):raise ValueError('invalid recorded signature count')
-    fee=value['meta'].get('fee')
-    if not natural(fee) or 'err' not in value['meta']:raise ValueError('invalid recorded transaction metadata')
-    return {'signature':b58(raw[cursor:cursor+64]),'slot':slot,'position':position,'fee_units':fee,'execution':'success' if value['meta']['err'] is None else 'failed','status':'recorded'}
 
 
 class Archive:
@@ -77,7 +54,7 @@ class Archive:
 
 
 class Portal:
-    def __init__(self,profile=None,history=None,health=None,health_owner=450,probe=launch_probe,health_genesis=None,wallet_genesis=None):
+    def __init__(self,profile=None,history=None,health=None,health_owner=450,probe=launch_probe,health_genesis=None,wallet_genesis=None,feed=None,feed_owner=450):
         self.network=None;self.archive=None;self.health=health;self.health_owner=health_owner;self.probe=probe;self.lock=threading.Lock();self.cached=None;self.cached_at=0;self.wallet_genesis=wallet_genesis
         if profile is not None:
             value=json.loads(read(Path(profile),32768));self.network={key:value[key] for key in ('network','genesis_hash')}
@@ -87,10 +64,43 @@ class Portal:
         if history is not None:
             if self.network is None:raise ValueError('history requires independently selected network identity')
             self.archive=Archive(history,self.network)
+        if feed is not None and self.network is None:raise ValueError('live explorer requires a pinned network')
+        self.base_archive=self.archive;self.feed=feed;self.feed_owner=feed_owner;self.feed_value=None;self.feed_error=False
+
+    def refresh_feed(self):
+        if self.feed is None:return
+        try:
+            value=read_feed(self.feed,self.feed_owner,self.network)
+            if value['published_at']>time.time()+2:raise ValueError('explorer clock changed')
+            if self.feed_value and (value['sequence']<self.feed_value['sequence'] or value['observed_finalized_slot']<self.feed_value['observed_finalized_slot'] or value['published_at']<self.feed_value['published_at']):raise ValueError('explorer source regressed')
+            if self.feed_value and value['sequence']==self.feed_value['sequence'] and value!=self.feed_value:raise ValueError('explorer sequence was substituted')
+            if value!=self.feed_value:
+                a=copy.copy(self.base_archive) if self.base_archive else Archive.__new__(Archive)
+                a.by_slot=dict(self.base_archive.by_slot) if self.base_archive else {};a.by_signature=dict(self.base_archive.by_signature) if self.base_archive else {}
+                for item in value['blocks']:
+                    summary={k:v for k,v in item.items() if k!='transactions'};old=a.by_slot.get(item['slot'])
+                    if old and any(old[k]!=summary[k] for k in ('slot','parent_slot','blockhash','previous_blockhash','block_height')):raise ValueError('explorer source fork mismatch')
+                    # Retained wallet history contains native-payment transactions,
+                    # not every vote/transfer in the block. The finalized full
+                    # block must include that original subset unchanged.
+                    if old and not {tx['signature'] for tx in a.by_signature.values() if tx['slot']==item['slot']}.issubset({tx['signature'] for tx in item['transactions']}):raise ValueError('explorer block transaction set changed')
+                    parent=a.by_slot.get(item['parent_slot'])
+                    if parent and (parent['blockhash']!=item['previous_blockhash'] or parent['block_height']+1!=item['block_height']):raise ValueError('explorer source anchor mismatch')
+                    for tx in item['transactions']:
+                        old_tx=a.by_signature.get(tx['signature'])
+                        if old_tx and (any(old_tx[k]!=tx[k] for k in ('slot','fee_units','execution')) or (old_tx['status']=='finalized' and old_tx['position']!=tx['position'])):raise ValueError('explorer transaction changed')
+                        a.by_signature[tx['signature']]=tx
+                    a.by_slot[item['slot']]=summary
+                if len(a.by_slot)>100000 or len(a.by_signature)>100000:raise ValueError('live explorer index exceeds capacity')
+                a.blocks=sorted(a.by_slot.values(),key=lambda v:v['slot'],reverse=True);a.by_hash={v['blockhash']:v for v in a.blocks};a.transactions=sorted(a.by_signature.values(),key=lambda v:(v['slot'],v['position']),reverse=True)
+                a.tip=a.blocks[0]['slot'];a.digest=self.base_archive.digest if self.base_archive else None;a.captured_at=value['sampled_at'];self.archive=a;self.feed_value=value
+            self.feed_error=False
+        except (OSError,ValueError,KeyError,RecursionError):self.feed_error=True
 
     def overview(self):
         with self.lock:
             if self.cached is not None and time.monotonic()-self.cached_at<3:return self.cached
+            self.refresh_feed()
             phase='unknown';slot=None;count=None;observed=None
             try:
                 job=self.probe()
@@ -101,32 +111,40 @@ class Portal:
                         phase='running' if value['phase']=='ready' else value['phase'];count=value['validator_count']
             except (OSError,ValueError,KeyError):pass
             a=self.archive
+            feed_live=bool(self.feed_value and not self.feed_error and phase=='running' and self.feed_value['phase']=='live' and 0<=time.time()-self.feed_value['sampled_at']<=15)
+            source='live-feed' if feed_live else 'saved-feed' if self.feed_value else 'saved-history' if a else 'not-connected'
             self.cached={'name':'Zolana','ticker':'ZOL','environment':'local-development','phase':phase,'validator_count':count,'last_observed_slot':slot,'observed_at':observed,
-                'genesis_hash':self.network['genesis_hash'] if self.network else None,'source':'saved-history' if a else 'not-connected','history_tip':a.tip if a else None,
+                'genesis_hash':self.network['genesis_hash'] if self.network else None,'source':source,'history_tip':a.tip if a else None,
                 'history_sha256':a.digest if a else None,'history_captured_at':a.captured_at if a else None,'recorded_blocks':len(a.blocks) if a else None,'recorded_transactions':len(a.transactions) if a else None,
-                'wallet_genesis_hash':self.wallet_genesis,'rpc_available':False,'solana_bridge':False,'mainnet':False};self.cached_at=time.monotonic();return self.cached
+                'wallet_genesis_hash':self.wallet_genesis,'rpc_available':False,'solana_bridge':False,'mainnet':False,
+                'feed_available':self.feed is not None,'feed_error':self.feed_error,'feed_phase':self.feed_value['phase'] if self.feed_value else None,'feed_sampled_at':self.feed_value['sampled_at'] if self.feed_value else None,
+                'validators':self.feed_value['validators'] if self.feed_value else [],'coverage':'partial-public-history'};self.cached_at=time.monotonic();return self.cached
 
     def query(self,path,params):
         if path=='/api/network' and not params:return self.overview()
+        self.overview()
         if self.archive is None:raise ValueError('saved history is not connected')
         a=self.archive
         if path in ('/api/blocks','/api/transactions'):
             if set(params)-{'before','limit'}:raise ValueError('invalid pagination')
-            limit=integer(params.get('limit',['12'])[0],1,50);before=integer(params['before'][0],0,2**53-1) if 'before' in params else None
+            limit=integer(params.get('limit',['12'])[0],1,50);cursor=params['before'][0] if 'before' in params else None
             if path=='/api/blocks':
+                before=integer(cursor,0,2**53-1) if cursor is not None else None
                 rows=[v for v in a.blocks if before is None or v['slot']<before][:limit+1];next_value=rows[limit-1]['slot'] if len(rows)>limit else None
             else:
-                start=before or 0
-                if start>len(a.transactions):raise ValueError('invalid transaction cursor')
-                rows=a.transactions[start:start+limit+1];next_value=start+limit if len(rows)>limit else None
-            return {'items':rows[:limit],'next':next_value,'source':'saved-history','history_tip':a.tip}
+                start=0
+                if cursor is not None:
+                    if not re.fullmatch('[1-9A-HJ-NP-Za-km-z]{64,88}',cursor) or cursor not in a.by_signature:raise ValueError('transaction cursor is outside retained coverage; refresh')
+                    start=next(i+1 for i,v in enumerate(a.transactions) if v['signature']==cursor)
+                rows=a.transactions[start:start+limit+1];next_value=rows[limit-1]['signature'] if len(rows)>limit else None
+            return {'items':rows[:limit],'next':next_value,'source':self.cached['source'],'history_tip':a.tip}
         if path=='/api/search' and set(params)=={'q'}:
             query=params['q'][0]
             if re.fullmatch('[0-9]{1,16}',query):
-                found=a.block(integer(query,0,2**53-1));return {'kind':'block','value':found,'source':'saved-history'}
+                found=a.block(integer(query,0,2**53-1));return {'kind':'block','value':found,'source':self.cached['source']}
             if not re.fullmatch('[1-9A-HJ-NP-Za-km-z]{32,88}',query):raise ValueError('enter a slot, block hash or transaction signature')
-            if query in a.by_hash:return {'kind':'block','value':a.block(a.by_hash[query]['slot']),'source':'saved-history'}
-            return {'kind':'transaction','value':a.by_signature.get(query),'source':'saved-history'}
+            if query in a.by_hash:return {'kind':'block','value':a.block(a.by_hash[query]['slot']),'source':self.cached['source']}
+            return {'kind':'transaction','value':a.by_signature.get(query),'source':self.cached['source']}
         raise ValueError('portal route is read-only and bounded')
 
 
@@ -179,9 +197,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--port',type=int,default=8780);parser.add_argument('--profile',type=Path);parser.add_argument('--history',type=Path);parser.add_argument('--health',type=Path);parser.add_argument('--health-owner',type=int,default=450);parser.add_argument('--health-genesis');parser.add_argument('--wallet-genesis');args=parser.parse_args()
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--port',type=int,default=8780);parser.add_argument('--profile',type=Path);parser.add_argument('--history',type=Path);parser.add_argument('--health',type=Path);parser.add_argument('--health-owner',type=int,default=450);parser.add_argument('--health-genesis');parser.add_argument('--wallet-genesis');parser.add_argument('--feed',type=Path);parser.add_argument('--feed-owner',type=int,default=450);args=parser.parse_args()
     if not 1024<=args.port<=65535:parser.error('use a nonprivileged local port')
-    app=Portal(args.profile,args.history,args.health,args.health_owner,health_genesis=args.health_genesis,wallet_genesis=args.wallet_genesis);server=Server(args.port,app)
+    app=Portal(args.profile,args.history,args.health,args.health_owner,health_genesis=args.health_genesis,wallet_genesis=args.wallet_genesis,feed=args.feed,feed_owner=args.feed_owner);server=Server(args.port,app)
     print('Zolana portal: http://'+server.authority+' — read-only local development',flush=True)
     try:server.serve_forever(poll_interval=.5)
     except KeyboardInterrupt:pass
