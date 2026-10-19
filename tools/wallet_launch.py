@@ -65,6 +65,8 @@ def main(argv=None):
         parser.error("use a nonprivileged port and a session of 60..3600 seconds")
     profile = json.loads(network.read_text())
     base = Path.home() / ("Library/Application Support" if platform.system() == "Darwin" else ".local/share")
+    # Preserve the established directory after the Zolana branding change.
+    # Renaming it would silently create an apparently empty replacement wallet.
     data = args.data_dir or base / "Zolana Test Wallet" / profile["genesis_hash"]
     if data.resolve().is_relative_to(bundle):
         parser.error("wallet data must be outside the replaceable package directory")

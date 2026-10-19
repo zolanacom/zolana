@@ -51,7 +51,7 @@ async function run() {
     await page.setViewportSize({width,height});
     await page.goto('http://127.0.0.1:8769/');
     await page.getByRole('heading',{name:'Create your private wallet',exact:true}).waitFor();
-    assert.equal(await page.title(),'Private wallet');
+    assert.equal(await page.title(),'Zolana — Private wallet');
     const actual = await page.evaluate(() => innerWidth);
     assert.equal(actual,width,'Viewport must actually apply');
     await layout(page,`create-${width}`,width===320 || width===1600);

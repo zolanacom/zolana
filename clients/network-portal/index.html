@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#100d16"><title>Zolana — Private by protocol</title>
+  <meta name="description" content="Zolana is an independent Layer 1 with private payments built into the protocol. Explore the local development network.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header wrap">
+    <a class="brand" href="#network" aria-label="Zolana network"><span class="eclipse" aria-hidden="true"></span><span>zolana</span><span class="ticker">ZOL</span></a>
+    <nav aria-label="Main navigation"><a href="#network" data-route="network" aria-current="page">Network</a><a href="#explorer" data-route="explorer">Explorer</a><a href="#validators" data-route="validators">Validators</a><a href="#build" data-route="build">Build</a></nav>
+    <button class="wallet-button" id="open-wallet">Open wallet</button>
+  </header>
+  <main id="main">
+    <section class="hero wrap" id="hero" aria-labelledby="hero-title">
+      <div class="hero-copy"><h1 id="hero-title">Private by<br>protocol.</h1><p>An independent Layer 1 with private payments built into the protocol.</p>
+        <div class="hero-actions"><a class="primary" href="#explorer">Explore network <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12"/></svg></a><button class="plain" id="how-it-works">How it works</button></div>
+      </div>
+      <img class="veil" src="/veil.png" alt="" width="1536" height="1024" fetchpriority="high">
+    </section>
+    <section class="status-rail" aria-label="Network status"><div class="wrap rail-inner">
+      <div class="phase"><span class="status-dot" id="phase-dot"></span><span id="phase">Checking network</span></div>
+      <div class="measurement"><span id="slot-label">Last observed slot</span><strong id="slot">—</strong></div>
+      <div class="measurement"><span>Network</span><strong>Local development</strong></div>
+      <div class="measurement"><span>Consensus</span><strong>Independent L1</strong></div>
+    </div></section>
+    <section class="content wrap" id="content" aria-labelledby="page-title">
+      <div class="content-heading"><h2 id="page-title">Inside the network</h2><form id="search-form" role="search"><label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" aria-label="Search a slot, block hash or signature" placeholder="Search a slot or signature" maxlength="88" autocomplete="off" spellcheck="false"></label><button class="sr-only" type="submit">Search</button></form></div>
+      <div id="source-note" class="source-note" aria-live="polite"></div>
+      <div class="toolbar" id="explorer-toolbar"><div class="tabs" role="tablist" aria-label="Activity type"><button role="tab" id="blocks-tab" aria-selected="true" aria-controls="view">Blocks</button><button role="tab" id="transactions-tab" aria-selected="false" aria-controls="view" tabindex="-1">Transactions</button></div><button class="refresh" id="refresh"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11-1l3 6M4 12l3 6a7 7 0 0 0 11-1"/></svg><span>Refresh</span></button></div>
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+      <div id="view" tabindex="-1"><div class="empty"><h3>Opening the network</h3><p>Reading local network status.</p></div></div>
+      <button class="load-more" id="load-more" hidden>Load more</button>
+    </section>
+  </main>
+  <footer class="footer"><div class="wrap"><p>Payment details stay private. Network activity stays verifiable.</p><span>ZOL · Local development</span></div></footer>
+  <dialog id="privacy-dialog" aria-labelledby="privacy-title"><button class="close-dialog" data-close aria-label="Close privacy explanation">×</button><span class="dialog-symbol eclipse" aria-hidden="true"></span><h2 id="privacy-title">Privacy is part<br>of the protocol.</h2><p>Zolana is an independent blockchain. Its validators execute native shielded deposits, private transfers and withdrawals. The wallet is your interface to that network.</p><div class="privacy-columns"><div><h3>Private payment details</h3><p>Shielded amounts and recipients are protected by proofs. Your wallet decrypts its own notes.</p></div><div><h3>Public network evidence</h3><p>Blocks, fee payers, fees, timing, nullifiers and public deposit or withdrawal amounts remain visible.</p></div></div><p class="muted">Local test coins only. No Solana bridge, mainnet settlement or audited-security claim.</p><button class="primary" data-close>Got it</button></dialog>
+  <dialog id="wallet-dialog" aria-labelledby="wallet-title"><button class="close-dialog" data-close aria-label="Close wallet information">×</button><h2 id="wallet-title">Your private<br>side of Zolana.</h2><p id="wallet-description">Open the device-local wallet to manage your encrypted wallet, test coins and private payments.</p><p class="muted">This portal never asks for your password, recovery file or spending keys.</p><div class="dialog-actions"><a id="wallet-link" class="primary" href="http://127.0.0.1:8765/" target="_blank" rel="noopener noreferrer">Open local wallet <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12"/></svg></a><button class="plain" data-close>Back to network</button></div><p class="muted small">The wallet must be running on this device at 127.0.0.1:8765. Validators can remain paused for offline access.</p></dialog>
+</body>
+</html>

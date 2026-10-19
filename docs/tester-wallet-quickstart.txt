@@ -1,4 +1,4 @@
-TEST WALLET - LOCAL DEVELOPMENT BUILD
+ZOLANA (ZOL) TEST WALLET - LOCAL DEVELOPMENT BUILD
 
 Test coins only. This wallet connects to an independent privacy blockchain.
 It cannot receive SOL or Solana tokens. There is no Solana bridge or trading.

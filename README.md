@@ -1,6 +1,8 @@
-# Native private payments
+# Zolana (ZOL)
 
-Local development of protocol-native shielded payments for an independent Agave-derived network. The project name is undecided.
+An independent Agave-derived Layer 1 with protocol-native shielded payments. ZOL is the native coin's chosen name; current coins are local test units. Production economics remain undecided.
+
+The [local network portal](docs/network-portal-runbook.md) includes a read-only explorer of retained public blocks/transactions, validator-service status and developer information. The wallet is a separate interface to this chain. No public network or live explorer is deployed.
 
 The selected architecture is an [independent privacy L1 with its own native coin](docs/decisions/0005-independent-privacy-l1.md). A Solana asset bridge is later work; no mainnet settlement or bridge is implemented.
 

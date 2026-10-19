@@ -30,7 +30,7 @@ async function run() {
   page.on('pageerror',e=>result.errors.push(e.message));
   page.on('console',e=>{if(['warning','error'].includes(e.type()))result.errors.push(e.text());});
   await page.goto('http://127.0.0.1:8769/');
-  assert.equal(await page.title(),'Private wallet');
+  assert.equal(await page.title(),'Zolana — Private wallet');
   await page.getByLabel('Wallet password',{exact:true}).fill(password);
   await page.getByRole('button',{name:'Unlock wallet',exact:true}).tap();
   await balance(page,5000000);
