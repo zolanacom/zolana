@@ -8,6 +8,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -131,10 +132,18 @@ class WalletApp:
         history = self.root / "recovery-history"
         if command in {"balance", "deposit", "send", "withdraw"} and (history / "manifest.json").exists():
             args += ["--history", str(history)]
-        result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
-        if result.returncode:
-            raise ValueError(result.stderr.strip().removeprefix("Wallet error: "))
-        return json.loads(result.stdout)
+        # Admission and status reuse the same signed wallet/claim identity. A
+        # bounded listener may close a connection during a legitimate burst;
+        # retry only these idempotent requests, never a payment submission.
+        attempts = 4 if self.tester and self.invite_required and command in {"join", "access-status", "test-coins"} else 1
+        for attempt in range(attempts):
+            result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
+            if not result.returncode:
+                return json.loads(result.stdout)
+            error = result.stderr.strip().removeprefix("Wallet error: ")
+            if attempt + 1 == attempts or not error.startswith("error sending request for url ("):
+                raise ValueError(error)
+            time.sleep(0.5 * 2 ** attempt + secrets.randbelow(251) / 1000)
 
     def action(self, request):
         action = request.get("action")

@@ -67,6 +67,12 @@ class PilotHost(Distribution):
         if live:
             try:os.killpg(child.pid,signal.SIGKILL)
             except ProcessLookupError:pass
+            except PermissionError:
+                # Darwin can report EPERM rather than ESRCH when the last
+                # already-killed member exits between ps and killpg. Accept
+                # only a fresh empty group; never suppress a live denial.
+                current=subprocess.check_output(['/bin/ps','-A','-o','pgid=,uid=,stat='],text=True)
+                if any(len(row.split())==3 and int(row.split()[0])==child.pid and not row.split()[2].startswith('Z') for row in current.splitlines()):raise
         self.host=None
     def close(self):
         try:self.stop_host()

@@ -45,3 +45,5 @@ python3 -B tools/load_localnet.py --root .data/load-new --clients 24
 ```
 
 The runner owns/stops both validators, performs deposit and nonuniform private-send bursts, checks both validators' balances/nullifiers, rejects live duplicates, restarts and audits. `--baseline` is only for the historical 16-root NPOOL002 build; it is expected to reject eight of 24 payments. Never point a new-format binary at an old ledger. See LOCAL-008 for concurrency, LOCAL-009 for incremental sync and LOCAL-010 for completed mobile/file-flow verification and snapshot-peer recovery.
+
+Invited admission/status transport errors now receive at most four retries with bounded backoff/jitter and the same original wallet/invitation inputs. Payments, authorization failures and quota rejections are not automatically retried. Ten-wallet validation covers the actual four-slot listener burst, completed-claim retry and source-lock recovery. Restart existing local UI servers on their original storage/profile to load a source update; signed standalone releases still require their normal reviewed packaging process.

@@ -8,6 +8,27 @@ from wallet_ui import Handler, WalletApp
 
 
 class WalletUiTests(unittest.TestCase):
+    def test_admission_transport_retry_preserves_exact_identity_and_password_pipe(self):
+        with tempfile.TemporaryDirectory() as name:
+            app=self.app(Path(name));app.tester=True;app.invite_required=True
+            failed=type('Done',(),dict(returncode=1,stdout='',stderr='Wallet error: error sending request for url (https://127.0.0.1:13781/join)'))()
+            ok=type('Done',(),dict(returncode=0,stdout='{"admitted":true}',stderr=''))()
+            with patch('wallet_ui.subprocess.run',side_effect=[failed,failed,ok]) as run,patch('wallet_ui.time.sleep') as pause:
+                value=app.cli('join','local-test-password',['--invitation-file','original-invite'])
+            self.assertTrue(value['admitted']);self.assertEqual(run.call_count,3);self.assertEqual(pause.call_count,2)
+            self.assertEqual(run.call_args_list[0],run.call_args_list[1]);self.assertEqual(run.call_args_list[1],run.call_args_list[2])
+            self.assertEqual(run.call_args.kwargs['input'],'local-test-password');self.assertNotIn('local-test-password',run.call_args.args[0])
+    def test_payment_authorization_and_quota_errors_never_auto_retry_and_transport_is_bounded(self):
+        with tempfile.TemporaryDirectory() as name:
+            app=self.app(Path(name));app.tester=True;app.invite_required=True
+            transport='error sending request for url (https://127.0.0.1:13781/join)'
+            cases=[('send',transport,1),('withdraw',transport,1),('resolve',transport,1),('join','Invitation invalid',1),
+                   ('join','Testnet request limit reached. Wait before checking the same wallet again.',1),('access-status',transport,4),('test-coins',transport,4)]
+            for command,error,calls in cases:
+                failed=type('Done',(),dict(returncode=1,stdout='',stderr='Wallet error: '+error))()
+                with patch('wallet_ui.subprocess.run',return_value=failed) as run,patch('wallet_ui.time.sleep'):
+                    with self.assertRaisesRegex(ValueError,error.split(' ')[0]):app.cli(command,'local-test-password')
+                    self.assertEqual(run.call_count,calls)
     def test_rehearsal_sponsor_is_operator_selected_and_requires_private_password_file(self):
         with tempfile.TemporaryDirectory() as name:
             project = Path(name).resolve()
