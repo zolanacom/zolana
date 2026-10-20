@@ -23,7 +23,7 @@ from wallet_release import atomic,create,decode,encode,read,sha
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         fixtures.PilotTests.setUp(self)
-        short=tempfile.TemporaryDirectory(prefix='p45-',dir='/private/tmp');self.addCleanup(short.cleanup)
+        short=tempfile.TemporaryDirectory(prefix='p45-',dir=Path('/tmp').resolve());self.addCleanup(short.cleanup)
         self.base=Path(short.name).resolve();self.base.chmod(0o700);self.root=self.base/'pilot'
         self.password=self.base/'password';create(self.password,b'only-disposable-test-password')
         self.net=self.base/'net';self.net.mkdir(mode=0o700)
@@ -190,7 +190,7 @@ with patch.object(r,'atomic',side_effect=crash):r.activate(Path(sys.argv[1]),sys
 class ResumeGuardTests(unittest.TestCase):
     def test_resume_refuses_completed_or_unrelated_failure_without_rewriting_evidence(self):
         from pilot_runtime_localnet import checkpoint
-        with tempfile.TemporaryDirectory(prefix='p45guard-',dir='/private/tmp') as folder:
+        with tempfile.TemporaryDirectory(prefix='p45guard-',dir=Path('/tmp').resolve()) as folder:
             root=Path(folder);result=root/'pilot-runtime-result.json'
             for value in (dict(status='passed',events=[]),dict(status='failed',error='unrelated',events=[]),
                           dict(status='failed',error='Unknown wallet action.',events=[])):
@@ -200,7 +200,7 @@ class ResumeGuardTests(unittest.TestCase):
                 self.assertEqual({p.name for p in root.iterdir()},{result.name})
     def test_owned_group_sigkill_and_repeated_cleanup_do_not_signal_an_empty_group(self):
         from pilot_runtime_localnet import PilotHost
-        with tempfile.TemporaryDirectory(prefix='p45group-',dir='/private/tmp') as folder:
+        with tempfile.TemporaryDirectory(prefix='p45group-',dir=Path('/tmp').resolve()) as folder:
             root=Path(folder);trial=PilotHost(root/'unused',root,None,None)
             child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],start_new_session=True)
             trial.host=child

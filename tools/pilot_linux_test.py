@@ -93,6 +93,8 @@ class LinuxTests(unittest.TestCase):
         output = self.base / 'compiler-failure'
         def failed(command, **kwargs):
             self.assertIn('--offline', command); self.assertIn('--locked', command)
+            self.assertEqual(command[command.index('-j') + 1], '8')
+            self.assertEqual(kwargs['env']['CARGO_BUILD_JOBS'], '8')
             self.assertEqual(kwargs['env']['CARGO_TARGET_DIR'], str(output / 'target'))
             self.assertNotEqual(kwargs['env']['CARGO_TARGET_DIR'], str(self.source / 'target'))
             kwargs['stdout'].write(b'fixture compiler failure\n')
@@ -103,7 +105,7 @@ class LinuxTests(unittest.TestCase):
                 patch.object(linux, 'git', git), \
                 patch.object(linux.subprocess, 'check_output', return_value='release: 1.92.0\nhost: ' + linux.TARGET), \
                 patch.object(linux.subprocess, 'run', side_effect=failed):
-            with self.assertRaises(subprocess.CalledProcessError): linux.build(output)
+            with self.assertRaises(subprocess.CalledProcessError): linux.build(output, jobs=8)
         self.assertEqual((output / 'build.log').read_bytes(), b'fixture compiler failure\n')
         self.assertFalse((output / linux.RECEIPT).exists()); self.assertFalse(self.bundle.exists())
 
