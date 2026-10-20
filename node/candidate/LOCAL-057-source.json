@@ -1,0 +1,37 @@
+{
+  "archive_sha256": "917912ac67fc0b6ffec94e33e1ce113db581e1f1706aa1ecbe4224b967b15f30",
+  "baseline_patch": "agave-4.3.2.patch",
+  "baseline_patch_sha256": "d582e38f06cd6a1bed8686aa927141d8bb496d078674a4b0dd995177850d0e32",
+  "delta_patch": "agave-4.3.2-LOCAL-057.patch",
+  "delta_patch_sha256": "5000ac8db0c731bd84213de68edbfac69ab35428db50b51945d811dbc2a7f8f2",
+  "files": {
+    "Cargo.lock": {
+      "after_bytes": 337338,
+      "after_sha256": "3c982080fa7fd1bbce83119c2bfd892f95299d355bdab55ed53078b502e2eff3",
+      "before_bytes": 337261,
+      "before_sha256": "7500a89c82223a9efa597d0cbe396bbe782db01d2838f6adea6fa6c7caa97b38"
+    },
+    "rpc/Cargo.toml": {
+      "after_bytes": 5948,
+      "after_sha256": "d000face0986bbbe78b912de7fa039ae0646a76d8cf6af2581bec7f835cacf1d",
+      "before_bytes": 5772,
+      "before_sha256": "c402e1be9c012085bdd8f7b89fec79bc24be06cda77a931113795708a2d04945"
+    },
+    "rpc/src/rpc.rs": {
+      "after_bytes": 388185,
+      "after_sha256": "f51afe1a27fe487faf4d96f08ac5f14a42eb57dc1cc0ce121444b0490956eacb",
+      "before_bytes": 386905,
+      "before_sha256": "ea327e7db369929af46f8fbe5810b70a5d15ff8a6cd1efadfc309886083b518d"
+    },
+    "rpc/src/rpc/native_private_fee.rs": {
+      "after_bytes": 11255,
+      "after_sha256": "28a2752649ad34663cd6c597e5b12357d1e9c57ec38b0d4e508e2436dfb203ef",
+      "before_bytes": null,
+      "before_sha256": null
+    }
+  },
+  "format": "zolana-native-sdk4-delta-v1",
+  "revision": "LOCAL-057",
+  "scope": "Private operator-only exact native transaction fee RPC and its focused tests; no source preparation result claims a build, deployment, cryptographic audit, finality, or invited-wallet acceptance.",
+  "upstream_commit": "a203300045b405f86c9c84308b2eae76af69ac3b"
+}

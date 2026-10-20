@@ -30,6 +30,8 @@ fn run() -> Result<()> {
             "--job",
             "--gross-cap",
             "--fee",
+            "--native-ingress",
+            "--pool-format",
         ]
         .contains(&key.as_str())
         {
@@ -50,6 +52,18 @@ fn run() -> Result<()> {
     };
     let network_file = Path::new(get("--network")?);
     let network = Network::load(network_file)?;
+    let native_ingress = match (options.get("--native-ingress"), options.get("--pool-format")) {
+        (None, None) => None,
+        (Some(raw), Some(format)) if command == "relay" && format == "NPOOL004" => {
+            let endpoints = raw.split(',').map(str::parse::<std::net::SocketAddr>).collect::<std::result::Result<Vec<_>,_>>()?;
+            if endpoints.is_empty() || endpoints.len() > 3
+                || endpoints.iter().any(|endpoint| endpoint.ip() != std::net::Ipv4Addr::LOCALHOST || endpoint.port() == 0)
+                || endpoints.iter().collect::<std::collections::BTreeSet<_>>().len() != endpoints.len()
+            { return Err("native ingress requires 1..3 unique fixed127.0.0.1 endpoints".into()); }
+            Some(endpoints)
+        }
+        _ => return Err("native relay requires both --native-ingress and --pool-format NPOOL004; user overrides are forbidden".into()),
+    };
     let value = if command == "relay" {
         // Operator-only fixed paths. No spending/viewing keys from a user.
         let job = Path::new(get("--job")?);
@@ -81,39 +95,59 @@ fn run() -> Result<()> {
         // An ephemeral observer can authenticate canonical history without any
         // user's viewing key. Its decrypted balance is irrelevant to the relay.
         let observer = WalletKey::generate(network.clone())?;
-        let chain = connect()?;
-        let limit = if operation.has_staging() {
-            chain
-                .recovery_user_limit(&operation, payer.pubkey())?
-                .ok_or("relay original cap missing")?
+        let chain = connect()?.with_pool_format(
+            options
+                .get("--pool-format")
+                .map(String::as_str)
+                .unwrap_or("NPOOL003"),
+        )?;
+        if let Some(endpoints) = &native_ingress {
+            if job.join("outcome.json").exists() && !operation.has_native() {
+                serde_json::from_slice(&read_private(&job.join("outcome.json"), 8192)?)?
+            } else {
+                native_wallet::rpc::native::relay_inline(
+                    &chain,
+                    &payer,
+                    &bytes,
+                    &operation,
+                    get("--gross-cap")?.parse()?,
+                    endpoints,
+                )?
+            }
         } else {
-            get("--gross-cap")?.parse()?
-        };
-        let chain = chain.with_user_fees(payer.pubkey(), limit, &operation)?;
-        if operation.has_pending() {
-            let result = chain.resolve(&observer, &operation)?;
-            if operation.has_staging() {
-                chain.reclaim(&payer, &operation)?;
+            let limit = if operation.has_staging() {
+                chain
+                    .recovery_user_limit(&operation, payer.pubkey())?
+                    .ok_or("relay original cap missing")?
+            } else {
+                get("--gross-cap")?.parse()?
+            };
+            let chain = chain.with_user_fees(payer.pubkey(), limit, &operation)?;
+            if operation.has_pending() {
+                let result = chain.resolve(&observer, &operation)?;
+                if operation.has_staging() {
+                    chain.reclaim(&payer, &operation)?;
+                }
+                result
+            } else if job.join("outcome.json").exists() {
+                if operation.has_staging() {
+                    chain.reclaim(&payer, &operation)?;
+                }
+                serde_json::from_slice(&read_private(&job.join("outcome.json"), 4096)?)?
+            } else if job.join("attempted").exists() {
+                if operation.has_staging() {
+                    chain.reclaim(&payer, &operation)?;
+                }
+                // No pending finalization means the durable-before-broadcast rule
+                // proves this worker cannot have submitted a value-changing tx.
+                let aborted = serde_json::json!({"accepted":false,"aborted":true});
+                write_private_new(&job.join("outcome.json"), &serde_json::to_vec(&aborted)?)?;
+                aborted
+            } else {
+                chain.validate_shielded_payload(&bytes)?;
+                write_private_new(&job.join("attempted"), b"one bounded relay attempt\n")?;
+                serde_json::to_value(chain.submit(&payer, &bytes, &operation)?)?
             }
-            result
-        } else if job.join("outcome.json").exists() {
-            if operation.has_staging() {
-                chain.reclaim(&payer, &operation)?;
-            }
-            serde_json::from_slice(&read_private(&job.join("outcome.json"), 4096)?)?
-        } else if job.join("attempted").exists() {
-            if operation.has_staging() {
-                chain.reclaim(&payer, &operation)?;
-            }
-            // No pending finalization means the durable-before-broadcast rule
-            // proves this worker cannot have submitted a value-changing tx.
-            let aborted = serde_json::json!({"accepted":false,"aborted":true});
-            write_private_new(&job.join("outcome.json"), &serde_json::to_vec(&aborted)?)?;
-            aborted
-        } else {
-            chain.validate_shielded_payload(&bytes)?;
-            write_private_new(&job.join("attempted"), b"one bounded relay attempt\n")?;
-            serde_json::to_value(chain.submit(&payer, &bytes, &operation)?)?
         }
     } else {
         if options.keys().any(|k| {
@@ -137,6 +171,7 @@ fn run() -> Result<()> {
         let operation = WalletOperation::acquire(path)?;
         let wallet = WalletKey::open(path, &password, &network)?;
         let config: serde_json::Value = serde_json::from_slice(&std::fs::read(network_file)?)?;
+        let native = config["private_send_transport"] == "native-inline-v1";
         let chain = if config["format"] == "native-wallet-profile-v1" {
             if options.contains_key("--rpc") {
                 return Err("tester endpoint cannot be overridden".into());
@@ -149,8 +184,17 @@ fn run() -> Result<()> {
             }
         } else {
             Chain::connect(get("--rpc")?, network)?
+                .with_pool_format(config["pool_format"].as_str().unwrap_or("NPOOL003"))?
         };
         match command.as_str() {
+            "send" if native => shielded::native::send(
+                chain,
+                &wallet,
+                &operation,
+                get("--amount")?.parse()?,
+                get("--to")?,
+                get("--max-shielded-fee")?.parse()?,
+            )?,
             "send" => shielded::send(
                 &chain,
                 &wallet,

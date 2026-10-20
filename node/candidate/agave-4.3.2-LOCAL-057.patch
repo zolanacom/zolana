@@ -1,0 +1,372 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -10522,6 +10522,8 @@
+  "jsonrpc-pubsub",
+  "libc",
+  "log",
++ "native-payment-program",
++ "payment-lab",
+  "rayon",
+  "regex",
+  "serde",
+@@ -10544,6 +10546,7 @@
+  "solana-epoch-rewards-hasher",
+  "solana-epoch-schedule",
+  "solana-faucet",
++ "solana-feature-gate-interface",
+  "solana-fee-calculator",
+  "solana-fee-structure",
+  "solana-genesis-config",
+diff --git a/rpc/Cargo.toml b/rpc/Cargo.toml
+--- a/rpc/Cargo.toml
++++ b/rpc/Cargo.toml
+@@ -109,6 +109,9 @@
+ wincode = { workspace = true }
+ 
+ [dev-dependencies]
++native-payment-program = { workspace = true }
++payment-lab = { path = "../zolana-native/fixtures" }
++solana-feature-gate-interface = { workspace = true, features = ["bincode"] }
+ agave-reserved-account-keys = { path = "../reserved-account-keys", features = ["agave-unstable-api"] }
+ serial_test = { workspace = true }
+ solana-account = { workspace = true, features = ["bincode"] }
+diff --git a/rpc/src/rpc.rs b/rpc/src/rpc.rs
+--- a/rpc/src/rpc.rs
++++ b/rpc/src/rpc.rs
+@@ -136,6 +136,7 @@
+ }
+ 
+ pub mod account_resolver;
++mod native_private_fee;
+ 
+ type RpcCustomResult<T> = std::result::Result<T, RpcCustomError>;
+ 
+@@ -3688,6 +3689,16 @@
+             config: Option<RpcContextConfig>,
+         ) -> Result<RpcResponse<Option<u64>>>;
+ 
++        /// Private operator read for an exact native packet. Invited gateways
++        /// do not expose this method and ordinary RPC byte limits stay intact.
++        #[rpc(meta, name = "getNativePrivateTransactionFee")]
++        fn get_native_private_transaction_fee(
++            &self,
++            meta: Self::Metadata,
++            data: String,
++            config: Option<RpcContextConfig>,
++        ) -> Result<RpcResponse<Option<u64>>>;
++
+         #[rpc(meta, name = "getStakeMinimumDelegation")]
+         fn get_stake_minimum_delegation(
+             &self,
+@@ -4370,6 +4381,27 @@
+             .map_err(|err| Error::invalid_params(format!("invalid transaction message: {err}")))?;
+             let fee = bank.get_fee_for_message(&sanitized_message);
+             Ok(new_response(bank, fee))
++        }
++
++        fn get_native_private_transaction_fee(
++            &self,
++            meta: Self::Metadata,
++            data: String,
++            config: Option<RpcContextConfig>,
++        ) -> Result<RpcResponse<Option<u64>>> {
++            let mut config = config.unwrap_or_default();
++            if config
++                .commitment
++                .is_some_and(|value| value != CommitmentConfig::finalized())
++            {
++                return Err(Error::invalid_params(
++                    "native fee reads require finalized commitment",
++                ));
++            }
++            config.commitment = Some(CommitmentConfig::finalized());
++            let bank = meta.get_bank_with_config(config)?;
++            let fee = native_private_fee::quote(&bank, &data)?;
++            Ok(new_response(&bank, fee))
+         }
+ 
+         fn get_stake_minimum_delegation(
+diff --git a/rpc/src/rpc/native_private_fee.rs b/rpc/src/rpc/native_private_fee.rs
+new file mode 100644
+--- /dev/null
++++ b/rpc/src/rpc/native_private_fee.rs
+@@ -0,0 +1,278 @@
++//! Read-only exact-packet fee quotation for the private native relay.
++//! Outer signatures and strict native admission are checked. This neither
++//! verifies the inner payment proof nor simulates, broadcasts or reserves value.
++use {
++    super::{BASE64_STANDARD, Bank, Error, Result},
++    base64::Engine,
++    solana_message::VersionedMessage,
++    solana_runtime::native_payment_admission::MAX_NATIVE_TRANSACTION_BYTES,
++    solana_transaction::{TransactionVerificationMode, versioned::VersionedTransaction},
++};
++
++const MAX_NATIVE_BASE64_BYTES: usize = MAX_NATIVE_TRANSACTION_BYTES.div_ceil(3) * 4;
++
++pub(super) fn quote(bank: &Bank, encoded: &str) -> Result<Option<u64>> {
++    if encoded.is_empty() || encoded.len() > MAX_NATIVE_BASE64_BYTES {
++        return Err(Error::invalid_params(
++            "native transaction encoding exceeds the bound",
++        ));
++    }
++    let raw = BASE64_STANDARD
++        .decode(encoded)
++        .map_err(|_| Error::invalid_params("invalid native transaction base64"))?;
++    if raw.len() > MAX_NATIVE_TRANSACTION_BYTES || BASE64_STANDARD.encode(&raw) != encoded {
++        return Err(Error::invalid_params(
++            "native transaction exceeds the bound or is not canonical base64",
++        ));
++    }
++    let config = wincode::config::DefaultConfig::default()
++        .with_preallocation_size_limit::<MAX_NATIVE_TRANSACTION_BYTES>();
++    let transaction: VersionedTransaction = wincode::config::deserialize_exact(&raw, config)
++        .map_err(|_| Error::invalid_params("invalid exact native transaction bytes"))?;
++    if !matches!(&transaction.message, VersionedMessage::Legacy(_))
++        || wincode::serialize(&transaction)
++            .map_err(|_| Error::invalid_params("native transaction serialization failed"))?
++            != raw
++    {
++        return Err(Error::invalid_params(
++            "native fee reads require canonical Legacy transaction bytes",
++        ));
++    }
++    let admitted = bank
++        .verify_transaction(transaction, TransactionVerificationMode::FullVerification)
++        .map_err(|_| Error::invalid_params("invalid signed native transaction"))?;
++    if bank
++        .check_native_payment_admission(&admitted)
++        .map_err(|_| Error::invalid_params("invalid native payment admission"))?
++        .is_none()
++    {
++        return Err(Error::invalid_params(
++            "native fee reads require a complete native payment packet",
++        ));
++    }
++    Ok(bank.get_fee_for_message(admitted.message()))
++}
++
++#[cfg(test)]
++mod tests {
++    use {
++        super::*,
++        crate::rpc::{
++            JsonRpcRequestProcessor,
++            rpc_full::{Full, FullImpl},
++        },
++        native_payment_program::{
++            ACTIVATION_ID, INLINE_PAYMENT_ACTIVATION_ID, SHIELDED_FEE_ACTIVATION_ID, instructions,
++        },
++        payment_lab::{
++            admission_fixture::unverified_shielded_fee_payload, proof_smoke::FIXTURE_GENESIS,
++        },
++        solana_account::AccountSharedData,
++        solana_commitment_config::CommitmentConfig,
++        solana_compute_budget_interface::ComputeBudgetInstruction,
++        solana_feature_gate_interface::{Feature, create_account},
++        solana_fee_calculator::FeeRateGovernor,
++        solana_instruction::Instruction,
++        solana_keypair::Keypair,
++        solana_net_utils::SocketAddrSpace,
++        solana_pubkey::Pubkey,
++        solana_rpc_client_api::config::RpcContextConfig,
++        solana_signer::Signer,
++        solana_transaction::Transaction,
++    };
++
++    /// The inner proof is intentionally invalid: quoting must not assert proof
++    /// verification/execution/finality. The outer signature is real and checked.
++    fn fixture(omitted: Option<Pubkey>) -> (Bank, Keypair, Transaction) {
++        let relay = Keypair::new();
++        // The actual RPC processor constructs a leader schedule. Use the
++        // upstream staked-validator fixture rather than an empty Bank genesis.
++        let mut genesis =
++            solana_ledger::genesis_utils::create_genesis_config(1_000_000_000).genesis_config;
++        genesis.fee_rate_governor = FeeRateGovernor::new(5_000, 0);
++        genesis.accounts.insert(
++            relay.pubkey(),
++            AccountSharedData::new(1_000_000_000, 0, &solana_sdk_ids::system_program::id()).into(),
++        );
++        for feature in [
++            ACTIVATION_ID,
++            INLINE_PAYMENT_ACTIVATION_ID,
++            SHIELDED_FEE_ACTIVATION_ID,
++        ] {
++            // The upstream fixture enables all features; explicitly control
++            // these three so each disabled-gate case remains meaningful.
++            genesis.accounts.remove(&feature);
++            if Some(feature) != omitted {
++                genesis.accounts.insert(
++                    feature,
++                    create_account(
++                        &Feature {
++                            activated_at: Some(0),
++                        },
++                        1_000_000,
++                    )
++                    .into(),
++                );
++            }
++        }
++        let bank = Bank::new_for_tests(&genesis);
++        let payload =
++            unverified_shielded_fee_payload(relay.pubkey().to_bytes(), FIXTURE_GENESIS, 100);
++        let transaction = Transaction::new_signed_with_payer(
++            &[
++                ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
++                instructions::inline(FIXTURE_GENESIS, &payload).unwrap(),
++            ],
++            Some(&relay.pubkey()),
++            &[&relay],
++            bank.last_blockhash(),
++        );
++        (bank, relay, transaction)
++    }
++
++    fn encoded(transaction: &Transaction) -> String {
++        BASE64_STANDARD
++            .encode(wincode::serialize(&VersionedTransaction::from(transaction.clone())).unwrap())
++    }
++
++    #[test]
++    fn exact_native_fee_matches_bank_without_expanding_ordinary_rpc_or_changing_accounts() {
++        let (bank, relay, transaction) = fixture(None);
++        let raw = wincode::serialize(&VersionedTransaction::from(transaction.clone())).unwrap();
++        assert_eq!(raw.len(), 9_676);
++        let admitted = bank
++            .verify_transaction(
++                transaction.clone().into(),
++                TransactionVerificationMode::FullVerification,
++            )
++            .unwrap();
++        let expected = bank.get_fee_for_message(admitted.message());
++        assert_eq!(expected, Some(5_000));
++        let before_balance = bank.get_balance(&relay.pubkey());
++        let before_count = bank.transaction_count();
++        let meta = JsonRpcRequestProcessor::new_from_bank(bank, SocketAddrSpace::Unspecified);
++        let response = FullImpl
++            .get_native_private_transaction_fee(
++                meta.clone(),
++                BASE64_STANDARD.encode(raw),
++                Some(RpcContextConfig {
++                    commitment: Some(CommitmentConfig::finalized()),
++                    min_context_slot: None,
++                }),
++            )
++            .unwrap();
++        assert_eq!(response.value, expected);
++        assert_eq!(response.context.slot, 0);
++        assert!(
++            FullImpl
++                .get_fee_for_message(
++                    meta.clone(),
++                    BASE64_STANDARD.encode(
++                        wincode::serialize(&VersionedMessage::Legacy(transaction.message)).unwrap()
++                    ),
++                    None
++                )
++                .is_err()
++        );
++        let bank = meta
++            .get_bank_with_config(RpcContextConfig::default())
++            .unwrap();
++        assert_eq!(bank.get_balance(&relay.pubkey()), before_balance);
++        assert_eq!(bank.transaction_count(), before_count);
++        assert_eq!(meta.transaction_sender.len(), 0);
++    }
++
++    #[test]
++    fn native_fee_rejects_wrong_commitment_context_disabled_gates_signatures_and_shapes() {
++        let (bank, relay, mut transaction) = fixture(None);
++        let data = encoded(&transaction);
++        let meta = JsonRpcRequestProcessor::new_from_bank(bank, SocketAddrSpace::Unspecified);
++        for commitment in [CommitmentConfig::confirmed(), CommitmentConfig::processed()] {
++            assert!(
++                FullImpl
++                    .get_native_private_transaction_fee(
++                        meta.clone(),
++                        data.clone(),
++                        Some(RpcContextConfig {
++                            commitment: Some(commitment),
++                            min_context_slot: None
++                        })
++                    )
++                    .is_err()
++            );
++        }
++        assert!(
++            FullImpl
++                .get_native_private_transaction_fee(
++                    meta,
++                    data,
++                    Some(RpcContextConfig {
++                        commitment: Some(CommitmentConfig::finalized()),
++                        min_context_slot: Some(1)
++                    })
++                )
++                .is_err()
++        );
++        for feature in [
++            ACTIVATION_ID,
++            INLINE_PAYMENT_ACTIVATION_ID,
++            SHIELDED_FEE_ACTIVATION_ID,
++        ] {
++            let (bank, _, transaction) = fixture(Some(feature));
++            assert!(quote(&bank, &encoded(&transaction)).is_err());
++        }
++        let (bank, _, _) = fixture(None);
++        transaction.signatures[0] = solana_signature::Signature::default();
++        assert!(quote(&bank, &encoded(&transaction)).is_err());
++        transaction.message.instructions[0].data = vec![2, 1, 0, 0, 0];
++        transaction.sign(&[&relay], bank.last_blockhash());
++        assert!(quote(&bank, &encoded(&transaction)).is_err());
++        let versioned = VersionedTransaction::try_new(
++            VersionedMessage::V0(solana_message::v0::Message {
++                header: transaction.message.header,
++                account_keys: transaction.message.account_keys.clone(),
++                recent_blockhash: transaction.message.recent_blockhash,
++                instructions: transaction.message.instructions.clone(),
++                address_table_lookups: vec![],
++            }),
++            &[&relay],
++        )
++        .unwrap();
++        assert!(
++            quote(
++                &bank,
++                &BASE64_STANDARD.encode(wincode::serialize(&versioned).unwrap())
++            )
++            .is_err()
++        );
++        let ordinary = Transaction::new_signed_with_payer(
++            &[Instruction::new_with_bytes(
++                Pubkey::new_unique(),
++                &[9; 16],
++                vec![],
++            )],
++            Some(&relay.pubkey()),
++            &[&relay],
++            bank.last_blockhash(),
++        );
++        assert!(quote(&bank, &encoded(&ordinary)).is_err());
++    }
++
++    #[test]
++    fn native_fee_decoder_rejects_noncanonical_trailing_and_oversized_bytes() {
++        let (bank, _, transaction) = fixture(None);
++        let valid = encoded(&transaction);
++        let mut raw = BASE64_STANDARD.decode(&valid).unwrap();
++        raw.push(0);
++        for malformed in [
++            "?".into(),
++            String::new(),
++            format!("{valid}="),
++            BASE64_STANDARD.encode(raw),
++            "A".repeat(MAX_NATIVE_BASE64_BYTES + 1),
++            BASE64_STANDARD.encode(vec![0; MAX_NATIVE_TRANSACTION_BYTES + 1]),
++        ] {
++            assert!(quote(&bank, &malformed).is_err());
++        }
++    }
++}

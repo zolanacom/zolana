@@ -636,7 +636,9 @@ fn marker_receipt(rpc: &RpcClient, network: [u8; 32], payloads: &[&[u8]]) -> Res
             if account.owner != id()
                 || account.data != nullifiers::encode(&nf)
                 || account.lamports
-                    < rpc.get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES)?
+                    < rpc
+                        .get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES)?
+                        .max(1)
             {
                 return Err("incorrect permanent nullifier marker".into());
             }
@@ -699,7 +701,9 @@ fn exercise(root: &Path, rpc: &RpcClient, peer: &RpcClient, config: &Value) -> R
     let funding = wire::encode(network, &fixture.funding_context, &fixture.funding)?;
     let buffer = stage(rpc, &payer, &payer, &funding, expiry)?;
     let funding_markers = marker_keys(network, &funding)?;
-    let rent = rpc.get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES)?;
+    let rent = rpc
+        .get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES)?
+        .max(1);
     send(
         rpc,
         &payer,

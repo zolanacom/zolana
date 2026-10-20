@@ -70,6 +70,34 @@ pub fn close(buffer: Pubkey, sponsor: Pubkey) -> Instruction {
     }
 }
 
+/// Complete proof in the instruction, without staging accounts. This execution
+/// candidate deliberately does not change the validator's network size limits.
+/// Only an explicitly activated native ingress carrying all proof bytes could
+/// make it admissible over the network.
+pub fn inline(network: [u8; 32], payload: &[u8]) -> Result<Instruction, native_payments::Error> {
+    let framed = native_payments::envelope::encode(network, payload)?;
+    let payment = native_payments::wire::decode(network, payload)?;
+    let mut data = vec![5];
+    data.extend_from_slice(&framed);
+    Ok(Instruction {
+        program_id: id(),
+        accounts: vec![
+            AccountMeta::new(pool_address(), false),
+            AccountMeta::new(Pubkey::new_from_array(payment.context.sponsor), true),
+            AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
+            AccountMeta::new(
+                crate::nullifiers::address(&payment.bundle.actions()[0].nullifier().to_bytes()),
+                false,
+            ),
+            AccountMeta::new(
+                crate::nullifiers::address(&payment.bundle.actions()[1].nullifier().to_bytes()),
+                false,
+            ),
+        ],
+        data,
+    })
+}
+
 pub fn finalize_to(
     buffer: Pubkey,
     sponsor: Pubkey,

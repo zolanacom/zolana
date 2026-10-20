@@ -1,0 +1,558 @@
+diff --git a/zolana-fast-check/src/ancestry.rs b/zolana-fast-check/src/ancestry.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry.rs
+@@ -0,0 +1,114 @@
++//! Read-only original-checkpoint ancestry verification without a chain-age cap.
++//! Each metadata read is fallible; incomplete, cancelled and timed-out paths
++//! never count as verified. Strictly decreasing parent slots prevent cycles.
++use {
++    solana_ledger::blockstore::Blockstore,
++    std::{fmt, thread, time::Instant},
++};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(super) struct AncestryReport {
++    pub start_slot: u64,
++    pub target_slot: u64,
++    /// Includes both the pinned current root and original checkpoint.
++    pub entries: u64,
++}
++
++#[derive(Debug)]
++pub(super) enum AncestryError {
++    Cancelled,
++    Deadline,
++    Invalid { slot: u64, reason: String },
++}
++
++impl fmt::Display for AncestryError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Cancelled => formatter.write_str("original-root ancestry verification cancelled"),
++            Self::Deadline => {
++                formatter.write_str("original-root ancestry verification deadline exceeded")
++            }
++            Self::Invalid { slot, reason } => write!(
++                formatter,
++                "invalid original-root ancestry at slot {slot}: {reason}"
++            ),
++        }
++    }
++}
++
++impl std::error::Error for AncestryError {}
++
++fn check_budget(
++    deadline: Instant,
++    cancelled: &mut impl FnMut() -> bool,
++) -> Result<(), AncestryError> {
++    if cancelled() {
++        return Err(AncestryError::Cancelled);
++    }
++    if Instant::now() >= deadline {
++        return Err(AncestryError::Deadline);
++    }
++    Ok(())
++}
++
++pub(super) fn verify_path(
++    blockstore: &Blockstore,
++    start_slot: u64,
++    target_slot: u64,
++    deadline: Instant,
++    mut cancelled: impl FnMut() -> bool,
++) -> Result<AncestryReport, AncestryError> {
++    let mut slot = start_slot;
++    let mut entries = 0u64;
++    loop {
++        check_budget(deadline, &mut cancelled)?;
++        let invalid = |reason: String| AncestryError::Invalid { slot, reason };
++        if slot < target_slot {
++            return Err(invalid("path passed below the original checkpoint".into()));
++        }
++        let meta = blockstore
++            .meta(slot)
++            .map_err(|error| invalid(format!("cannot read metadata: {error}")))?
++            .ok_or_else(|| {
++                invalid("metadata missing before reaching the original checkpoint".into())
++            })?;
++        check_budget(deadline, &mut cancelled)?;
++        if meta.slot != slot {
++            return Err(invalid(format!(
++                "metadata identifies a different slot {}",
++                meta.slot
++            )));
++        }
++        entries = entries
++            .checked_add(1)
++            .ok_or_else(|| invalid("ancestry counter overflow".into()))?;
++        if slot == target_slot {
++            // The checkpoint's own parent can legitimately have been pruned.
++            // Its retained certified hash is independently checked by resume.
++            return Ok(AncestryReport {
++                start_slot,
++                target_slot,
++                entries,
++            });
++        }
++        let parent = meta
++            .parent_slot
++            .ok_or_else(|| invalid("parent missing before original checkpoint".into()))?;
++        if parent >= slot {
++            return Err(invalid(format!(
++                "parent {parent} is not strictly below its child"
++            )));
++        }
++        if parent < target_slot {
++            return Err(invalid(format!(
++                "parent {parent} jumps below the original checkpoint"
++            )));
++        }
++        slot = parent;
++        // Yield without dropping progress. This is a scheduling slice, never an
++        // acceptance limit or evidence that the rest of the path was verified.
++        if entries.is_multiple_of(4096) {
++            thread::yield_now();
++        }
++    }
++}
+diff --git a/zolana-fast-check/src/ancestry_tests.rs b/zolana-fast-check/src/ancestry_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_tests.rs
+@@ -0,0 +1,286 @@
++//! Real RocksDB slot-metadata fixtures exercise the production ancestry walk.
++//! These fixtures do not produce consensus blocks, certificates, or genesis and
++//! do not claim to test consensus finality. Original-root hash, vote-history,
++//! genesis, owner and ledger guards remain separate resume requirements.
++
++use {
++    crate::ancestry::{AncestryError, verify_path},
++    solana_ledger::{
++        ancestor_iterator::AncestorIterator, blockstore::Blockstore, blockstore_meta::SlotMeta,
++    },
++    std::time::{Duration, Instant},
++};
++
++fn meta(slot: u64, parent_slot: Option<u64>) -> SlotMeta {
++    SlotMeta {
++        slot,
++        parent_slot,
++        ..SlotMeta::default()
++    }
++}
++
++fn put(store: &Blockstore, slot: u64, parent: Option<u64>) {
++    store.put_meta(slot, &meta(slot, parent)).unwrap();
++}
++
++fn deadline() -> Instant {
++    Instant::now() + Duration::from_secs(120)
++}
++
++fn invalid(store: &Blockstore, start: u64, target: u64) -> AncestryError {
++    let error = verify_path(store, start, target, deadline(), || false).unwrap_err();
++    assert!(matches!(&error, AncestryError::Invalid { .. }), "{error}");
++    error
++}
++
++#[test]
++fn real_blockstore_more_than_100k_links_survives_reopen_without_a_count_cap() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    const TARGET: u64 = 7;
++    const LINKS: u64 = 100_002;
++    const START: u64 = TARGET + LINKS;
++    put(&store, TARGET, None);
++    for slot in TARGET + 1..=START {
++        put(&store, slot, Some(slot - 1));
++    }
++    // Demonstrate the exact former failure on these real persisted headers.
++    let old_cutoff_fails = !AncestorIterator::new_inclusive(START, &store)
++        .take(100_000)
++        .any(|slot| slot == TARGET);
++    assert!(old_cutoff_fails);
++    let began = Instant::now();
++    let checked = verify_path(&store, START, TARGET, deadline(), || false).unwrap();
++    println!(
++        "{}",
++        serde_json::json!({"event":"ancestry_metadata_walk", "phase":"before_reopen",
++        "entries":checked.entries, "parent_links":LINKS, "old_cutoff_fails":old_cutoff_fails,
++        "elapsed_ms":began.elapsed().as_secs_f64()*1000.0, "consensus_blocks_generated":false})
++    );
++    assert_eq!(
++        (checked.start_slot, checked.target_slot, checked.entries),
++        (START, TARGET, LINKS + 1)
++    );
++    assert_eq!(store.meta(TARGET).unwrap().unwrap(), meta(TARGET, None));
++    drop(store);
++
++    // Reopen the same original DB path, rather than rebuilding the fixture.
++    let reopened = Blockstore::open(directory.path()).unwrap();
++    let began = Instant::now();
++    let checked = verify_path(&reopened, START, TARGET, deadline(), || false).unwrap();
++    println!(
++        "{}",
++        serde_json::json!({"event":"ancestry_metadata_walk", "phase":"after_reopen",
++        "entries":checked.entries, "parent_links":LINKS, "old_cutoff_fails":old_cutoff_fails,
++        "elapsed_ms":began.elapsed().as_secs_f64()*1000.0, "consensus_blocks_generated":false})
++    );
++    assert_eq!(
++        (checked.start_slot, checked.target_slot, checked.entries),
++        (START, TARGET, LINKS + 1)
++    );
++    assert_eq!(
++        reopened.meta(START).unwrap().unwrap(),
++        meta(START, Some(START - 1))
++    );
++}
++
++#[test]
++fn target_termination_requires_its_metadata_but_never_walks_its_own_parent() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 7, None);
++    let checked = verify_path(&store, 7, 7, deadline(), || false).unwrap();
++    assert_eq!(checked.entries, 1);
++    put(&store, 9, Some(7));
++    // The original target's parent is outside the proof being requested. It
++    // may have been pruned; neither a missing parent nor bad older metadata is
++    // permission to walk past the retained target or manufacture new history.
++    let checked = verify_path(&store, 9, 7, deadline(), || false).unwrap();
++    assert_eq!(checked.entries, 2);
++    put(&store, 7, Some(7));
++    assert_eq!(
++        verify_path(&store, 9, 7, deadline(), || false)
++            .unwrap()
++            .entries,
++        2
++    );
++    invalid(&store, 10, 10); // Equal slot numbers cannot replace missing metadata.
++}
++
++#[test]
++fn missing_start_or_middle_metadata_cannot_be_accepted_as_ancestry() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 3, None);
++    invalid(&store, 9, 3);
++    put(&store, 9, Some(7));
++    invalid(&store, 9, 3); // Parent number is not proof its record exists.
++    put(&store, 7, Some(3));
++    assert_eq!(
++        verify_path(&store, 9, 3, deadline(), || false)
++            .unwrap()
++            .entries,
++        3
++    );
++}
++
++#[test]
++fn missing_parent_self_parent_and_upward_parent_all_fail_closed() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 3, None);
++    for parent in [None, Some(9), Some(10)] {
++        put(&store, 9, parent);
++        invalid(&store, 9, 3);
++        assert_eq!(store.meta(9).unwrap().unwrap(), meta(9, parent));
++    }
++}
++
++#[test]
++fn cycle_is_rejected_by_the_strictly_decreasing_parent_rule() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 3, None);
++    put(&store, 9, Some(7));
++    put(&store, 7, Some(9));
++    invalid(&store, 9, 3);
++}
++
++#[test]
++fn jumping_below_target_or_finding_target_on_another_branch_is_not_a_proof() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 5, None);
++    put(&store, 10, Some(4));
++    put(&store, 4, None);
++    invalid(&store, 10, 5);
++    put(&store, 10, Some(8));
++    put(&store, 8, Some(4));
++    invalid(&store, 10, 5);
++}
++
++#[test]
++fn metadata_slot_must_match_the_lookup_key_even_if_parent_would_reach_target() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 3, None);
++    store.put_meta(9, &meta(8, Some(3))).unwrap();
++    invalid(&store, 9, 3);
++    // Also authenticate the record at the target before returning success.
++    put(&store, 9, Some(3));
++    store.put_meta(3, &meta(2, None)).unwrap();
++    invalid(&store, 9, 3);
++}
++
++#[test]
++fn target_newer_than_start_fails_without_reinterpreting_root_order() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 3, None);
++    put(&store, 9, Some(3));
++    invalid(&store, 3, 9);
++}
++
++#[test]
++fn cancellation_before_or_during_a_valid_path_never_returns_a_partial_report() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    for slot in 1..=12 {
++        put(&store, slot, (slot > 1).then_some(slot - 1));
++    }
++    assert!(matches!(
++        verify_path(&store, 12, 1, deadline(), || true),
++        Err(AncestryError::Cancelled)
++    ));
++    let mut checks = 0;
++    let interrupted = verify_path(&store, 12, 1, deadline(), || {
++        checks += 1;
++        checks >= 5
++    });
++    assert!(matches!(interrupted, Err(AncestryError::Cancelled)));
++    assert!(checks >= 5);
++    // Cancellation cannot turn an incomplete walk into accepted history, and
++    // cannot alter the original path for a later uncancelled verification.
++    assert_eq!(
++        verify_path(&store, 12, 1, deadline(), || false)
++            .unwrap()
++            .entries,
++        12
++    );
++    assert_eq!(store.meta(12).unwrap().unwrap(), meta(12, Some(11)));
++}
++
++#[test]
++fn expired_deadline_fails_even_on_valid_or_equal_root_paths() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 7, None);
++    put(&store, 9, Some(7));
++    let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
++    assert!(matches!(
++        verify_path(&store, 9, 7, expired, || false),
++        Err(AncestryError::Deadline)
++    ));
++    assert!(matches!(
++        verify_path(&store, 7, 7, expired, || false),
++        Err(AncestryError::Deadline)
++    ));
++    assert_eq!(
++        verify_path(&store, 9, 7, deadline(), || false)
++            .unwrap()
++            .entries,
++        2
++    );
++}
++
++#[test]
++fn cancellation_after_the_target_metadata_read_cannot_claim_success() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 7, None);
++    let mut checks = 0;
++    let interrupted = verify_path(&store, 7, 7, deadline(), || {
++        checks += 1;
++        checks >= 2
++    });
++    assert!(matches!(interrupted, Err(AncestryError::Cancelled)));
++    assert_eq!(
++        verify_path(&store, 7, 7, deadline(), || false)
++            .unwrap()
++            .entries,
++        1
++    );
++}
++
++#[test]
++fn cancelled_type_survives_anyhow_context_for_graceful_service_shutdown() {
++    use anyhow::Context;
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 7, None);
++    let error = verify_path(&store, 7, 7, deadline(), || true)
++        .context("verify original checkpoint ancestry for an existing validator")
++        .unwrap_err();
++    assert!(matches!(
++        error.downcast_ref::<AncestryError>(),
++        Some(AncestryError::Cancelled)
++    ));
++}
++
++#[test]
++fn corrupt_raw_metadata_returns_a_fallible_error_without_repairing_the_fixture() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    put(&store, 3, None);
++    // Existing public fixture API; seven bytes cannot decode even the slot u64.
++    store.put_meta_bytes(9, b"corrupt").unwrap();
++    let before = store.meta(9).unwrap_err().to_string();
++    let error = invalid(&store, 9, 3);
++    assert!(matches!(error, AncestryError::Invalid { slot: 9, .. }));
++    assert_eq!(store.meta(9).unwrap_err().to_string(), before);
++    assert_eq!(store.meta(3).unwrap().unwrap(), meta(3, None));
++    drop(store);
++    let reopened = Blockstore::open(directory.path()).unwrap();
++    assert_eq!(reopened.meta(9).unwrap_err().to_string(), before);
++    invalid(&reopened, 9, 3);
++}
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -4,6 +4,9 @@
+ //! Neither mode claims production validator independence or durable Mac readiness.
+ //! Every ledger and key belongs to a fresh owner-only invocation directory.
+ 
++mod ancestry;
++#[cfg(test)]
++mod ancestry_tests;
+ mod resume;
+ mod service;
+ 
+diff --git a/zolana-fast-check/src/resume.rs b/zolana-fast-check/src/resume.rs
+--- a/zolana-fast-check/src/resume.rs
++++ b/zolana-fast-check/src/resume.rs
+@@ -1,14 +1,14 @@
+ //! Owner-only, original-ledger whole-process recovery for this isolated fixture.
+ //! No ledger creation, genesis replacement, account migration, or vote-history reset.
+ use {
+-    super::{Args, UPSTREAM_COMMIT, pilot_validator_config},
++    super::{Args, UPSTREAM_COMMIT, ancestry, pilot_validator_config},
+     agave_votor::vote_history_storage::{FileVoteHistoryStorage, VoteHistoryStorage},
+     anyhow::{Context, Result, ensure},
+     serde::{Deserialize, Serialize},
+     serde_json::{Value, json},
+     solana_genesis_config::GenesisConfig,
+     solana_keypair::Keypair,
+-    solana_ledger::{ancestor_iterator::AncestorIterator, blockstore::Blockstore},
++    solana_ledger::blockstore::Blockstore,
+     solana_local_cluster::local_cluster::{ExistingValidator, LocalCluster},
+     solana_net_utils::SocketAddrSpace,
+     solana_pubkey::Pubkey,
+@@ -178,10 +178,17 @@
+     }
+ 
+     pub(super) fn validate_restored(&self, cluster: &LocalCluster, args: &Args) -> Result<Value> {
++        self.validate_restored_with_cancel(cluster, args, || false)
++    }
++
++    pub(super) fn validate_restored_with_cancel(&self, cluster: &LocalCluster, args: &Args,
++        mut cancelled: impl FnMut() -> bool) -> Result<Value> {
+         ensure!(cluster.genesis_config.hash().to_string() == self.genesis_hash,
+             "resumed cluster substituted a genesis");
+         let began = Instant::now();
++        let deadline = began + Duration::from_secs(60);
+         loop {
++            if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
+             let mut peers = Vec::new();
+             for expected in &self.nodes {
+                 let identity: Pubkey = expected.identity.parse()?;
+@@ -191,11 +198,16 @@
+                     && node.config.require_vote_history && node.config.wait_for_supermajority.is_none()
+                     && node.config.new_hard_forks.is_none(), "resumed ledger/key/safety configuration differs");
+                 let validator = node.validator.as_ref().context("resumed validator stopped")?;
+-                let forks = validator.bank_forks.read().unwrap();
+-                let bank = forks.root_bank();
+-                if bank.slot() < expected.root_slot || !forks.migration_status().is_alpenglow_enabled() {
+-                    continue;
+-                }
++                // Pin one actual finalized root, then release BankForks before
++                // doing any Blockstore I/O over potentially long history.
++                let bank = {
++                    let forks = validator.bank_forks.read().unwrap();
++                    let bank = forks.root_bank();
++                    if bank.slot() < expected.root_slot || !forks.migration_status().is_alpenglow_enabled() {
++                        continue;
++                    }
++                    bank
++                };
+                 ensure!(bank.feature_set.is_active(&agave_feature_set::alpenglow::id())
+                     && bank.get_alpenglow_genesis_certificate().is_some(),
+                     "resumed validator lacks original active Alpenglow state");
+@@ -203,9 +215,9 @@
+                     expected.root_slot, &expected.root_bank_hash)?;
+                 ensure!(retained,
+                     "original pre-hold certified root BANK hash is absent in retained ledger: {root_evidence}");
+-                ensure!(AncestorIterator::new_inclusive(bank.slot(), &validator.blockstore)
+-                    .take(100_000).any(|slot| slot == expected.root_slot),
+-                    "resumed root is not a descendant of the original pre-hold root");
++                let ancestry = ancestry::verify_path(&validator.blockstore, bank.slot(),
++                    expected.root_slot, deadline, &mut cancelled)
++                    .with_context(|| format!("verify original checkpoint ancestry for validator {identity}"))?;
+                 if args.private {
+                     ensure!(zolana_native_check::native_features_for_profile(args.slot_anchors).iter()
+                         .all(|feature| bank.feature_set.is_active(feature)), "resumed native feature inactive");
+@@ -219,13 +231,15 @@
+                     "ledger": node.info.ledger_path, "original_root_slot": expected.root_slot,
+                     "original_root_bank_hash": expected.root_bank_hash, "resumed_root_slot": bank.slot(),
+                     "original_signed_vote_history_required": true, "original_root_is_ancestor": true,
++                    "original_ancestry_entries": ancestry.entries,
+                     "retained_root_bank_hash_evidence": root_evidence}));
+             }
++            if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
++            if Instant::now() >= deadline { return Err(ancestry::AncestryError::Deadline.into()); }
+             if peers.len() == self.nodes.len() {
+                 return Ok(json!({"same_genesis": true, "whole_process_resume": true, "new_ports_only": true,
+                     "new_ledger_created": false, "vote_history_reset": false, "peers": peers}));
+             }
+-            ensure!(began.elapsed() < Duration::from_secs(60), "resumed original roots did not recover before deadline");
+             sleep(Duration::from_millis(50));
+         }
+     }
+diff --git a/zolana-fast-check/src/service.rs b/zolana-fast-check/src/service.rs
+--- a/zolana-fast-check/src/service.rs
++++ b/zolana-fast-check/src/service.rs
+@@ -1,7 +1,9 @@
+ //! Resume-only service lifetime for a separately sealed Linux supervisor.
+ //! No genesis construction, benchmark transfers, funding, or metadata replacement.
+ use {
+-    super::{Args, Evidence, check_alpenglow, external_fixture_ready, resume},
++    super::{
++        Args, Evidence, ancestry::AncestryError, check_alpenglow, external_fixture_ready, resume,
++    },
+     anyhow::{Context, Result, ensure},
+     serde_json::json,
+     signal_hook::{
+@@ -74,10 +76,10 @@
+         "benchmark_transactions": false, "new_genesis": false, "mac_validators_started": false}),
+     )?;
+     let mut cluster = manifest.start(&args.root)?;
+-    let result = (|| {
++    let result: Result<()> = (|| {
+         evidence.event(
+             "whole_process_original_ledger_restored",
+-            manifest.validate_restored(&cluster, args)?,
++            manifest.validate_restored_with_cancel(&cluster, args, || signals.stopped())?,
+         )?;
+         evidence.event(
+             "real_alpenglow_ready",
+@@ -104,6 +106,17 @@
+     evidence.event("managed_validators_stopped", json!({"ledgers_preserved": true,
+         "signed_vote_histories_preserved": true, "mac_validators_started": false, "service_mode": true}))?;
+     if let Err(error) = &result {
++        if matches!(
++            error.downcast_ref::<AncestryError>(),
++            Some(AncestryError::Cancelled)
++        ) {
++            evidence.event(
++                "service_startup_cancelled",
++                json!({"ready_published": false,
++                "original_state_preserved": true}),
++            )?;
++            return Ok(());
++        }
+         evidence.event(
+             "failed",
+             json!({"error": format!("{error:#}"), "service_mode": true}),

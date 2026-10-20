@@ -1,0 +1,350 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -14472,6 +14472,7 @@
+  "native-payments",
+  "serde",
+  "serde_json",
++ "signal-hook",
+  "solana-account 4.5.0",
+  "solana-commitment-config",
+  "solana-core",
+diff --git a/zolana-fast-check/Cargo.toml b/zolana-fast-check/Cargo.toml
+--- a/zolana-fast-check/Cargo.toml
++++ b/zolana-fast-check/Cargo.toml
+@@ -17,6 +17,7 @@
+ agave-votor = { workspace = true }
+ anyhow = { workspace = true }
+ serde_json = { workspace = true }
++signal-hook = { workspace = true }
+ native-payment-program = { path = "../zolana-native/adapter" }
+ native-payments = { path = "../zolana-native/protocol" }
+ zolana-native-check = { path = "../zolana-native/harness" }
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -5,6 +5,7 @@
+ //! Every ledger and key belongs to a fresh owner-only invocation directory.
+ 
+ mod resume;
++mod service;
+ 
+ use {
+     agave_votor::vote_history_storage::{FileVoteHistoryStorage, VoteHistoryStorage},
+@@ -54,6 +55,7 @@
+ struct Args {
+     root: PathBuf,
+     resume: bool,
++    service: bool,
+     nodes: usize,
+     samples: usize,
+     restart_one: bool,
+@@ -66,20 +68,28 @@
+ 
+ impl Args {
+     fn parse() -> Result<Self> {
+-        let mut args = env::args().skip(1);
++        Self::parse_from(env::args().skip(1))
++    }
++
++    fn parse_from(mut args: impl Iterator<Item = String>) -> Result<Self> {
+         let (mut root, mut nodes, mut samples, mut restart_one, mut private) =
+             (None, 1, 3, false, false);
+         let mut quorum_loss_rejoin = false;
+         let mut slot_anchors = false;
+         let mut resume = false;
++        let mut service = false;
++        let mut benchmark_option = false;
+         let (mut mac_relay, mut hold_seconds) = (None, 0u64);
+         while let Some(arg) = args.next() {
++            benchmark_option |= matches!(arg.as_str(), "--nodes" | "--samples" | "--restart-one"
++                | "--quorum-loss-rejoin" | "--private" | "--slot-anchors" | "--mac-relay" | "--hold-seconds");
+             match arg.as_str() {
+                 "--root" | "--resume-root" => {
+                     ensure!(root.is_none(), "choose exactly one --root or --resume-root");
+                     resume = arg == "--resume-root";
+                     root = Some(PathBuf::from(args.next().context("root option needs a path")?));
+                 },
++                "--service" => service = true,
+                 "--nodes" => nodes = args.next().context("--nodes needs a count")?.parse()?,
+                 "--samples" => samples = args.next().context("--samples needs a count")?.parse()?,
+                 "--restart-one" => restart_one = true,
+@@ -103,10 +113,12 @@
+                         .parse()?
+                 }
+                 _ => bail!(
+-                    "use --root FRESH_ABSOLUTE_PATH | --resume-root ORIGINAL_FIXTURE_ROOT [--nodes 1|2|3] [--samples 1..5] [--restart-one] [--quorum-loss-rejoin] [--private|--slot-anchors] [--mac-relay PUBLIC_KEY --hold-seconds 1..600]"
++                    "use --resume-root ORIGINAL_FIXTURE_ROOT --service, or --root FRESH_ABSOLUTE_PATH | --resume-root ORIGINAL_FIXTURE_ROOT [--nodes 1|2|3] [--samples 1..5] [--restart-one] [--quorum-loss-rejoin] [--private|--slot-anchors] [--mac-relay PUBLIC_KEY --hold-seconds 1..600]"
+                 ),
+             }
+         }
++        ensure!(!service || (resume && !benchmark_option),
++            "--service requires only --resume-root ORIGINAL_FIXTURE_ROOT; genesis and benchmark options are forbidden");
+         ensure!(
+             (1..=3).contains(&nodes),
+             "one to three staked validators required"
+@@ -133,6 +145,7 @@
+         Ok(Self {
+             root: root.context("--root or --resume-root is required")?,
+             resume,
++            service,
+             nodes,
+             samples,
+             restart_one,
+@@ -704,6 +717,30 @@
+     config
+ }
+ 
++fn external_fixture_ready(cluster: &LocalCluster, args: &Args) -> Result<Value> {
++    let mut keys = cluster.get_node_pubkeys();
++    keys.sort();
++    let endpoints = if args.private { native_endpoints(&keys)? } else { Vec::new() };
++    let peers = keys.iter().map(|key| -> Result<Value> {
++        let rpc = cluster.get_contact_info(key).context("missing held peer")?.rpc()
++            .context("managed validator RPC missing")?;
++        if args.private {
++            let forks = cluster.validators[key].validator.as_ref().context("held peer stopped")?.bank_forks.read().unwrap();
++            ensure!(native_features_for_profile(args.slot_anchors).iter()
++                .all(|feature| forks.root_bank().feature_set.is_active(feature)), "held native feature inactive");
++        }
++        Ok(json!({"identity": key.to_string(), "rpc": rpc.to_string(),
++            "native_ingress": native_payment_ingress::local_address(key).map(|address| address.to_string())}))
++    }).collect::<Result<Vec<_>>>()?;
++    Ok(json!({
++        "network": {"network": args.network(), "genesis_hash": cluster.genesis_config.hash().to_string()},
++        "pool_format": if args.slot_anchors { "NPOOL004" } else { "NPOOL003" },
++        "peers": peers, "ingress": endpoints, "mac_relay": args.mac_relay.map(|key| key.to_string()),
++        "hold_seconds": args.hold_seconds, "shared_private_smoke_skipped": args.mac_relay.is_some() || args.resume,
++        "operator_private_keys_exported": false,
++    }))
++}
++
+ fn baseline(args: &Args, evidence: &mut Evidence, resume_manifest: Option<&resume::Manifest>) -> Result<()> {
+     agave_logger::setup_with_default("warn");
+     evidence.event(
+@@ -879,29 +916,7 @@
+                 "manifest": args.root.join("resume.json"), "original_ledgers_only": true,
+                 "root_lock_held": true, "sigkill_test_completed": false,
+             }))?;
+-            let endpoints = if args.private {
+-                native_endpoints(&keys)?
+-            } else {
+-                Vec::new()
+-            };
+-            let peers = keys.iter().map(|key| -> Result<Value> {
+-                let rpc = cluster.get_contact_info(key).context("missing held peer")?.rpc()
+-                    .context("managed validator RPC missing")?;
+-                if args.private {
+-                    let forks = cluster.validators[key].validator.as_ref().context("held peer stopped")?.bank_forks.read().unwrap();
+-                    ensure!(native_features_for_profile(args.slot_anchors).iter()
+-                        .all(|feature| forks.root_bank().feature_set.is_active(feature)), "held native feature inactive");
+-                }
+-                Ok(json!({"identity": key.to_string(), "rpc": rpc.to_string(),
+-                    "native_ingress": native_payment_ingress::local_address(key).map(|address| address.to_string())}))
+-            }).collect::<Result<Vec<_>>>()?;
+-            evidence.event("external_mac_fixture_ready", json!({
+-                "network": {"network": args.network(), "genesis_hash": cluster.genesis_config.hash().to_string()},
+-                "pool_format": if args.slot_anchors { "NPOOL004" } else { "NPOOL003" },
+-                "peers": peers, "ingress": endpoints, "mac_relay": args.mac_relay.map(|key| key.to_string()),
+-                "hold_seconds": args.hold_seconds, "shared_private_smoke_skipped": args.mac_relay.is_some() || args.resume,
+-                "operator_private_keys_exported": false,
+-            }))?;
++            evidence.event("external_mac_fixture_ready", external_fixture_ready(&cluster, args)?)?;
+             sleep(Duration::from_secs(args.hold_seconds));
+             evidence.event(
+                 "external_mac_fixture_hold_finished",
+@@ -934,6 +949,10 @@
+         Some(manifest)
+     } else { None };
+     configure_environment(&args);
++    if args.service {
++        let manifest = resume_manifest.as_ref().context("service requires original resume metadata")?;
++        return service::run(&args, &mut evidence, manifest);
++    }
+     match baseline(&args, &mut evidence, resume_manifest.as_ref()) {
+         Ok(()) => evidence.event(
+             "passed",
+diff --git a/zolana-fast-check/src/service.rs b/zolana-fast-check/src/service.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/service.rs
+@@ -0,0 +1,179 @@
++//! Resume-only service lifetime for a separately sealed Linux supervisor.
++//! No genesis construction, benchmark transfers, funding, or metadata replacement.
++use {
++    super::{Args, Evidence, check_alpenglow, external_fixture_ready, resume},
++    anyhow::{Context, Result, ensure},
++    serde_json::json,
++    signal_hook::{
++        SigId,
++        consts::{SIGINT, SIGTERM},
++    },
++    std::{
++        sync::{
++            Arc,
++            atomic::{AtomicBool, Ordering},
++        },
++        thread::sleep,
++        time::Duration,
++    },
++};
++
++struct StopSignals {
++    stopped: Arc<AtomicBool>,
++    registrations: Vec<SigId>,
++}
++
++impl StopSignals {
++    fn install() -> Result<Self> {
++        let mut value = Self {
++            stopped: Arc::new(AtomicBool::new(false)),
++            registrations: Vec::new(),
++        };
++        for signal in [SIGTERM, SIGINT] {
++            value.registrations.push(
++                signal_hook::flag::register(signal, value.stopped.clone())
++                    .context("register service stop signal")?,
++            );
++        }
++        Ok(value)
++    }
++
++    fn stopped(&self) -> bool {
++        self.stopped.load(Ordering::Relaxed)
++    }
++
++    fn wait(&self) {
++        while !self.stopped() {
++            sleep(Duration::from_millis(100));
++        }
++    }
++}
++
++impl Drop for StopSignals {
++    fn drop(&mut self) {
++        for registration in self.registrations.drain(..) {
++            signal_hook::low_level::unregister(registration);
++        }
++    }
++}
++
++pub(super) fn run(args: &Args, evidence: &mut Evidence, manifest: &resume::Manifest) -> Result<()> {
++    ensure!(
++        args.resume && args.service && args.hold_seconds == 0,
++        "service requires the original resume-only invocation"
++    );
++    ensure!(
++        args.private && args.slot_anchors,
++        "service requires the original NPOOL004 profile"
++    );
++    agave_logger::setup_with_default("warn");
++    let signals = StopSignals::install()?;
++    evidence.event(
++        "service_start",
++        json!({"original_root": args.root, "whole_process_resume": true,
++        "benchmark_transactions": false, "new_genesis": false, "mac_validators_started": false}),
++    )?;
++    let mut cluster = manifest.start(&args.root)?;
++    let result = (|| {
++        evidence.event(
++            "whole_process_original_ledger_restored",
++            manifest.validate_restored(&cluster, args)?,
++        )?;
++        evidence.event(
++            "real_alpenglow_ready",
++            json!({"genesis_hash": cluster.genesis_config.hash().to_string(),
++            "peers": check_alpenglow(&cluster, &args.root)?}),
++        )?;
++        // A stop received during startup must never publish a ready generation.
++        if !signals.stopped() {
++            let mut ready = external_fixture_ready(&cluster, args)?;
++            ready["service_mode"] = json!(true);
++            evidence.event("external_mac_fixture_ready", ready)?;
++            signals.wait();
++        }
++        Ok(())
++    })();
++    cluster.close_preserve_ledgers();
++    ensure!(
++        cluster
++            .validators
++            .values()
++            .all(|node| node.validator.is_none()),
++        "managed service validators remain running"
++    );
++    evidence.event("managed_validators_stopped", json!({"ledgers_preserved": true,
++        "signed_vote_histories_preserved": true, "mac_validators_started": false, "service_mode": true}))?;
++    if let Err(error) = &result {
++        evidence.event(
++            "failed",
++            json!({"error": format!("{error:#}"), "service_mode": true}),
++        )?;
++    }
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn parse(arguments: &[&str]) -> Result<Args> {
++        Args::parse_from(arguments.iter().map(|value| (*value).to_owned()))
++    }
++
++    #[test]
++    fn service_parse_accepts_only_original_resume_without_benchmark_options() {
++        let args = parse(&["--resume-root", "/original", "--service"]).unwrap();
++        assert!(args.resume && args.service);
++        assert_eq!(args.root, std::path::Path::new("/original"));
++        assert_eq!(args.hold_seconds, 0);
++        for extra in [
++            vec!["--nodes", "1"],
++            vec!["--samples", "3"],
++            vec!["--restart-one"],
++            vec!["--quorum-loss-rejoin"],
++            vec!["--private"],
++            vec!["--slot-anchors"],
++            vec!["--mac-relay", "11111111111111111111111111111111"],
++            vec!["--hold-seconds", "0"],
++        ] {
++            let mut values = vec!["--resume-root", "/original", "--service"];
++            values.extend(extra);
++            assert!(
++                parse(&values).is_err(),
++                "accepted forbidden options: {values:?}"
++            );
++        }
++        assert!(parse(&["--root", "/fresh", "--service"]).is_err());
++        assert!(parse(&["--service"]).is_err());
++    }
++
++    #[test]
++    fn ordinary_bounded_benchmark_and_resume_modes_remain_available() {
++        let args = parse(&[
++            "--root",
++            "/fresh",
++            "--slot-anchors",
++            "--nodes",
++            "3",
++            "--samples",
++            "1",
++        ])
++        .unwrap();
++        assert!(!args.service && !args.resume && args.private && args.slot_anchors);
++        assert_eq!(args.nodes, 3);
++        assert!(parse(&["--root", "/fresh", "--hold-seconds", "601"]).is_err());
++        let args = parse(&["--resume-root", "/original", "--hold-seconds", "600"]).unwrap();
++        assert!(args.resume && !args.service);
++    }
++
++    #[test]
++    fn actual_sigterm_and_sigint_set_the_stop_flag_without_terminating_the_process() {
++        for signal in [SIGTERM, SIGINT] {
++            let signals = StopSignals::install().unwrap();
++            assert!(!signals.stopped());
++            assert_eq!(unsafe { libc::raise(signal) }, 0);
++            assert!(signals.stopped());
++            signals.wait();
++        }
++    }
++}

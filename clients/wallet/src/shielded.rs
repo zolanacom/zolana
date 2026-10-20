@@ -1,5 +1,6 @@
 //! Shielded fee client and relay packet. No user gas key or plaintext recipient
 //! is transmitted to the relay. Admission identity is still visible to ingress.
+pub mod native;
 use crate::{
     keys::{read_private, write_private_new, Network, WalletKey},
     operation::WalletOperation,
@@ -102,7 +103,11 @@ pub fn recover(
     operation: &WalletOperation,
     wait: bool,
 ) -> Result<Value> {
-    let packet: Packet = serde_json::from_slice(&read_private(&operation.shielded, 20000)?)?;
+    let raw = read_private(&operation.shielded, 24_576)?;
+    if native::is_pending(&serde_json::from_slice(&raw)?) {
+        return native::recover(chain, wallet, operation, wait);
+    }
+    let packet: Packet = serde_json::from_slice(&raw)?;
     if packet.network != wallet.network {
         return Err("shielded journal network mismatch".into());
     }

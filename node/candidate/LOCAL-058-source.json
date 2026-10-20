@@ -1,0 +1,40 @@
+{
+  "archive_sha256": "917912ac67fc0b6ffec94e33e1ce113db581e1f1706aa1ecbe4224b967b15f30",
+  "baseline_delta_manifest": "LOCAL-057-source.json",
+  "baseline_delta_manifest_sha256": "8ee2c21f73527f49dec403eb9e64cca412b230a5fde50b6bdf3000534e06dfe6",
+  "baseline_delta_patch": "agave-4.3.2-LOCAL-057.patch",
+  "baseline_delta_patch_sha256": "5000ac8db0c731bd84213de68edbfac69ab35428db50b51945d811dbc2a7f8f2",
+  "baseline_revision": "LOCAL-057",
+  "delta_patch": "agave-4.3.2-LOCAL-058.patch",
+  "delta_patch_sha256": "b0e7f7e930c5be4020217cd39cc654ea8070312a87639169d38912cd493b7407",
+  "files": {
+    "Cargo.lock": {
+      "after_bytes": 337354,
+      "after_sha256": "36a97da6d6f94eae278de847aea50c2adba39aaf54a329cae6f813adbcf4ebec",
+      "before_bytes": 337338,
+      "before_sha256": "3c982080fa7fd1bbce83119c2bfd892f95299d355bdab55ed53078b502e2eff3"
+    },
+    "zolana-fast-check/Cargo.toml": {
+      "after_bytes": 1625,
+      "after_sha256": "696ac716ba6f35b6de5e44c73ca50f2406231cc96ec128f63769fbfc89b2f95b",
+      "before_bytes": 1590,
+      "before_sha256": "f70516cb527618b8800f548a9b6b6c5f61d006561a4c493d59bbb3f621e0e481"
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after_bytes": 44613,
+      "after_sha256": "3b8a86d96741856d1102c69b7e4cd983d9e6b5d58e8a1d44131319e1886b769e",
+      "before_bytes": 43726,
+      "before_sha256": "8b159bb2960ab59b50f48f25defccbe30188464e7c90441673e17b1d4b4016e6"
+    },
+    "zolana-fast-check/src/service.rs": {
+      "after_bytes": 5827,
+      "after_sha256": "609a86bcc79fbea70dc4200d358d308cc14f47d843e4c4c25827e01930b1687b",
+      "before_bytes": null,
+      "before_sha256": null
+    }
+  },
+  "format": "zolana-native-sdk4-delta-v1",
+  "revision": "LOCAL-058",
+  "scope": "Resume-only NPOOL004 Linux service lifetime, stop signals and source-only tests; no consensus or protocol change. Source preparation does not establish build, namespace isolation, deployment, or finality.",
+  "upstream_commit": "a203300045b405f86c9c84308b2eae76af69ac3b"
+}
