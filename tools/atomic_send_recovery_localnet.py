@@ -5,6 +5,7 @@ Adds a single 50,000-unit test payment; never initializes, funds or repins it.
 The original runtime acceptance receipt is retained as historical evidence.
 """
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import signal
 import subprocess
 import time
 
-from fault_localnet import atomic_json, durable
+from fault_localnet import account, atomic_json, durable
 from localnet import PROJECT, load, rpc
 from pilot_runtime_localnet import PilotHost
 import pilot_runtime as runtime
@@ -20,7 +21,78 @@ from wallet_release import create, read, sha
 from wallet_ui import WalletApp
 
 
-def run(root, resume_pre_payment=False):
+def interrupt_staging(trial, app, profile, evidence, before):
+    """Kill an owned upload before payment signing, retain bytes across host crash."""
+    staging = Path(str(app.wallet) + '.staging.json')
+    pending = Path(str(app.wallet) + '.pending.json')
+    quote = trial.user('alice', 'fees', payment='send')
+    args = [str(app.binary), 'send', '--network', str(profile), '--wallet', str(app.wallet),
+            '--password-file', str(trial.password_file), '--fee-payer', 'user',
+            '--max-fee-debit', str(quote['maximum_gross_debit']), '--amount', '50000',
+            '--to', trial.keys['bob']['address']]
+    child = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=trial.env)
+    trial.wallet_children.append(child)
+    deadline = time.monotonic() + 60
+    captured = None
+    try:
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                raise RuntimeError('upload exited before owned staging interruption')
+            if staging.exists():
+                os.kill(child.pid, signal.SIGSTOP)
+                if pending.exists():
+                    raise RuntimeError('upload interruption missed the pre-payment boundary')
+                identity = json.loads(read(staging, 4096, secret=True))
+                current = account(0, identity['staging_account'], 'processed')
+                if current is not None:
+                    raw = base64.b64decode(current['data'][0], validate=True)
+                    length = int.from_bytes(raw[40:44], 'little')
+                    received = int.from_bytes(raw[44:48], 'little')
+                    if raw[:8] == b'NBUF0001' and 0 < received < length and raw[88] == 0:
+                        captured = identity
+                        break
+                os.kill(child.pid, signal.SIGCONT)
+            time.sleep(.005)
+        if captured is None:
+            raise RuntimeError('no partial processed staging checkpoint observed')
+    finally:
+        if child.poll() is None:
+            os.kill(child.pid, signal.SIGKILL)
+        child.communicate(timeout=15)
+    saved = read(staging, 4096, secret=True)
+    create(evidence / 'interrupted-upload-staging.json', saved)
+    trial.wait_for(lambda: all((value := account(i, captured['staging_account'])) is not None
+                              for i in (0, 1)), timeout=60)
+    first = account(0, captured['staging_account'])
+    if first != account(1, captured['staging_account']):
+        raise RuntimeError('partial staging did not finalize identically on both validators')
+    raw = base64.b64decode(first['data'][0], validate=True)
+    received = int.from_bytes(raw[44:48], 'little')
+    if raw[88] != 0 or not 0 < received < captured['payload_len'] or pending.exists():
+        raise RuntimeError('interrupted staging changed into a sealed/pending payment')
+    create(evidence / 'interrupted-upload-account.json', json.dumps(first, sort_keys=True).encode())
+    barrier = max(trial.slots())
+    trial.stop_host(crash=True)
+    restarted = trial.start_host()
+    if min(restarted['finalized_slots']) <= barrier:
+        raise RuntimeError('interrupted-upload host restart did not advance finality')
+    if any(account(i, captured['staging_account']) != first or durable(trial.root, i) != before
+           for i in (0, 1)) or read(staging, 4096, secret=True) != saved:
+        raise RuntimeError('restart changed partial upload, original journal or nullifiers')
+    reclaimed = trial.user('alice', 'reclaim')
+    if not reclaimed['recovery_cleared'] or not reclaimed['close_signature'] or staging.exists() or pending.exists():
+        raise RuntimeError('interrupted user-paid upload was not reclaimed once')
+    trial.wait_for(lambda: all(account(i, captured['staging_account']) is None for i in (0, 1)), timeout=30)
+    if any(durable(trial.root, i) != before for i in (0, 1)):
+        raise RuntimeError('reclaim changed payment balances or nullifiers')
+    create(evidence / 'interrupted-upload-reclaim.json', json.dumps(reclaimed, sort_keys=True).encode())
+    return dict(wallet_sigkill_during_partial_upload=True, uploaded_bytes=received,
+                payload_bytes=captured['payload_len'], whole_host_sigkill_before_reclaim=True,
+                original_staging_journal_unchanged=True, payment_broadcast=False,
+                permanent_nullifiers_unchanged=True, user_paid_reclaim_finalized=True)
+
+
+def run(root, resume_pre_payment=False, interrupt_upload_first=False):
     root = root.absolute()
     if root.parent != PROJECT / '.data' or root.resolve() != root:
         raise ValueError('requires a real direct private fixture child')
@@ -80,6 +152,8 @@ def run(root, resume_pre_payment=False):
         staging = Path(str(app.wallet) + '.staging.json')
         if pending.exists() or staging.exists():
             raise ValueError('recover existing journals before any new test payment')
+        if interrupt_upload_first:
+            result['interrupted_upload'] = interrupt_staging(trial, app, profile, evidence, before)
         quote = trial.user('alice', 'fees', payment='send')
         args = [str(app.binary), 'send', '--network', str(profile), '--wallet', str(app.wallet),
                 '--password-file', str(trial.password_file), '--fee-payer', 'user',
@@ -166,5 +240,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--resume-pre-payment-check', action='store_true')
+    parser.add_argument('--interrupt-upload-first', action='store_true')
     args = parser.parse_args()
-    run(args.root, args.resume_pre_payment_check)
+    if args.resume_pre_payment_check and args.interrupt_upload_first:
+        parser.error('upload fault test requires a fresh evidence run, never a resumed checkpoint')
+    run(args.root, args.resume_pre_payment_check, args.interrupt_upload_first)

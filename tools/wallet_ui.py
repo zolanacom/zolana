@@ -21,6 +21,51 @@ def load(root):
 
 ASSETS = PROJECT / "clients/wallet-ui"
 WALLET = PROJECT / "target/debug/native-wallet"
+PAYMENT_PHASES = {'key', 'sync', 'prove', 'upload', 'confirm', 'finalize'}
+
+
+def streaming_cli(args, password, callback, timeout=180):
+    """Read local progress on one payment attempt; a disconnected UI never retries it."""
+    with tempfile.TemporaryFile(mode='w+b') as errors:
+        child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
+                                 text=True, env=dict(os.environ, NATIVE_WALLET_PROGRESS='1'))
+        expired = threading.Event()
+        def expire():
+            expired.set()
+            try: child.kill()
+            except ProcessLookupError: pass
+        timer = threading.Timer(timeout, expire)
+        timer.daemon = True
+        timer.start()
+        output = None
+        try:
+            child.stdin.write(password)
+            child.stdin.close()
+            total = 0
+            while line := child.stdout.readline(65537):
+                total += len(line)
+                if total > 65536:
+                    raise ValueError('Wallet output exceeded its limit; check saved payment status before retrying.')
+                value = json.loads(line)
+                if isinstance(value, dict) and set(value) == {'wallet_progress'} and isinstance(value['wallet_progress'], str) and value['wallet_progress'] in PAYMENT_PHASES:
+                    # Progress transport has no authority over the payment process.
+                    try: callback(value['wallet_progress'])
+                    except (BrokenPipeError, ConnectionResetError, OSError): pass
+                elif isinstance(value, dict) and 'wallet_progress' not in value and output is None:
+                    output = line
+                else:
+                    raise ValueError('Invalid wallet result; check saved payment status before retrying.')
+            child.wait()
+            if expired.is_set():
+                raise subprocess.TimeoutExpired(args, timeout)
+            errors.seek(0)
+            return subprocess.CompletedProcess(args, child.returncode, output or '', errors.read(16384).decode(errors='replace'))
+        finally:
+            timer.cancel()
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            child.stdout.close()
 
 
 class WalletApp:
@@ -137,7 +182,11 @@ class WalletApp:
         # retry only these idempotent requests, never a payment submission.
         attempts = 4 if self.tester and self.invite_required and command in {"join", "access-status", "test-coins"} else 1
         for attempt in range(attempts):
-            result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
+            callback = getattr(self, 'progress_callback', None)
+            if callback is not None and command in {'send', 'withdraw'}:
+                result = streaming_cli(args, password, callback)
+            else:
+                result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
             if not result.returncode:
                 return json.loads(result.stdout)
             error = result.stderr.strip().removeprefix("Wallet error: ")
@@ -315,6 +364,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/api/wallet" or not self.allowed(mutation=True):
             return self.respond(403, {"error": "Wallet request origin or session was rejected."})
+        streaming = False
+        def frame(value):
+            try:
+                self.wfile.write(json.dumps(value).encode() + b'\n')
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass  # Continue the original payment and retain its recovery journal.
         try:
             size = int(self.headers.get("Content-Length", "0"))
             if not 1 <= size <= 16384 or self.headers.get("Content-Type") != "application/json" or self.headers.get("Transfer-Encoding"):
@@ -325,12 +381,25 @@ class Handler(BaseHTTPRequestHandler):
             if not self.server.app.lock.acquire(blocking=False):
                 return self.respond(409, {"error": "Another wallet operation is running. Wait for it to finish."})
             try:
+                if self.headers.get('Accept') == 'application/x-ndjson' and request.get('action') in {'send', 'withdraw'}:
+                    self.send_response(200)
+                    for key, value in {'Content-Type':'application/x-ndjson', 'Cache-Control':'no-store',
+                                       'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer',
+                                       'X-Frame-Options':'DENY', 'Connection':'close'}.items():
+                        self.send_header(key, value)
+                    self.end_headers()
+                    self.close_connection = True
+                    streaming = True
+                    self.server.app.progress_callback = lambda phase: frame({'progress': phase})
                 data = self.server.app.action(request)
             finally:
+                self.server.app.progress_callback = None
                 self.server.app.lock.release()
-            self.respond(200, {"result": data, "status": self.server.app.status()})
+            response = {"result": data, "status": self.server.app.status()}
+            frame(response) if streaming else self.respond(200, response)
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
-            self.respond(400, {"error": str(error), "status": self.server.app.status()})
+            response = {"error": str(error), "status": self.server.app.status()}
+            frame(response) if streaming else self.respond(400, response)
 
 
 def serve(app, port, duration):

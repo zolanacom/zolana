@@ -129,6 +129,12 @@ impl PaymentProver {
         Self(ProvingKey::build(bundle_version().circuit_version()))
     }
 
+    /// Clone public verification material without generating a second circuit key.
+    /// No wallet, witness or payment randomness is retained in this key.
+    pub fn verifying_key(&self) -> std::sync::Arc<orchard::circuit::VerifyingKey> {
+        std::sync::Arc::new(self.0.verifying_key())
+    }
+
     pub fn build(
         &self,
         wallet: &WalletKey,
@@ -317,8 +323,9 @@ mod tests {
         let alice = WalletKey::generate(network.clone()).unwrap();
         let bob = WalletKey::generate(network).unwrap();
         let sponsor = [6; 32];
-        let mut a = WalletState::new(&alice, 1000).unwrap();
-        let mut b = WalletState::new(&bob, 1000).unwrap();
+        let prover = PaymentProver::new();
+        let mut a = WalletState::with_key(&alice, 1000, prover.verifying_key()).unwrap();
+        let mut b = WalletState::with_key(&bob, 1000, prover.verifying_key()).unwrap();
         let mut transcript = Vec::new();
         for (wallet, state_is_alice, payment) in [
             (
@@ -340,7 +347,7 @@ mod tests {
             (&bob, false, Payment::Withdraw { amount: 15 }),
         ] {
             let state = if state_is_alice { &a } else { &b };
-            let bytes = build(wallet, state, sponsor, 100, payment).unwrap();
+            let bytes = prover.build(wallet, state, sponsor, 100, payment).unwrap();
             let decoded = wire::decode(wallet.network.network, &bytes).unwrap();
             a.accept(&decoded.bundle, &decoded.context, 1).unwrap();
             b.accept(&decoded.bundle, &decoded.context, 1).unwrap();
@@ -349,6 +356,21 @@ mod tests {
         assert_eq!(a.balance().unwrap(), 60);
         assert_eq!(b.balance().unwrap(), 25);
         assert_eq!(a.pool.backing, 85);
+        let replay = crate::history::Replay::from_state(b);
+        let restored = crate::history::Replay::restore_with_key(
+            &bob,
+            replay.snapshot(),
+            Some(prover.verifying_key()),
+        )
+        .unwrap();
+        assert_eq!(restored.state.balance().unwrap(), 25);
+        restored.state.reconcile(&a.pool).unwrap();
+        assert!(crate::history::Replay::restore_with_key(
+            &alice,
+            replay.snapshot(),
+            Some(prover.verifying_key()),
+        )
+        .is_err());
         let mut recovered = WalletState::new(&bob, 1000).unwrap();
         for bytes in &transcript {
             let decoded = wire::decode(bob.network.network, bytes).unwrap();

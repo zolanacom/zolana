@@ -63,7 +63,16 @@ impl Replay {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn restore(wallet: &WalletKey, snapshot: ReplaySnapshot) -> Result<Self> {
+        Self::restore_with_key(wallet, snapshot, None)
+    }
+
+    pub(crate) fn restore_with_key(
+        wallet: &WalletKey,
+        snapshot: ReplaySnapshot,
+        key: Option<Arc<VerifyingKey>>,
+    ) -> Result<Self> {
         let pool = PoolState::decode(&snapshot.pool)?;
         if pool.network != wallet.network.network
             || snapshot.leaves.len() as u64 != pool.note_count()
@@ -71,7 +80,10 @@ impl Replay {
         {
             return Err("cached tree, network or spent set mismatch".into());
         }
-        let mut state = WalletState::new(wallet, pool.rent_floor)?;
+        let mut state = match key {
+            Some(key) => WalletState::with_key(wallet, pool.rent_floor, key)?,
+            None => WalletState::new(wallet, pool.rent_floor)?,
+        };
         state.pool = pool;
         state.leaves = snapshot
             .leaves

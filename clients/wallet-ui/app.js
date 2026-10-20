@@ -23,12 +23,57 @@ function setScreen(html) {
 function on(id, event, callback) { document.getElementById(id).addEventListener(event, callback); }
 async function api(action, extra = {}) {
   let response;
-  try { response = await fetch('/api/wallet', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Wallet-Token': session.token }, body: JSON.stringify({ action, password, ...extra }) }); }
-  catch { throw new Error('The local wallet connection is unavailable. Restart the local session and unlock your wallet to check its payment status.'); }
-  const body = await response.json();
+  try { response = await fetch('/api/wallet', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Wallet-Token': session.token, 'Accept': ['send','withdraw'].includes(action) ? 'application/x-ndjson' : 'application/json' }, body: JSON.stringify({ action, password, ...extra }) }); }
+  catch { if (['send','withdraw'].includes(action)) session.pending = true; throw new Error('The local wallet connection is unavailable. Restart the local session and unlock your wallet to check its payment status.'); }
+  if (response.headers.get('Content-Type')?.startsWith('application/x-ndjson')) return paymentStream(response);
+  let body;
+  try { body = await response.json(); }
+  catch { if (['send','withdraw'].includes(action)) session.pending = true; throw new Error('The wallet response was interrupted. Check the saved payment status before sending again.'); }
   if (body.status) Object.assign(session, body.status);
   if (!response.ok) throw new Error(body.error || 'The wallet could not complete this operation.');
   return body.result;
+}
+async function paymentStream(response) {
+  const labels = {
+    key: 'Preparing the local proof engine…', sync: 'Verifying your finalized balance…',
+    prove: 'Creating your private payment proof on this device…', upload: 'Uploading the encrypted payment and proof…',
+    confirm: 'Waiting for network confirmation…', finalize: 'Payment confirmed. Waiting for finality…',
+  };
+  let terminal = null, buffered = '', total = 0;
+  try {
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    function frame(line) {
+      if (!line.trim()) return;
+      const value = JSON.parse(line);
+      if (value.progress && Object.hasOwn(labels, value.progress) && !terminal) {
+        progressLabel = labels[value.progress]; message(progressLabel);
+      } else if (Object.hasOwn(value, 'result') || Object.hasOwn(value, 'error')) {
+        if (terminal) throw new Error('Duplicate wallet result');
+        terminal = value;
+      } else throw new Error('Invalid wallet progress');
+    }
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > 65536) throw new Error('Wallet response exceeded its limit');
+      buffered += decoder.decode(value, {stream:true});
+      let end;
+      while ((end = buffered.indexOf('\n')) !== -1) { frame(buffered.slice(0, end)); buffered = buffered.slice(end + 1); }
+    }
+    buffered += decoder.decode();
+    if (buffered.trim()) frame(buffered);
+    if (!terminal) throw new Error('Wallet result was interrupted');
+  } catch {
+    // A transport failure is never permission to submit the payment again.
+    if (!terminal) {
+      session.pending = true;
+      throw new Error('Payment status is unavailable. Check the saved payment status or refresh your balance before sending again.');
+    }
+  }
+  if (terminal.status) Object.assign(session, terminal.status);
+  if (terminal.error) throw new Error(terminal.error);
+  return terminal.result;
 }
 function progress(label) {
   clearInterval(progressTimer);
@@ -260,7 +305,7 @@ function feeDetails(draft, quote, rerender) {
   if (ownFees) {
     const address = document.createElement('p'); address.className = 'address'; address.id = 'fee-address'; address.textContent = quote.fee_address;
     const details = document.createElement('p'); details.className = 'hint'; details.id = 'fee-quote';
-    details.textContent = `You pay fees from this seed-controlled fee account. Balance: ${quote.public_balance}. Refundable upload rent: ${quote.refundable_staging_rent}. Permanent nullifier rent: ${quote.permanent_nullifier_rent}. Estimated transaction fees: ${quote.transaction_fees}. Maximum gross debit authorized: ${quote.maximum_gross_debit}. Keep ${quote.minimum_remaining_balance} units in the account. ${quote.funding_shortfall ? `Fund at least ${quote.funding_shortfall} more native units on this chain before continuing.` : 'The fee account is funded.'}`;
+    details.textContent = `You pay fees from this seed-controlled fee account. Balance: ${quote.public_balance}. Refundable upload rent: ${quote.refundable_staging_rent}. Permanent nullifier rent: ${quote.permanent_nullifier_rent}. Estimated transaction fees: ${quote.transaction_fees}. Upload repair allowance, only if needed: ${quote.upload_repair_reserve || 0}. Maximum gross debit authorized: ${quote.maximum_gross_debit}. Keep ${quote.minimum_remaining_balance} units in the account. ${quote.funding_shortfall ? `Fund at least ${quote.funding_shortfall} more native units on this chain before continuing.` : 'The fee account is funded.'}`;
     fees.append(details, address);
     const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'secondary'; refresh.textContent = 'Refresh fee balance';
     refresh.onclick = () => rerender({recipient:document.querySelector('#recipient').value,amount:document.querySelector('#amount').value,fee_mode:'user'}); fees.append(refresh);
@@ -280,7 +325,7 @@ function review(recipient, amount, action = 'send', fees = {}) {
 }
 
 async function payment(action, extra = {}) {
-  await work('Preparing your proof, uploading, and waiting for finalization. Keep this tab open…', async () => {
+  await work('Preparing your private payment…', async () => {
     try { receipt = await api(action, extra); }
     catch (error) { renderDashboard(); throw error; }
     // An accepted receipt stays a success even if the following balance sync fails.

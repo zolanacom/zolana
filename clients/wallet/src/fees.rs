@@ -88,6 +88,7 @@ pub struct Quote {
     pub refundable_staging_rent: u64,
     pub permanent_nullifier_rent: u64,
     pub transaction_fees: u64,
+    pub upload_repair_reserve: u64,
     pub cleanup_reserve: u64,
     pub maximum_gross_debit: u64,
     pub minimum_remaining_balance: u64,

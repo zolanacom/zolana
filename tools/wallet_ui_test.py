@@ -1,13 +1,45 @@
 import json
 import tempfile
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from wallet_ui import Handler, WalletApp
+from wallet_ui import Handler, WalletApp, streaming_cli
 
 
 class WalletUiTests(unittest.TestCase):
+    def test_progress_disconnect_does_not_interrupt_or_retry_the_original_cli(self):
+        with tempfile.TemporaryDirectory() as name:
+            marker = Path(name) / 'attempts'
+            script = '''import json,sys
+assert sys.stdin.read() == 'local-test-password'
+with open(sys.argv[1],'a') as out: out.write('one attempt\\n')
+for phase in ('key','sync','prove','upload','confirm','finalize'):
+ print(json.dumps({'wallet_progress':phase}),flush=True)
+print(json.dumps({'signature':'original-finalized-signature','staging_rent_reclaimed':True}))
+'''
+            phases = []
+            def disconnected(phase):
+                phases.append(phase)
+                raise BrokenPipeError('simulated UI disconnect')
+            args = [sys.executable, '-c', script, str(marker)]
+            result = streaming_cli(args, 'local-test-password', disconnected, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout)['signature'], 'original-finalized-signature')
+            self.assertEqual(phases, ['key','sync','prove','upload','confirm','finalize'])
+            self.assertEqual(marker.read_text(), 'one attempt\n')
+            self.assertNotIn('local-test-password', args)
+
+    def test_streaming_cli_timeout_and_duplicate_receipts_fail_without_retry(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            streaming_cli([sys.executable, '-c', 'import sys,time; sys.stdin.read(); time.sleep(10)'],
+                          'local-test-password', lambda _: None, timeout=.1)
+        with self.assertRaisesRegex(ValueError, 'Invalid wallet result'):
+            streaming_cli([sys.executable, '-c', 'import sys; sys.stdin.read(); print("{}"); print("{}")'],
+                          'local-test-password', lambda _: None, timeout=5)
+
     def test_admission_transport_retry_preserves_exact_identity_and_password_pipe(self):
         with tempfile.TemporaryDirectory() as name:
             app=self.app(Path(name));app.tester=True;app.invite_required=True

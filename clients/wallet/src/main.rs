@@ -358,7 +358,19 @@ fn run() -> Result<()> {
     if command != "balance" {
         operation.ensure_resolved()?;
     }
+    let key_started = Instant::now();
+    if command != "balance" {
+        native_wallet::progress::report("key");
+    }
+    let prover = (command != "balance").then(payments::PaymentProver::new);
+    let proof_key_ms = key_started.elapsed().as_millis();
+    if let Some(prover) = &prover {
+        chain = chain.with_payment_prover(prover);
+    }
     let sync_started = Instant::now();
+    if command != "balance" {
+        native_wallet::progress::report("sync");
+    }
     let synced = if let Some(history) = args.get("--history") {
         chain.sync_cached_with_history(&wallet, &operation, Path::new(history))?
     } else {
@@ -458,22 +470,30 @@ fn run() -> Result<()> {
         )?);
     }
     let expiry = chain.expiry()?;
-    let preparation_ms = command_started.elapsed().as_millis().saturating_sub(sync_ms);
-    let (bytes, proof_timings) = payments::build_with_timings(
+    let preparation_ms = command_started
+        .elapsed()
+        .as_millis()
+        .saturating_sub(sync_ms)
+        .saturating_sub(proof_key_ms);
+    let proof_started = Instant::now();
+    native_wallet::progress::report("prove");
+    let bytes = prover.as_ref().ok_or("payment prover unavailable")?.build(
         &wallet,
         &synced.state,
         sponsor.pubkey().to_bytes(),
         expiry,
         payment,
     )?;
+    let proof_build_ms = proof_started.elapsed().as_millis();
     let submit_started = Instant::now();
+    native_wallet::progress::report("upload");
     let submitted = chain.submit(&sponsor, &bytes, &operation)?;
     let mut result = serde_json::to_value(&submitted)?;
     result["timings"] = json!({
         "preparation_ms": preparation_ms,
         "sync_ms": sync_ms,
-        "proof_key_ms": proof_timings.proof_key_ms,
-        "proof_build_ms": proof_timings.proof_build_ms,
+        "proof_key_ms": proof_key_ms,
+        "proof_build_ms": proof_build_ms,
         "submit_ms": submit_started.elapsed().as_millis(),
         "total_ms": command_started.elapsed().as_millis(),
     });

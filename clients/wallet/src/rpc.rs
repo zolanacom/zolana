@@ -51,6 +51,7 @@ pub struct Chain {
     sponsor_budget: Option<crate::sponsor::Budget>,
     user_fees: Option<(Pubkey, u64, std::path::PathBuf)>,
     history_batches: bool,
+    verification_key: Option<std::sync::Arc<orchard::circuit::VerifyingKey>>,
 }
 
 pub struct Synced {
@@ -270,8 +271,11 @@ pub struct Submitted {
     pub staging_account: String,
     pub staging_rent_reclaimed: bool,
     pub upload_transactions: usize,
+    pub upload_failed_transactions: usize,
+    pub upload_repair_transactions: usize,
     pub upload_ms: u128,
     pub finalization_ms: u128,
+    pub confirmation_ms: u128,
     pub cleanup_ms: u128,
     pub withdrawal: Option<crate::payments::WithdrawalReceipt>,
     pub user_fee_charged: Option<u64>,
@@ -378,7 +382,15 @@ impl Chain {
             sponsor_budget: None,
             user_fees: None,
             history_batches,
+            verification_key: None,
         })
+    }
+
+    /// Reuse this process's public circuit key; history remains independently
+    /// authenticated and every newly scanned payment is still verified.
+    pub fn with_payment_prover(mut self, prover: &crate::payments::PaymentProver) -> Self {
+        self.verification_key = Some(prover.verifying_key());
+        self
     }
 
     /// Read-only diagnosis without decrypting a seed or sending a transaction.
@@ -544,7 +556,8 @@ impl Chain {
             instructions::initialize(buffer, payer, bytes.len() as u32, payload_digest(&bytes), 1),
             crate::upload::first_write(buffer, payer, &bytes),
         ]];
-        batches.extend(crate::upload::remaining(buffer, payer, &bytes));
+        let uploads = crate::upload::remaining(buffer, payer, &bytes);
+        batches.extend(uploads.clone());
         let mut finalization = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
         finalization.extend(instructions::finalize_and_close(
             buffer,
@@ -561,10 +574,18 @@ impl Chain {
             tx.message.recent_blockhash = hash;
             self.transaction_fee(&tx)
         };
-        let normal_fees = batches.iter().try_fold(0u64, |sum, batch| -> Result<u64> {
-            sum.checked_add(fee(batch)?)
-                .ok_or_else(|| "fee overflow".into())
-        })?;
+        // Reserve one complete ordered repair of the suffix, without assuming
+        // burst ordering or refunding fees for failed staging transactions.
+        // Reuse the exact same message's quote rather than repeating RPC reads.
+        let mut normal_fees = 0u64;
+        let mut upload_repair_reserve = 0u64;
+        for (index, batch) in batches.iter().enumerate() {
+            let quoted = fee(batch)?;
+            normal_fees = normal_fees.checked_add(quoted).ok_or("fee overflow")?;
+            if (1..=uploads.len()).contains(&index) {
+                upload_repair_reserve = upload_repair_reserve.checked_add(quoted).ok_or("repair fee overflow")?;
+            }
+        }
         let close_fee = fee(&[instructions::close(buffer, payer)])?;
         let reserve = close_fee
             .checked_mul(2)
@@ -573,6 +594,7 @@ impl Chain {
         let maximum = rent
             .checked_add(markers)
             .and_then(|n| n.checked_add(normal_fees))
+            .and_then(|n| n.checked_add(upload_repair_reserve))
             .and_then(|n| n.checked_add(reserve))
             .ok_or("fee quote overflow")?;
         let remaining = self.rpc.get_minimum_balance_for_rent_exemption(0)?;
@@ -585,6 +607,7 @@ impl Chain {
             refundable_staging_rent: rent,
             permanent_nullifier_rent: markers,
             transaction_fees: normal_fees,
+            upload_repair_reserve,
             cleanup_reserve: reserve,
             maximum_gross_debit: maximum,
             minimum_remaining_balance: remaining,
@@ -805,10 +828,12 @@ impl Chain {
         }
         let setup_started = Instant::now();
         // Batched full scans share one verifier key with the primary replay.
-        let shared_key = (wallets.len() > 1).then(|| {
-            std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
-                native_payments::verification::bundle_version().circuit_version(),
-            ))
+        let shared_key = self.verification_key.clone().or_else(|| {
+            (wallets.len() > 1).then(|| {
+                std::sync::Arc::new(orchard::circuit::VerifyingKey::build(
+                    native_payments::verification::bundle_version().circuit_version(),
+                ))
+            })
         });
         let mut stats = ScanStats::default();
         let mut cached = None;
@@ -832,7 +857,7 @@ impl Chain {
                     .is_ok_and(|block| Some(block.blockhash) == checkpoint.block_hash)
             };
             if canonical {
-                match Replay::restore(wallets[0], checkpoint.replay) {
+                match Replay::restore_with_key(wallets[0], checkpoint.replay, shared_key.clone()) {
                     Ok(replay) => {
                         cached = Some((
                             replay,
@@ -1071,6 +1096,71 @@ impl Chain {
         Err(format!("execution status is unknown for {signature}; sync the wallet and check this signature before retrying").into())
     }
 
+    /// Staging only: collect every confirmed outcome before repairing a suffix.
+    /// An unknown/missing status aborts; never race late writes against repair.
+    fn wait_upload_burst(&self, signatures: &[Signature]) -> Result<(usize, u64)> {
+        if signatures.is_empty() || signatures.len() > 32 {
+            return Err("invalid upload burst size".into());
+        }
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
+            let response = self.rpc.get_signature_statuses(signatures)?;
+            if response.value.len() != signatures.len() {
+                return Err(
+                    "upload status response omitted a transaction; reclaim staging before retrying"
+                        .into(),
+                );
+            }
+            if response.value.iter().all(|status| {
+                status
+                    .as_ref()
+                    .is_some_and(|s| s.satisfies_commitment(CommitmentConfig::confirmed()))
+            }) {
+                let failed = response
+                    .value
+                    .iter()
+                    .flatten()
+                    .filter(|s| s.err.is_some())
+                    .count();
+                let slot = response
+                    .value
+                    .iter()
+                    .flatten()
+                    .map(|s| s.slot)
+                    .max()
+                    .unwrap();
+                return Ok((failed, slot));
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        Err("upload outcomes remain unknown; original staging identity retained for reclaim".into())
+    }
+
+    fn send_upload(&self, tx: &Transaction) -> Result<Signature> {
+        // Only internally generated write/seal instructions may skip preflight.
+        // Initialization, payment finalization and cleanup retain preflight.
+        if tx.message.instructions.iter().any(|ix| {
+            tx.message.account_keys.get(ix.program_id_index as usize) != Some(&id())
+                || !matches!(ix.data.first(), Some(1 | 2))
+        }) || tx.message.instructions.is_empty()
+        {
+            return Err("upload burst accepts only staging writes and seal".into());
+        }
+        if 1 + tx.signatures.len() * 64 + tx.message_data().len() > 1232 {
+            return Err("signed upload transaction exceeds the network packet limit".into());
+        }
+        self.charge_sponsor(tx, 0)?;
+        Ok(self.rpc.send_transaction_with_config(
+            tx,
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+                max_retries: Some(3),
+                ..Default::default()
+            },
+        )?)
+    }
+
     pub fn resolve(
         &self,
         wallet: &WalletKey,
@@ -1292,11 +1382,62 @@ impl Chain {
         )?;
         self.send_signed_debit(&initialization, staging_rent)?;
         let batches = crate::upload::remaining(buffer.pubkey(), sponsor.pubkey(), bytes);
-        let upload_transactions = 1 + batches.len();
+        let mut upload_transactions = 1 + batches.len();
+        let mut signatures = Vec::with_capacity(batches.len());
         for batch in batches {
-            self.send(sponsor, &batch, &[])?;
+            let tx = Transaction::new_signed_with_payer(
+                &batch,
+                Some(&sponsor.pubkey()),
+                &[sponsor],
+                blockhash,
+            );
+            signatures.push(self.send_upload(&tx)?);
+        }
+        let (upload_failed_transactions, confirmed_slot) = self.wait_upload_burst(&signatures)?;
+        let account = self
+            .staging_account(
+                &buffer.pubkey(),
+                CommitmentConfig::confirmed(),
+                confirmed_slot,
+            )?
+            .ok_or("confirmed staging account disappeared; reclaim before retrying")?;
+        if account.owner != id() {
+            return Err("confirmed staging owner mismatch".into());
+        }
+        let repair = crate::upload::repair(
+            buffer.pubkey(),
+            sponsor.pubkey(),
+            bytes,
+            expiry,
+            &account.data,
+        )?;
+        // One bounded suffix repair; never reinitialize, regenerate a payment,
+        // replenish a debit allowance or silently resubmit unknown transactions.
+        if repair.len() > signatures.len() {
+            return Err("staging repair exceeds original bounded suffix".into());
+        }
+        let upload_repair_transactions = repair.len();
+        if !repair.is_empty() {
+            let repair_hash = self
+                .rpc
+                .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?
+                .0;
+            if repair_hash == blockhash {
+                return Err("repair needs a fresh blockhash; staging remains recorded".into());
+            }
+            for batch in repair {
+                let tx = Transaction::new_signed_with_payer(
+                    &batch,
+                    Some(&sponsor.pubkey()),
+                    &[sponsor],
+                    repair_hash,
+                );
+                self.send_signed(&tx)?;
+                upload_transactions += 1;
+            }
         }
         let upload_ms = upload_started.elapsed().as_millis();
+        crate::progress::report("confirm");
         let finalization_started = Instant::now();
         let nullifiers = std::array::from_fn(|index| {
             payment
@@ -1312,7 +1453,10 @@ impl Chain {
             buffer.pubkey(),
             sponsor.pubkey(),
             nullifiers,
-            payment.context.withdrawal_recipient.map(Pubkey::new_from_array),
+            payment
+                .context
+                .withdrawal_recipient
+                .map(Pubkey::new_from_array),
         ));
         let (blockhash, last_valid_block_height) = self
             .rpc
@@ -1357,6 +1501,14 @@ impl Chain {
         self.rpc.send_transaction_with_config(&tx, RpcSendTransactionConfig {
             skip_preflight: false, preflight_commitment: Some(CommitmentConfig::confirmed().commitment), max_retries: Some(3), ..Default::default()
         }).map_err(|error| format!("finalization {signature} remains recorded as pending; run resolve before retrying: {error}"))?;
+        self.wait(&signature, CommitmentConfig::confirmed())
+            .map_err(|error| {
+                format!(
+                    "finalization {signature} remains recorded as pending; run resolve: {error}"
+                )
+            })?;
+        let confirmation_ms = finalization_started.elapsed().as_millis();
+        crate::progress::report("finalize");
         self.wait(&signature, CommitmentConfig::finalized())
             .map_err(|error| {
                 format!(
@@ -1391,8 +1543,11 @@ impl Chain {
             staging_account: buffer.pubkey().to_string(),
             staging_rent_reclaimed: reclaimed,
             upload_transactions,
+            upload_failed_transactions,
+            upload_repair_transactions,
             upload_ms,
             finalization_ms,
+            confirmation_ms,
             cleanup_ms: cleanup_started.elapsed().as_millis(),
             withdrawal: crate::payments::withdrawal_receipt(&payment),
             user_fee_charged,
@@ -1535,6 +1690,71 @@ mod recovery_tests {
     use solana_rpc_client_api::request::RpcRequest;
 
     #[test]
+    fn failed_initialization_or_invalid_burst_observations_never_record_a_payment() {
+        let network = Network {
+            network: [3; 32],
+            genesis_hash: bs58::encode([4; 32]).into_string(),
+        };
+        let wallet = WalletKey::generate(network.clone()).unwrap();
+        let sponsor = Keypair::new();
+        let prover = crate::payments::PaymentProver::new();
+        let state = WalletState::with_key(&wallet, 1000, prover.verifying_key()).unwrap();
+        let bytes = prover
+            .build(
+                &wallet,
+                &state,
+                sponsor.pubkey().to_bytes(),
+                100,
+                crate::payments::Payment::Deposit {
+                    amount: 1,
+                    recipient: &wallet.address_text(),
+                },
+            )
+            .unwrap();
+        let count = crate::upload::remaining(Pubkey::new_unique(), sponsor.pubkey(), &bytes).len();
+        let failed = json!({"slot":2,"confirmations":null,"err":{"InstructionError":[0,"InvalidAccountData"]},
+            "status":{"Err":{"InstructionError":[0,"InvalidAccountData"]}},"confirmationStatus":"finalized"});
+        let succeeded = json!({"slot":1,"confirmations":1,"err":null,"status":{"Ok":null},"confirmationStatus":"confirmed"});
+        for mode in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let mut mocks = MocksMap::from_iter([(
+                RpcRequest::GetAccountInfo,
+                json!({"context":{"slot":1},"value":{"lamports":1000,"owner":id().to_string(),
+                    "executable":false,"rentEpoch":0,"data":[bs58::encode(state.pool.encode()).into_string(),"base58"]}}),
+            )]);
+            mocks.insert(RpcRequest::GetSignatureStatuses, json!({"context":{"slot":2},"value":[if mode == 0 {failed.clone()} else {succeeded.clone()}]}));
+            if mode != 0 {
+                mocks.insert(RpcRequest::GetSignatureStatuses, json!({"context":{"slot":2},"value": if mode == 1 {vec![failed.clone();count]} else {vec![]}}));
+                // Even confirmed statuses cannot authorize a fabricated prefix.
+                mocks.insert(RpcRequest::GetAccountInfo, json!({"context":{"slot":2},"value":{"lamports":1000,"owner":id().to_string(),
+                    "executable":false,"rentEpoch":0,"data":[bs58::encode(vec![0; ACCOUNT_BYTES]).into_string(),"base58"]}}));
+            }
+            let chain = Chain {
+                rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
+                network: network.clone(),
+                sponsor_budget: None,
+                user_fees: None,
+                history_batches: false,
+                verification_key: None,
+            };
+            assert!(chain.submit(&sponsor, &bytes, &operation).is_err());
+            assert!(operation.staging.exists());
+            assert!(!operation.pending.exists());
+            let saved: StagingRecovery =
+                serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+            assert_eq!(saved.payload_digest, payload_digest(&bytes));
+            assert_eq!(saved.sponsor, sponsor.pubkey().to_string());
+            // Arbitrary value-changing instructions cannot use the no-preflight path.
+            let forbidden = Transaction::new_with_payer(
+                &[instructions::close(Pubkey::new_unique(), sponsor.pubkey())],
+                Some(&sponsor.pubkey()),
+            );
+            assert!(chain.send_upload(&forbidden).is_err());
+        }
+    }
+
+    #[test]
     fn sponsor_checks_rpc_fee_plus_native_debit_before_broadcast() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("policy");
@@ -1581,6 +1801,7 @@ mod recovery_tests {
             sponsor_budget: Some(budget),
             user_fees: None,
             history_batches: false,
+            verification_key: None,
         };
         let tx = Transaction::new_signed_with_payer(
             &[system::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1)],
@@ -1637,6 +1858,7 @@ mod recovery_tests {
             sponsor_budget: None,
             user_fees: None,
             history_batches: false,
+            verification_key: None,
             network,
         };
         (wallet, checkpoint, chain)
@@ -2330,6 +2552,7 @@ mod recovery_tests {
             sponsor_budget: None,
             user_fees: None,
             history_batches: false,
+            verification_key: None,
             network,
         }
     }
@@ -2357,6 +2580,7 @@ mod recovery_tests {
             sponsor_budget: None,
             user_fees: Some((payer.pubkey(), 100, operation.staging.clone())),
             history_batches: false,
+            verification_key: None,
         };
         let tx = Transaction::new_with_payer(
             &[instructions::seal(Pubkey::new_unique(), payer.pubkey())],
@@ -2406,6 +2630,7 @@ mod recovery_tests {
             sponsor_budget: None,
             user_fees: None,
             history_batches: false,
+            verification_key: None,
         };
         assert!(chain
             .reclaim(&payer, &operation)
