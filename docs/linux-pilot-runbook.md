@@ -54,7 +54,7 @@ python3 -B tools/pilot_linux.py prepare --build-dir /srv/zolana-build-candidate 
 python3 -B tools/pilot_linux.py check --bundle /srv/zolana-linux-bundle --manifest-sha256 REVIEWED_BUNDLE_DIGEST
 ```
 
-The recipe uses offline/locked Cargo, two low-priority jobs, a separate target
+The recipe uses offline/locked Cargo, two low-priority jobs by default, a separate target
 directory and the existing optimized development profile. It builds all four
 native executables and records original source commit, lockfile hash and binary
 hashes. Failed builds keep logs/artifacts, never a completion receipt. The
@@ -64,6 +64,12 @@ source changes fail closed. ELF headers establish file identity only; ABI,
 dynamic linkage and CPU execution must still be accepted on real Linux.
 This is not a hermetic or path-remapped production release, and hashes do not
 establish publisher authenticity. Obtain the bundle digest independently.
+
+On a separately provisioned dedicated host with adequate CPU/RAM, `build
+--jobs 8` explicitly permits up to eight native compiler jobs; the actual count
+is bound into the build receipt. Counts outside two through eight fail before
+compiler invocation or output creation. This does not start Mac compilation
+or increase validator/prover runtime thread counts.
 
 ## Installation and disabled service review
 

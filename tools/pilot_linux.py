@@ -46,8 +46,10 @@ def git(*args):
     return subprocess.check_output(['git', *args], cwd=PROJECT, text=True).strip()
 
 
-def build(output):
+def build(output, jobs=2):
     linux()  # Refuse before mkdir, subprocess or touching the existing target.
+    if type(jobs) is not int or not 2 <= jobs <= 8:
+        raise ValueError('native Linux build requires two to eight bounded jobs')
     if os.getuid() == 0:
         raise ValueError('build as an unprivileged builder, never the service account')
     output = Path(output).absolute()
@@ -63,7 +65,7 @@ def build(output):
     lock = sha(cohort.code_bytes(PROJECT / 'Cargo.lock', 4 * 1024 * 1024))
     output.mkdir(mode=0o700)
     env = dict(os.environ, CARGO_HOME=str(PROJECT / '.tools/cargo'),
-               CARGO_TARGET_DIR=str(output / 'target'), CARGO_BUILD_JOBS='2',
+               CARGO_TARGET_DIR=str(output / 'target'), CARGO_BUILD_JOBS=str(jobs),
                RAYON_NUM_THREADS='2', CARGO_NET_OFFLINE='true', CXXFLAGS='-g0',
                CFLAGS='-g0', RUSTFLAGS='-Ctarget-cpu=x86-64-v2')
     # Do not inherit a Mac toolchain, native flags, wrapper or build-injection flags.
@@ -72,7 +74,7 @@ def build(output):
                  'CC', 'CXX', 'AR'):
         env.pop(name, None)
     command = ['nice', '-n', '15', 'cargo', 'build', '--offline', '--locked',
-               '--target', TARGET, '--no-default-features', '-j', '2',
+               '--target', TARGET, '--no-default-features', '-j', str(jobs),
                '-p', 'native-wallet', '-p', 'native-localnet', '-p', 'agave-validator']
     for name in runtime.BINARIES:
         command += ['--bin', name]
@@ -89,7 +91,7 @@ def build(output):
         elf(raw)
         binaries[name] = dict(size=len(raw), sha256=sha(raw))
     receipt = dict(format='zolana-linux-build-v1', target=TARGET, rustc_release='1.92.0',
-                   source_commit=commit, cargo_lock_sha256=lock, offline=True, jobs=2,
+                   source_commit=commit, cargo_lock_sha256=lock, offline=True, jobs=jobs,
                    profile='dev', binaries=binaries, runtime_tested=False)
     create(output / RECEIPT, encode(receipt)); fsync_dir(output)
     return dict(build_complete=True, runtime_tested=False, services_started=0)
@@ -102,7 +104,7 @@ def validate_receipt(raw, binaries):
     if (not isinstance(value, dict) or set(value) != keys or
             value['format'] != 'zolana-linux-build-v1' or value['target'] != TARGET or
             value['rustc_release'] != '1.92.0' or value['profile'] != 'dev' or
-            value['offline'] is not True or type(value['jobs']) is not int or value['jobs'] != 2 or
+            value['offline'] is not True or type(value['jobs']) is not int or not 2 <= value['jobs'] <= 8 or
             value['runtime_tested'] is not False or not hex64(value['cargo_lock_sha256']) or
             not isinstance(value['source_commit'], str) or len(value['source_commit']) != 40 or
             any(c not in '0123456789abcdef' for c in value['source_commit']) or value['binaries'] != binaries):
@@ -284,8 +286,9 @@ def main():
     p.add_argument('action', choices=('build', 'prepare', 'check', 'render', 'run'))
     p.add_argument('--build-dir', type=Path); p.add_argument('--output', type=Path)
     p.add_argument('--bundle', type=Path); p.add_argument('--manifest-sha256'); p.add_argument('--binding-sha256')
+    p.add_argument('--jobs', type=int, default=2)
     a = p.parse_args()
-    if a.action == 'build': result = build(a.output)
+    if a.action == 'build': result = build(a.output, a.jobs)
     elif a.action == 'prepare': result = prepare(a.build_dir, a.output)
     elif a.action == 'check':
         verify(a.bundle, a.manifest_sha256)

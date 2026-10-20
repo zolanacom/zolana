@@ -74,6 +74,21 @@ class LinuxTests(unittest.TestCase):
         child.assert_not_called()
         self.assertFalse((self.base / 'never-built').exists()); self.assertFalse(self.bundle.exists())
 
+    def test_invalid_jobs_refused_before_compiler_or_output(self):
+        with patch.object(linux, 'linux'), patch.object(linux.subprocess, 'check_output') as compiler:
+            for jobs in (True, 0, 1, 9, '8'):
+                with self.subTest(jobs=jobs), self.assertRaises(ValueError):
+                    linux.build(self.base / 'never-built', jobs)
+        compiler.assert_not_called(); self.assertFalse((self.base / 'never-built').exists())
+
+    def test_eight_job_receipt_retains_real_count_and_bounds(self):
+        for jobs in (2, 4, 8):
+            value = dict(self.receipt, jobs=jobs)
+            self.assertEqual(linux.validate_receipt(encode(value), value['binaries'])['jobs'], jobs)
+        for jobs in (1, 9):
+            with self.assertRaises(ValueError):
+                linux.validate_receipt(encode(dict(self.receipt, jobs=jobs)), self.receipt['binaries'])
+
     def test_failed_linux_compiler_keeps_log_without_completion_or_bundle(self):
         output = self.base / 'compiler-failure'
         def failed(command, **kwargs):
