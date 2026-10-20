@@ -1,5 +1,6 @@
 mod archival;
 mod retained;
+mod reads;
 use crate::{
     archive::{Archive, HistoryBlock, Writer},
     cache::{self, Checkpoint},
@@ -534,23 +535,12 @@ impl Chain {
         payer: Pubkey,
         kind: crate::fees::PaymentKind,
     ) -> Result<crate::fees::Quote> {
-        self.minimum_withdrawal(payer)?; // An ordinary public account must pay the fees.
+        let reads::QuoteInputs {
+            rent, markers, remaining, balance, hash,
+        } = self.quote_inputs(payer)?;
+        let hash = hash.parse()?;
         let bytes = vec![0; kind.payload_len()]; // Exact two-action shape; no proof or private recipient is sent.
         let buffer = Pubkey::new_unique();
-        let rent = self
-            .rpc
-            .get_minimum_balance_for_rent_exemption(ACCOUNT_BYTES)?;
-        let markers = self
-            .rpc
-            .get_minimum_balance_for_rent_exemption(
-                native_payment_program::nullifiers::MARKER_BYTES,
-            )?
-            .checked_mul(2)
-            .ok_or("rent overflow")?;
-        let hash = self
-            .rpc
-            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?
-            .0;
         let mut batches = vec![vec![
             system::create_account(&payer, &buffer, rent, ACCOUNT_BYTES as u64, &id()),
             instructions::initialize(buffer, payer, bytes.len() as u32, payload_digest(&bytes), 1),
@@ -569,18 +559,20 @@ impl Chain {
             },
         ));
         batches.push(finalization);
-        let fee = |ix: &[Instruction]| -> Result<u64> {
+        let message = |ix: &[Instruction]| {
             let mut tx = Transaction::new_with_payer(ix, Some(&payer));
             tx.message.recent_blockhash = hash;
-            self.transaction_fee(&tx)
+            tx
         };
+        let mut transactions: Vec<_> = batches.iter().map(|batch| message(batch)).collect();
+        transactions.push(message(&[instructions::close(buffer, payer)]));
+        let fees = self.transaction_fees(&transactions)?;
         // Reserve one complete ordered repair of the suffix, without assuming
         // burst ordering or refunding fees for failed staging transactions.
         // Reuse the exact same message's quote rather than repeating RPC reads.
         let mut normal_fees = 0u64;
         let mut upload_repair_reserve = 0u64;
-        for (index, batch) in batches.iter().enumerate() {
-            let quoted = fee(batch)?;
+        for (index, &quoted) in fees[..batches.len()].iter().enumerate() {
             normal_fees = normal_fees.checked_add(quoted).ok_or("fee overflow")?;
             if (1..=uploads.len()).contains(&index) {
                 upload_repair_reserve = upload_repair_reserve
@@ -588,7 +580,7 @@ impl Chain {
                     .ok_or("repair fee overflow")?;
             }
         }
-        let close_fee = fee(&[instructions::close(buffer, payer)])?;
+        let close_fee = fees[batches.len()];
         let reserve = close_fee
             .checked_mul(2)
             .filter(|v| *v > 0)
@@ -599,8 +591,6 @@ impl Chain {
             .and_then(|n| n.checked_add(upload_repair_reserve))
             .and_then(|n| n.checked_add(reserve))
             .ok_or("fee quote overflow")?;
-        let remaining = self.rpc.get_minimum_balance_for_rent_exemption(0)?;
-        let balance = self.public_balance(payer)?;
         let required = maximum.checked_add(remaining).ok_or("fee quote overflow")?;
         Ok(crate::fees::Quote {
             payment: kind.name(),
@@ -619,12 +609,22 @@ impl Chain {
     }
 
     fn charge_sponsor(&self, tx: &Transaction, native_debit: u64) -> Result<()> {
+        let fee = if self.sponsor_budget.is_some() || self.user_fees.is_some() {
+            self.transaction_fee(tx)?
+        } else {
+            0
+        };
+        self.charge_quoted(tx, native_debit, fee)
+    }
+
+    // Private entry point: fee comes from this exact serialized message's read,
+    // never from the caller, a shape estimate or a persisted fee cache.
+    fn charge_quoted(&self, tx: &Transaction, native_debit: u64, fee: u64) -> Result<()> {
         if self.user_fees.is_some() && self.sponsor_budget.is_some() {
             return Err("fee modes cannot be combined".into());
         }
         if self.sponsor_budget.is_some() || self.user_fees.is_some() {
-            let debit = self
-                .transaction_fee(tx)?
+            let debit = fee
                 .checked_add(native_debit)
                 .ok_or("fee debit overflow")?;
             if let Some(budget) = &self.sponsor_budget {
@@ -1138,7 +1138,7 @@ impl Chain {
         Err("upload outcomes remain unknown; original staging identity retained for reclaim".into())
     }
 
-    fn send_upload(&self, tx: &Transaction) -> Result<Signature> {
+    fn check_upload(tx: &Transaction) -> Result<()> {
         // Only internally generated write/seal instructions may skip preflight.
         // Initialization, payment finalization and cleanup retain preflight.
         if tx.message.instructions.iter().any(|ix| {
@@ -1151,16 +1151,36 @@ impl Chain {
         if 1 + tx.signatures.len() * 64 + tx.message_data().len() > 1232 {
             return Err("signed upload transaction exceeds the network packet limit".into());
         }
-        self.charge_sponsor(tx, 0)?;
-        Ok(self.rpc.send_transaction_with_config(
-            tx,
-            RpcSendTransactionConfig {
-                skip_preflight: true,
-                preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
-                max_retries: Some(3),
-                ..Default::default()
-            },
-        )?)
+        Ok(())
+    }
+
+    fn send_uploads(&self, transactions: &[Transaction]) -> Result<Vec<Signature>> {
+        if transactions.is_empty() || transactions.len() > 16 {
+            return Err("invalid bounded upload sequence".into());
+        }
+        for tx in transactions {
+            Self::check_upload(tx)?;
+        }
+        let fees = if self.sponsor_budget.is_some() || self.user_fees.is_some() {
+            self.transaction_fees(transactions)?
+        } else {
+            vec![0; transactions.len()]
+        };
+        transactions.iter().zip(fees)
+            .map(|(tx, fee)| {
+                // Debit each actual attempt durably before its first broadcast.
+                // Quoting a future chunk never spends/refills its authorization.
+                self.charge_quoted(tx, 0, fee)?;
+                Ok(self.rpc.send_transaction_with_config(
+                    tx,
+                    RpcSendTransactionConfig {
+                        skip_preflight: true,
+                        preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
+                        max_retries: Some(3),
+                        ..Default::default()
+                    },
+                )?)
+            }).collect()
     }
 
     pub fn resolve(
@@ -1385,7 +1405,7 @@ impl Chain {
         self.send_signed_debit(&initialization, staging_rent)?;
         let batches = crate::upload::remaining(buffer.pubkey(), sponsor.pubkey(), bytes);
         let mut upload_transactions = 1 + batches.len();
-        let mut signatures = Vec::with_capacity(batches.len());
+        let mut transactions = Vec::with_capacity(batches.len());
         for batch in batches {
             let tx = Transaction::new_signed_with_payer(
                 &batch,
@@ -1393,8 +1413,9 @@ impl Chain {
                 &[sponsor],
                 blockhash,
             );
-            signatures.push(self.send_upload(&tx)?);
+            transactions.push(tx);
         }
+        let signatures = self.send_uploads(&transactions)?;
         let (upload_failed_transactions, confirmed_slot) = self.wait_upload_burst(&signatures)?;
         let account = self
             .staging_account(
@@ -1842,7 +1863,7 @@ mod recovery_tests {
                 &[instructions::close(Pubkey::new_unique(), sponsor.pubkey())],
                 Some(&sponsor.pubkey()),
             );
-            assert!(chain.send_upload(&forbidden).is_err());
+            assert!(chain.send_uploads(&[forbidden]).is_err());
         }
     }
 
@@ -2646,6 +2667,49 @@ mod recovery_tests {
             history_batches: false,
             verification_key: None,
             network,
+        }
+    }
+
+    #[test]
+    fn aggregated_upload_fees_fail_closed_and_charge_only_attempted_messages() {
+        for mode in ["missing", "null", "substituted", "cap"] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let payer = Keypair::new();
+            let network = fixture(&operation, &payer, 100);
+            let mut record: StagingRecovery = serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+            let mut authorization = crate::fees::Authorization::new(100, 10).unwrap();
+            authorization.charged = 80;
+            record.user_fee = Some(authorization);
+            crate::sponsor::replace(&operation.staging, &serde_json::to_vec(&record).unwrap()).unwrap();
+            let original = fs::read(&operation.staging).unwrap();
+            let transactions: Vec<_> = (0..2).map(|_| Transaction::new_signed_with_payer(
+                &[instructions::seal(Pubkey::new_unique(), payer.pubkey())], Some(&payer.pubkey()), &[&payer], Default::default()
+            )).collect();
+            let mut response: Vec<_> = transactions.iter().map(|tx| json!({
+                "request":{"method":"getFeeForMessage","params":[base64::engine::general_purpose::STANDARD.encode(tx.message.serialize()),{"commitment":"confirmed"}]},
+                "result":{"context":{"slot":34},"value":7}
+            })).collect();
+            match mode {
+                "missing" => { response.pop(); },
+                "null" => response[1]["result"]["value"] = json!(null),
+                "substituted" => response[1]["request"]["params"][0] = json!("AAAA"),
+                _ => (),
+            }
+            let mocks = MocksMap::from_iter([
+                (RpcRequest::Custom { method: "getWalletReadBatch" }, json!(response)),
+                (RpcRequest::SendTransaction, json!(transactions[0].signatures[0].to_string())),
+            ]);
+            let chain = Chain { rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks), network,
+                sponsor_budget: None, user_fees: Some((payer.pubkey(),100,operation.staging.clone())),
+                history_batches: true, verification_key: None };
+            assert!(chain.send_uploads(&transactions).is_err());
+            assert!(!operation.pending.exists());
+            let saved: StagingRecovery = serde_json::from_slice(&fs::read(&operation.staging).unwrap()).unwrap();
+            let saved = saved.user_fee.unwrap();
+            assert_eq!(saved.cleanup_reserve, 10);
+            assert_eq!(saved.charged, if mode == "cap" { 87 } else { 80 });
+            if mode != "cap" { assert_eq!(fs::read(&operation.staging).unwrap(), original); }
         }
     }
 

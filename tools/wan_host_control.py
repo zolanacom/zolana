@@ -182,7 +182,7 @@ def main():
     parser.add_argument('--name', required=True)
     parser.add_argument('--resume-binding')
     args = parser.parse_args()
-    if not re.fullmatch('s52[a-z]', args.name):
+    if not re.fullmatch('s5[23][a-z]', args.name):
         parser.error('use a new bounded WAN acceptance fixture name')
     root = PROJECT / '.data' / args.name
     suffix = '-wan' if args.resume_binding is None else '-wan-resume-' + secrets.token_hex(4)

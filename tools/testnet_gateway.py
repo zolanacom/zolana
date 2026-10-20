@@ -4,6 +4,7 @@ import argparse
 import base64
 from http.server import BaseHTTPRequestHandler
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -13,12 +14,47 @@ import urllib.request
 from test_faucet import BoundedServer, Faucet
 
 METHODS = {
+    "getWalletReadBatch",
     "getWalletHistoryBlocks", "getWalletRetainedHistory", "getWalletCanonicalHistory",
     "getGenesisHash", "getHealth", "getVersion", "getAccountInfo", "getMultipleAccounts",
     "getBlocks", "getBlock", "getBlockHeight", "getSlot", "getEpochInfo", "getBalance",
     "getSignaturesForAddress", "getSignatureStatuses", "getTransaction", "getLatestBlockhash",
     "getMinimumBalanceForRentExemption", "getFeeForMessage", "sendTransaction", "getProgramAccounts",
 }
+
+# Small reads only. No write, history scan, caller URL or arbitrary RPC batch.
+READ_METHODS = {'getAccountInfo', 'getBalance', 'getLatestBlockhash', 'getSlot',
+                'getMinimumBalanceForRentExemption', 'getFeeForMessage'}
+
+
+def read_calls(request):
+    params = request.get('params')
+    if not isinstance(params, list) or len(params) != 1 or not isinstance(params[0], list) or not 1 <= len(params[0]) <= 16:
+        raise ValueError('invalid bounded read request')
+    for call in params[0]:
+        if (not isinstance(call, dict) or set(call) != {'method', 'params'} or
+                not isinstance(call['method'], str) or call['method'] not in READ_METHODS or
+                not isinstance(call['params'], list)):
+            raise ValueError('only bounded wallet reads may be aggregated')
+        method, args = call['method'], call['params']
+        if method == 'getMinimumBalanceForRentExemption':
+            if len(args) != 1 or type(args[0]) is not int or not 0 <= args[0] <= 131072:
+                raise ValueError('invalid rent read')
+            continue
+        count = 1 if method in {'getLatestBlockhash', 'getSlot'} else 2
+        if len(args) != count or args[-1] not in ({'commitment': 'confirmed'}, {'commitment': 'finalized'},
+                {'commitment': 'confirmed', 'encoding': 'base64'}):
+            raise ValueError('invalid bounded read configuration')
+        if method in {'getAccountInfo', 'getBalance'}:
+            if not isinstance(args[0], str) or re.fullmatch('[1-9A-HJ-NP-Za-km-z]{32,44}', args[0]) is None:
+                raise ValueError('invalid public read address')
+        elif method == 'getFeeForMessage':
+            if not isinstance(args[0], str) or not 1 <= len(args[0]) <= 1644:
+                raise ValueError('invalid fee message size')
+            message = base64.b64decode(args[0], validate=True)
+            if not 1 <= len(message) <= 1232 or base64.b64encode(message).decode() != args[0]:
+                raise ValueError('invalid fee message encoding')
+    return params[0]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -100,6 +136,27 @@ class Gateway:
             items.append(item)
         return prefix + b','.join(items) + b']}'
 
+    def read_batch(self, request, calls):
+        results, total = [], 0
+        deadline = time.monotonic() + 15
+        for index, call in enumerate(calls):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('wallet read deadline exceeded')
+            query = dict(jsonrpc='2.0', id=index, **call)
+            body = json.loads(self.forward(json.dumps(query).encode(), timeout=remaining))
+            if (not isinstance(body, dict) or type(body.get('id')) is not int or body['id'] != index or
+                    'error' in body or 'result' not in body):
+                raise ValueError('complete wallet read result unavailable')
+            # Echo exact message/configuration binding; client refuses omissions,
+            # substitutions or reordering before using any fee result.
+            item = dict(request=call, result=body['result'])
+            total += len(json.dumps(item).encode())
+            if total > 1024 * 1024:
+                raise ValueError('wallet read result exceeds limit')
+            results.append(item)
+        return json.dumps(dict(jsonrpc='2.0', id=request['id'], result=results)).encode()
+
 
 def history_slots(request):
     params = request.get("params")
@@ -112,6 +169,29 @@ def history_slots(request):
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    disable_nagle_algorithm = True
+    max_connection_requests = 64
+    max_connection_seconds = 30
+
+    def setup(self):
+        super().setup()
+        self.connection_started = time.monotonic()
+        self.connection_requests = 0
+
+    def handle_one_request(self):
+        self.connection_requests += 1
+        self.connection.settimeout(5)
+        super().handle_one_request()
+
+    def end_headers(self):
+        if (self.connection_requests >= self.max_connection_requests or
+                time.monotonic() - self.connection_started >= self.max_connection_seconds):
+            self.close_connection = True
+        if self.close_connection:
+            self.send_header('Connection', 'close')
+        super().end_headers()
+
     def log_message(self, *_):
         pass  # No access proofs, requests, addresses or invitation codes in logs.
 
@@ -120,17 +200,25 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path != "/" or self.headers.get("Host") != self.server.authority or self.headers.get("Origin") is not None:
                 raise ValueError("access denied")
+            if any(len(self.headers.get_all(name, [])) > 1 for name in ('Host', 'Content-Length', 'Content-Type', 'X-Testnet-Access')):
+                raise ValueError('ambiguous persistent framing')
             self.server.app.faucet.ingress("rpc", self.client_address[0])
             if self.headers.get("Content-Type") != "application/json" or self.headers.get("Transfer-Encoding") is not None:
                 raise ValueError("invalid RPC body")
-            size = int(self.headers.get("Content-Length", "0"))
+            length = self.headers.get('Content-Length', '')
+            if re.fullmatch('[0-9]{1,5}', length) is None:
+                raise ValueError('invalid RPC length')
+            size = int(length)
             if not 1 <= size <= 32768:
                 raise ValueError("RPC body exceeds limit")
             raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError('incomplete RPC body')
             request = json.loads(raw)
             if not isinstance(request, dict) or set(request) - {"jsonrpc", "id", "method", "params"} or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str) or request["method"] not in METHODS or type(request.get("id")) not in (str, int) or len(str(request["id"])) > 64 or (request.get("params") is not None and not isinstance(request["params"], list)):
                 raise ValueError("RPC method or envelope denied")
             if request["method"] != "getGenesisHash":
+                calls = read_calls(request) if request['method'] == 'getWalletReadBatch' else None
                 if request['method'] == 'getWalletRetainedHistory':
                     from gateway_history import parameters
                     parameters(request)
@@ -142,11 +230,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not 1 <= len(header) <= 3072:
                     raise ValueError("invitation required")
                 proof = json.loads(base64.b64decode(header + "=" * (-len(header) % 4), altchars=b"-_", validate=True))
-                self.server.app.faucet.command("authorize", proof)
-            if request['method'] == 'getWalletRetainedHistory':data = self.server.app.retained_history(request)
+                # Preserve one durable member/global charge per underlying read.
+                # No request or connection may cache admission or bypass revocation.
+                authorization_deadline = time.monotonic() + 15
+                for _ in range(len(calls) if calls is not None else 1):
+                    if time.monotonic() >= authorization_deadline:
+                        raise ValueError('wallet authorization deadline exceeded')
+                    self.server.app.faucet.command("authorize", proof)
+            if request['method'] == 'getWalletReadBatch':data = self.server.app.read_batch(request, calls)
+            elif request['method'] == 'getWalletRetainedHistory':data = self.server.app.retained_history(request)
             elif request['method'] == 'getWalletCanonicalHistory':data = self.server.app.canonical_history(request)
             else:data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
         except (ValueError, RecursionError, OSError, urllib.error.URLError, subprocess.SubprocessError) as error:
+            self.close_connection = True  # An unread/rejected body cannot become another request.
             code = 429 if "quota exhausted" in str(error) else 403
             data = json.dumps({"error": "request_limit" if code == 429 else "access_denied"}).encode()
         self.send_response(code)

@@ -33,8 +33,11 @@ def save(path, value):
 
 
 class Trial:
-    def __init__(self, directory, binary, name):
+    def __init__(self, directory, binary, name, remote_project='/srv/zolana-live-src'):
         self.directory, self.binary, self.name = directory, binary, name
+        if remote_project not in ('/srv/zolana-live-src', '/srv/zolana-wan-src'):
+            raise ValueError('reviewed fixed acceptance source required')
+        self.remote_project = remote_project
         key = PROJECT / '.local/remote-host'
         self.ssh = ['ssh', '-F', '/dev/null', '-i', str(key / 'ssh_identity'),
                     '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
@@ -59,11 +62,11 @@ class Trial:
         self.result['last_control_unit'] = 'zolana-mac-wan-' + self.name + generation
         self.control = subprocess.Popen(self.ssh + ['root@validator.example',
             'systemd-run', '--pipe', '--quiet', '--wait', '--unit=' + self.result['last_control_unit'],
-            '--uid=builder', '--gid=builder', '--working-directory=/srv/zolana-live-src',
+            '--uid=builder', '--gid=builder', '--working-directory=' + self.remote_project,
             '--property=Nice=15', '--property=MemoryMax=140G', '--property=CPUQuota=1200%',
             '--property=TasksMax=4096', '--property=LimitNOFILE=1048576', '--property=KillMode=control-group',
             '--property=RuntimeMaxSec=2000', '/usr/bin/python3', '-B',
-            '/srv/zolana-live-src/.local/wan_host_control-052.py', '--name', self.name,
+            self.remote_project + '/.local/wan_host_control-052.py', '--name', self.name,
             *(['--resume-binding', resumed] if resumed else [])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
         def reader():
@@ -132,7 +135,9 @@ class Trial:
         return values
 
     def streaming_send(self, amount):
+        quoted = time.monotonic()
         quote = self.user('sender', 'fees', payment='send')
+        quote_seconds = round(time.monotonic() - quoted, 4)
         began = time.monotonic(); frames = []
         request = urllib.request.Request('http://' + self.server.authority + '/api/wallet',
             json.dumps(dict(action='send', password=self.password, recipient=self.keys['receiver']['address'],
@@ -150,7 +155,8 @@ class Trial:
                     terminal = value['result']
         if terminal is None or self.apps['sender'].status()['pending'] or self.apps['sender'].status()['staging']:
             raise RuntimeError('stream did not return a settled payment')
-        return dict(seconds=round(time.monotonic() - began, 4), frames=frames, receipt=terminal)
+        return dict(seconds=round(time.monotonic() - began, 4), fee_review_seconds=quote_seconds,
+                    frames=frames, receipt=terminal)
 
     def spawn_send(self, label):
         app = self.apps['sender']; quote = self.user('sender', 'fees', payment='send')
@@ -225,7 +231,7 @@ class Trial:
         for index in range(3):
             sent = self.streaming_send(10000)
             save(self.directory / ('normal-' + str(index + 1) + '.json'), sent)
-            self.event('mac_wan_private_send', number=index + 1, seconds=sent['seconds'], receipt=sent['receipt'],
+            self.event('mac_wan_private_send', number=index + 1, seconds=sent['seconds'], fee_review_seconds=sent['fee_review_seconds'], receipt=sent['receipt'],
                        phases=[dict(seconds=f['seconds'], phase=f['progress']) for f in sent['frames'] if 'progress' in f])
         before = self.snapshot(12)
         self.balances(dict(sender=970000, receiver=1030000))
@@ -379,13 +385,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--binary', type=Path, required=True)
-    parser.add_argument('--name', choices=['s52' + c for c in 'abcdefghijklmnopqrstuvwxyz'], required=True)
+    parser.add_argument('--name', choices=['s5' + n + c for n in '23' for c in 'abcdefghijklmnopqrstuvwxyz'], required=True)
+    parser.add_argument('--remote-project', choices=['/srv/zolana-live-src', '/srv/zolana-wan-src'], default='/srv/zolana-live-src')
     parser.add_argument('--resume-partial', action='store_true')
     args = parser.parse_args()
     os.umask(0o077); os.environ['RAYON_NUM_THREADS'] = '2'
     if not args.resume_partial:
         args.directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    trial = Trial(args.directory.resolve(), args.binary.resolve(), args.name)
+    trial = Trial(args.directory.resolve(), args.binary.resolve(), args.name, args.remote_project)
     try:
         trial.resume_partial() if args.resume_partial else trial.run()
     except BaseException as error:

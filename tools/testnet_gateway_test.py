@@ -7,12 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from testnet_gateway import Handler, Gateway, history_slots
+from testnet_gateway import Handler, Gateway, history_slots, read_calls
 from wallet_ui import WalletApp
 
 
 class GatewayTests(unittest.TestCase):
-    def request(self, body, access=None, headers=None, limit=False):
+    def request(self, body, access=None, headers=None, limit=False, authorize_limit=None):
         calls=[]
         class Faucet:
             def ingress(self, channel, peer, units=1):
@@ -20,9 +20,13 @@ class GatewayTests(unittest.TestCase):
                 if limit: raise ValueError('request quota exhausted')
             def command(self, command, data, extra=()):
                 calls.append((command,data) if not extra else (command,data,extra))
+                if authorize_limit is not None and len([c for c in calls if c[0]=='authorize']) > authorize_limit:
+                    raise ValueError('request quota exhausted')
                 if data!={'signature':'valid'}: raise ValueError('invalid proof')
         class App:
             faucet=Faucet()
+            def read_batch(self, request, reads):
+                calls.append(('reads',reads)); return json.dumps({'result':reads}).encode()
             def history_blocks(self, request, slots):
                 calls.append(('history',slots)); return json.dumps({'result':slots}).encode()
             def retained_history(self, request):
@@ -45,6 +49,47 @@ class GatewayTests(unittest.TestCase):
         handler.send_header=lambda key,value:self.last_headers.__setitem__(key,value); handler.end_headers=lambda:None
         handler.do_POST()
         return response[0],json.loads(handler.wfile.getvalue()),calls
+
+    def test_aggregate_is_read_only_bounded_and_each_read_consumes_authorization(self):
+        calls=[dict(method='getFeeForMessage',params=['AAAA',{'commitment':'confirmed'}]),
+               dict(method='getMinimumBalanceForRentExemption',params=[0])]
+        request=dict(jsonrpc='2.0',id=1,method='getWalletReadBatch',params=[calls])
+        header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
+        code,_,seen=self.request(request,header)
+        self.assertEqual(code,200)
+        self.assertEqual([s[0] for s in seen],['ingress','authorize','authorize','reads'])
+        self.assertEqual(self.request(request)[0],403)
+        code,_,seen=self.request(request,header,authorize_limit=1)
+        self.assertEqual(code,429)
+        self.assertFalse(any(s[0] in ('reads','forward') for s in seen))
+        invalid=[[],calls*9,[dict(method='sendTransaction',params=['signed'])],
+                 [dict(method='getBlock',params=[1])],[dict(calls[0],extra=1)],
+                 [dict(method='getFeeForMessage',params=['?',{'commitment':'confirmed'}])],
+                 [dict(method='getMinimumBalanceForRentExemption',params=[True])],
+                 [dict(method='getSlot',params=[{'commitment':'processed'}])]]
+        for value in invalid:
+            code,_,seen=self.request(dict(request,params=[value]),header)
+            self.assertEqual(code,403)
+            self.assertFalse(any(s[0] in ('authorize','reads','forward') for s in seen))
+
+    def test_aggregate_refuses_wrong_upstream_identity_error_partial_or_oversized_result(self):
+        gateway=object.__new__(Gateway);seen=[]
+        calls=[dict(method='getMinimumBalanceForRentExemption',params=[0]),dict(method='getLatestBlockhash',params=[{'commitment':'confirmed'}])]
+        def forward(raw,timeout):
+            self.assertGreater(timeout,0);self.assertLessEqual(timeout,15)
+            query=json.loads(raw);seen.append(query)
+            return json.dumps(dict(id=query['id'],result={'value':5000})).encode()
+        gateway.forward=forward
+        result=json.loads(gateway.read_batch({'id':'original'},calls))
+        self.assertEqual(result['id'],'original');self.assertEqual([r['request'] for r in result['result']],calls)
+        self.assertEqual([r['method'] for r in seen],[r['method'] for r in calls])
+        for response in [{},[],{'id':True,'result':0},{'id':1,'result':0},{'id':0,'error':{}},
+                         {'id':0,'result':'x'*(1024*1024)}]:
+            gateway.forward=lambda raw,timeout:json.dumps(response).encode()
+            with self.assertRaises(ValueError):gateway.read_batch({'id':1},calls)
+        gateway.forward=forward
+        with patch('testnet_gateway.time.monotonic',side_effect=[0,16]):
+            with self.assertRaisesRegex(ValueError,'deadline'):gateway.read_batch({'id':1},calls)
 
     def test_public_genesis_and_member_rpc_are_charged_before_forwarding(self):
         genesis=dict(jsonrpc='2.0',id=1,method='getGenesisHash')

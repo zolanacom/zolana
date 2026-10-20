@@ -53,6 +53,7 @@ def guarded(handler):
                     self.headers.get('Origin') is not None or self.headers.get('Transfer-Encoding') is not None or
                     any(len(self.headers.get_all(name,[]))>1 for name in single) or
                     any(name.lower() in forbidden or name.lower().startswith('x-forwarded-') for name in self.headers)):
+                self.close_connection = True  # Never parse a rejected body's bytes as another request.
                 self.send_response(403)
                 self.send_header('Content-Type','application/json')
                 self.send_header('Cache-Control','no-store')
