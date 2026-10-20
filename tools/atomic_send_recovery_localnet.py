@@ -20,7 +20,7 @@ from wallet_release import create, read, sha
 from wallet_ui import WalletApp
 
 
-def run(root):
+def run(root, resume_pre_payment=False):
     root = root.absolute()
     if root.parent != PROJECT / '.data' or root.resolve() != root:
         raise ValueError('requires a real direct private fixture child')
@@ -29,7 +29,19 @@ def run(root):
             prior.get('permanent_nullifiers') != 6 or not prior.get('whole_host_group_sigkill')):
         raise ValueError('requires the completed original six-nullifier runtime acceptance')
     evidence = PROJECT / '.local' / (root.name + '-atomic-recovery')
-    evidence.mkdir(mode=0o700)  # Refuse a repeat before starting services or sending.
+    if resume_pre_payment:
+        failed = read(evidence / 'result.json', 16384, secret=True)
+        checkpoint = json.loads(failed)
+        if (checkpoint.get('status') != 'failed' or checkpoint.get('error') !=
+                'Testnet access is unavailable for this wallet. Check your invitation access; your recovery file and payment records are preserved.' or
+                set(checkpoint) != {'status', 'original_runtime_receipt_sha256', 'error'} or
+                checkpoint['original_runtime_receipt_sha256'] != sha(read(
+                    root / 'pilot-runtime-result.json', 1024 * 1024, secret=True)) or
+                any((evidence / name).exists() for name in ('original-pending.json', 'original-staging.json'))):
+            raise ValueError('resume requires the exact retained pre-payment admission-check failure')
+        create(evidence / 'pre-payment-failure.json', failed)
+    else:
+        evidence.mkdir(mode=0o700)  # Refuse a repeat before services or sending.
     result = dict(status='running', original_runtime_receipt_sha256=sha(read(
         root / 'pilot-runtime-result.json', 1024 * 1024, secret=True)))
     original = PROJECT / '.local' / root.name
@@ -47,6 +59,13 @@ def run(root):
         trial.clients[who] = WalletApp.from_profile(profile, storage)
         trial.keys[who] = trial.clients[who].cli('address', trial.password)
     child = None
+    def private_balance(who):
+        # Bob is an intentionally unadmitted recipient. The original operator
+        # route verifies test balances without admitting him or bypassing the gateway.
+        return trial.command([str(trial.clients[who].binary), 'balance',
+            '--network', str(root / 'network.json'), '--wallet', str(trial.clients[who].wallet),
+            '--password-file', str(trial.password_file), '--rpc', 'http://127.0.0.1:18899',
+            '--rpc-access-file', str(root / 'rpc-access.key')])['balance']
     try:
         trial.start_host()
         load(root)  # Authenticate the original operator-only Unix RPC routes.
@@ -54,7 +73,7 @@ def run(root):
         if len(before) != 7 or durable(root, 1) != before:
             raise ValueError('original pool/six-nullifier checkpoint differs')
         for who, expected in (('alice', 950_000), ('bob', 50_000)):
-            if trial.user(who, 'balance')['balance'] != expected:
+            if private_balance(who) != expected:
                 raise ValueError('original accepted private balances differ')
         app = trial.clients['alice']
         pending = Path(str(app.wallet) + '.pending.json')
@@ -118,7 +137,7 @@ def run(root):
         if min(restarted['finalized_slots']) <= barrier:
             raise RuntimeError('restarted cluster did not advance finality')
         for who, expected in (('alice', 900_000), ('bob', 100_000)):
-            if trial.user(who, 'balance')['balance'] != expected:
+            if private_balance(who) != expected:
                 raise RuntimeError('private balances failed to survive restart')
         if durable(root, 0) != accepted or durable(root, 1) != accepted:
             raise RuntimeError('nullifier/pool checkpoint changed on restart')
@@ -146,4 +165,6 @@ if __name__ == '__main__':
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
-    run(parser.parse_args().root)
+    parser.add_argument('--resume-pre-payment-check', action='store_true')
+    args = parser.parse_args()
+    run(args.root, args.resume_pre_payment_check)
