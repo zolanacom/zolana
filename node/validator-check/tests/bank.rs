@@ -139,6 +139,112 @@ fn finalize(bank: &Bank, sponsor: &Keypair, buffer: Pubkey) -> Transaction {
 }
 
 #[test]
+fn atomic_payment_close_refunds_once_rolls_back_and_replays() {
+    let sponsor = Keypair::new();
+    let fixture = build_fixture_for(sponsor.pubkey().to_bytes()).unwrap();
+    let config = genesis(&sponsor, true);
+    let forks = BankForks::new_rw_arc(Bank::new_for_tests(&config));
+    let bank = forks.read().unwrap().root_bank();
+    let replay_forks = BankForks::new_rw_arc(Bank::new_for_tests(&config));
+    let replay = replay_forks.read().unwrap().root_bank();
+    let mut transcript = Vec::new();
+    let funding =
+        wire::encode(FIXTURE_GENESIS, &fixture.funding_context, &fixture.funding).unwrap();
+    let spending = wire::encode(FIXTURE_GENESIS, &fixture.context, &fixture.bundle).unwrap();
+    for (index, bytes) in [&funding, &spending].into_iter().enumerate() {
+        let (buffer, txs) = stage_transactions(&bank, &sponsor, bytes);
+        for tx in txs {
+            bank.process_transaction(&tx).unwrap();
+            transcript.push(tx);
+        }
+        let payment = wire::decode(FIXTURE_GENESIS, bytes).unwrap();
+        let nfs = std::array::from_fn(|i| {
+            payment
+                .bundle
+                .actions()
+                .get(i)
+                .unwrap()
+                .nullifier()
+                .to_bytes()
+        });
+        let mut complete = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
+        complete.extend(instructions::finalize_and_close(
+            buffer,
+            sponsor.pubkey(),
+            nfs,
+            None,
+        ));
+        let before_pool = bank.get_account(&pool_address());
+        let before_buffer = bank.get_account(&buffer);
+        let rent_refund = bank.get_balance(&buffer);
+        let payer_before = bank.get_balance(&sponsor.pubkey());
+        // Fail after both finalization AND rent refund. The Bank must undo the
+        // refund, proof effects, buffer deletion and both permanent markers.
+        let mut invalid = instructions::seal(buffer, sponsor.pubkey());
+        invalid.data = vec![255];
+        let mut failing = complete.clone();
+        failing.push(invalid);
+        let failed = transaction(&bank, &sponsor, &failing, &[]);
+        assert!(matches!(
+            bank.process_transaction(&failed),
+            Err(solana_transaction_error::TransactionError::InstructionError(3, _))
+        ));
+        assert_eq!(bank.get_account(&pool_address()), before_pool);
+        assert_eq!(bank.get_account(&buffer), before_buffer);
+        assert_eq!(bank.get_balance(&sponsor.pubkey()), payer_before);
+        for nf in nfs {
+            assert!(bank.get_account(&nullifiers::address(&nf)).is_none());
+        }
+        transcript.push(failed);
+        let accepted = transaction(&bank, &sponsor, &complete, &[]);
+        assert!(1 + accepted.signatures.len() * 64 + accepted.message_data().len() <= 1232);
+        bank.process_transaction(&accepted).unwrap();
+        assert!(bank.get_account(&buffer).is_none());
+        assert_eq!(
+            bank.get_balance(&sponsor.pubkey()),
+            payer_before + rent_refund
+                - 2 * config.rent.minimum_balance(nullifiers::MARKER_BYTES)
+                - if index == 0 { 100 } else { 0 }
+        );
+        for nf in nfs {
+            assert_eq!(
+                bank.get_account(&nullifiers::address(&nf)).unwrap().owner(),
+                &id()
+            );
+        }
+        transcript.push(accepted);
+        let (duplicate, txs) = stage_transactions(&bank, &sponsor, bytes);
+        for tx in txs {
+            bank.process_transaction(&tx).unwrap();
+            transcript.push(tx);
+        }
+        let mut repeated = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
+        repeated.extend(instructions::finalize_and_close(
+            duplicate,
+            sponsor.pubkey(),
+            nfs,
+            None,
+        ));
+        let repeated = transaction(&bank, &sponsor, &repeated, &[]);
+        assert!(bank.process_transaction(&repeated).is_err());
+        assert!(bank.get_account(&duplicate).is_some());
+        transcript.push(repeated);
+    }
+    for tx in &transcript {
+        let _ = replay.process_transaction(tx);
+    }
+    for key in [pool_address(), sponsor.pubkey()] {
+        assert_eq!(bank.get_account(&key), replay.get_account(&key));
+    }
+    for payment in [&fixture.funding, &fixture.bundle] {
+        for action in payment.actions().iter() {
+            let key = nullifiers::address(&action.nullifier().to_bytes());
+            assert_eq!(bank.get_account(&key), replay.get_account(&key));
+        }
+    }
+}
+
+#[test]
 fn native_registration_funded_payments_atomic_rollback_and_bank_replay() {
     let sponsor = Keypair::new();
     let fixture = build_fixture_for(sponsor.pubkey().to_bytes()).unwrap();
@@ -589,20 +695,24 @@ fn recipient_bound_withdrawal_rejects_redirects_and_preserves_legacy_gate() {
     assert!(inactive.process_transaction(&tx).is_err());
     assert_eq!(inactive.get_balance(&recipient), 0);
     let sponsor_before = bank.get_balance(&sponsor.pubkey());
+    let staging_refund = bank.get_balance(&buffer);
     let tx = transaction(
         &bank,
         &sponsor,
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
             good,
+            instructions::close(buffer, sponsor.pubkey()),
         ],
         &[],
     );
     bank.process_transaction(&tx).unwrap();
+    assert!(1 + tx.signatures.len() * 64 + tx.message_data().len() <= 1232);
+    assert!(bank.get_account(&buffer).is_none());
     assert_eq!(bank.get_balance(&recipient), 1_000_000);
     assert_eq!(
         bank.get_balance(&sponsor.pubkey()),
-        sponsor_before - 2 * config.rent.minimum_balance(nullifiers::MARKER_BYTES)
+        sponsor_before + staging_refund - 2 * config.rent.minimum_balance(nullifiers::MARKER_BYTES)
     );
     assert_eq!(
         PoolState::decode(bank.get_account(&pool_address()).unwrap().data())

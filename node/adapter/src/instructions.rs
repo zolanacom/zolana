@@ -82,3 +82,17 @@ pub fn finalize_to(
         .push(AccountMeta::new(recipient, false));
     instruction
 }
+
+/// The runtime commits the payment and its rent refund together, or neither.
+pub fn finalize_and_close(
+    buffer: Pubkey,
+    sponsor: Pubkey,
+    nullifiers: [[u8; 32]; 2],
+    recipient: Option<Pubkey>,
+) -> [Instruction; 2] {
+    let payment = match recipient {
+        Some(recipient) => finalize_to(buffer, sponsor, nullifiers, recipient),
+        None => finalize(buffer, sponsor, nullifiers),
+    };
+    [payment, close(buffer, sponsor)]
+}

@@ -545,17 +545,17 @@ impl Chain {
             crate::upload::first_write(buffer, payer, &bytes),
         ]];
         batches.extend(crate::upload::remaining(buffer, payer, &bytes));
-        batches.push(vec![
-            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+        let mut finalization = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
+        finalization.extend(instructions::finalize_and_close(
+            buffer,
+            payer,
+            [[1; 32], [2; 32]],
             match kind {
-                crate::fees::PaymentKind::Send => {
-                    instructions::finalize(buffer, payer, [[1; 32], [2; 32]])
-                }
-                crate::fees::PaymentKind::Withdraw(recipient) => {
-                    instructions::finalize_to(buffer, payer, [[1; 32], [2; 32]], recipient)
-                }
+                crate::fees::PaymentKind::Send => None,
+                crate::fees::PaymentKind::Withdraw(recipient) => Some(recipient),
             },
-        ]);
+        ));
+        batches.push(finalization);
         let fee = |ix: &[Instruction]| -> Result<u64> {
             let mut tx = Transaction::new_with_payer(ix, Some(&payer));
             tx.message.recent_blockhash = hash;
@@ -584,7 +584,7 @@ impl Chain {
             public_balance: balance,
             refundable_staging_rent: rent,
             permanent_nullifier_rent: markers,
-            transaction_fees: normal_fees.checked_add(close_fee).ok_or("fee overflow")?,
+            transaction_fees: normal_fees,
             cleanup_reserve: reserve,
             maximum_gross_debit: maximum,
             minimum_remaining_balance: remaining,
@@ -1307,18 +1307,13 @@ impl Chain {
                 .nullifier()
                 .to_bytes()
         });
-        let finalization = [
-            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-            match payment.context.withdrawal_recipient {
-                Some(recipient) => instructions::finalize_to(
-                    buffer.pubkey(),
-                    sponsor.pubkey(),
-                    nullifiers,
-                    Pubkey::new_from_array(recipient),
-                ),
-                None => instructions::finalize(buffer.pubkey(), sponsor.pubkey(), nullifiers),
-            },
-        ];
+        let mut finalization = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
+        finalization.extend(instructions::finalize_and_close(
+            buffer.pubkey(),
+            sponsor.pubkey(),
+            nullifiers,
+            payment.context.withdrawal_recipient.map(Pubkey::new_from_array),
+        ));
         let (blockhash, last_valid_block_height) = self
             .rpc
             .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?;
@@ -1374,16 +1369,11 @@ impl Chain {
         fs::remove_file(pending_path)?;
         let finalization_ms = finalization_started.elapsed().as_millis();
         let cleanup_started = Instant::now();
-        // Finalization is already durable. Failure to reclaim staging rent must
-        // not report a failed payment or encourage an unsafe fresh deposit retry.
-        let reclaimed = self
-            .send(
-                sponsor,
-                &[instructions::close(buffer.pubkey(), sponsor.pubkey())],
-                &[],
-            )
-            .and_then(|signature| self.wait_closed(&buffer.pubkey(), &signature))
-            .is_ok();
+        // The same finalized transaction already closed the account. Verify its
+        // absence at that signature's slot; never submit a second close or wait
+        // for another transaction to finalize. A failed RPC check retains the
+        // original recovery record without turning an accepted payment into failure.
+        let reclaimed = self.wait_closed(&buffer.pubkey(), &signature).is_ok();
         let user_fee_charged = if self.user_fees.is_some() {
             read_private(&operation.staging, 4096)
                 .ok()
