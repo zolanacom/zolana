@@ -134,6 +134,9 @@ def run(root):
     finally:
         try:
             trial.close()
+        except BaseException as error:
+            result.update(status='failed', cleanup_error=str(error))
+            raise
         finally:
             atomic_json(evidence / 'result.json', result)
     print(json.dumps(result))
