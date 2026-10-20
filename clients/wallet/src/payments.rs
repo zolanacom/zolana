@@ -106,10 +106,13 @@ pub fn build_with_timings(
     let proof_key_ms = started.elapsed().as_millis();
     let started = Instant::now();
     let bytes = prover.build(wallet, state, sponsor, expires_at, payment)?;
-    Ok((bytes, BuildTimings {
-        proof_key_ms,
-        proof_build_ms: started.elapsed().as_millis(),
-    }))
+    Ok((
+        bytes,
+        BuildTimings {
+            proof_key_ms,
+            proof_build_ms: started.elapsed().as_millis(),
+        },
+    ))
 }
 
 /// Reuse the expensive circuit key across independent payments in a wallet session.
