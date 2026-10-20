@@ -583,7 +583,9 @@ impl Chain {
             let quoted = fee(batch)?;
             normal_fees = normal_fees.checked_add(quoted).ok_or("fee overflow")?;
             if (1..=uploads.len()).contains(&index) {
-                upload_repair_reserve = upload_repair_reserve.checked_add(quoted).ok_or("repair fee overflow")?;
+                upload_repair_reserve = upload_repair_reserve
+                    .checked_add(quoted)
+                    .ok_or("repair fee overflow")?;
             }
         }
         let close_fee = fee(&[instructions::close(buffer, payer)])?;
@@ -1688,6 +1690,96 @@ mod recovery_tests {
     use serde_json::json;
     use solana_rpc_client::mock_sender::MocksMap;
     use solana_rpc_client_api::request::RpcRequest;
+
+    #[test]
+    fn confirmed_failed_burst_repairs_once_with_a_new_identity_before_finalization() {
+        let network = Network {
+            network: [3; 32],
+            genesis_hash: bs58::encode([4; 32]).into_string(),
+        };
+        let wallet = WalletKey::generate(network.clone()).unwrap();
+        let sponsor = Keypair::new();
+        let prover = crate::payments::PaymentProver::new();
+        let state = WalletState::with_key(&wallet, 1000, prover.verifying_key()).unwrap();
+        let bytes = prover
+            .build(
+                &wallet,
+                &state,
+                sponsor.pubkey().to_bytes(),
+                100,
+                crate::payments::Payment::Deposit {
+                    amount: 1,
+                    recipient: &wallet.address_text(),
+                },
+            )
+            .unwrap();
+        let count = crate::upload::remaining(Pubkey::new_unique(), sponsor.pubkey(), &bytes).len();
+        let mut prefix = Buffer::initialize(
+            &vec![0; ACCOUNT_BYTES],
+            sponsor.pubkey().to_bytes(),
+            bytes.len() as u32,
+            payload_digest(&bytes),
+            100,
+        )
+        .unwrap();
+        prefix
+            .write(0, &bytes[..native_payments::staging::MAX_CHUNK_BYTES])
+            .unwrap();
+        let account = |data: Vec<u8>| {
+            json!({"context":{"slot":10},"value":{"lamports":1000,"owner":id().to_string(),
+            "executable":false,"rentEpoch":0,"data":[bs58::encode(data).into_string(),"base58"]}})
+        };
+        for new_hash in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let mut mocks = MocksMap::from_iter([
+                (RpcRequest::GetAccountInfo, account(state.pool.encode())),
+                (RpcRequest::GetAccountInfo, account(prefix.bytes().to_vec())),
+                (
+                    RpcRequest::GetAccountInfo,
+                    json!({"context":{"slot":10},"value":null}),
+                ),
+                (
+                    RpcRequest::GetSignatureStatuses,
+                    json!({"context":{"slot":10},"value":[{"slot":10,"confirmations":null,
+                    "err":null,"status":{"Ok":null},"confirmationStatus":"finalized"}]}),
+                ),
+                (
+                    RpcRequest::GetSignatureStatuses,
+                    json!({"context":{"slot":10},"value":vec![json!({"slot":10,"confirmations":null,
+                    "err":{"InstructionError":[0,"InvalidInstructionData"]},"status":{"Err":{"InstructionError":[0,"InvalidInstructionData"]}},
+                    "confirmationStatus":"finalized"});count]}),
+                ),
+            ]);
+            for byte in [1u8, if new_hash { 2 } else { 1 }, 3] {
+                mocks.insert(
+                    RpcRequest::GetLatestBlockhash,
+                    json!({"context":{"slot":10},"value":{
+                    "blockhash":bs58::encode([byte;32]).into_string(),"lastValidBlockHeight":150}}),
+                );
+            }
+            let chain = Chain {
+                rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
+                network: network.clone(),
+                sponsor_budget: None,
+                user_fees: None,
+                history_batches: false,
+                verification_key: None,
+            };
+            let result = chain.submit(&sponsor, &bytes, &operation);
+            if new_hash {
+                let receipt = result.unwrap();
+                assert_eq!(receipt.upload_failed_transactions, count);
+                assert_eq!(receipt.upload_repair_transactions, count);
+                assert_eq!(receipt.upload_transactions, 1 + 2 * count);
+                assert!(receipt.staging_rent_reclaimed);
+                assert!(!operation.pending.exists() && !operation.staging.exists());
+            } else {
+                assert!(result.err().unwrap().to_string().contains("fresh blockhash"));
+                assert!(operation.staging.exists() && !operation.pending.exists());
+            }
+        }
+    }
 
     #[test]
     fn failed_initialization_or_invalid_burst_observations_never_record_a_payment() {
