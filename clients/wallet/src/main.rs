@@ -8,9 +8,10 @@ use native_wallet::{
 use serde_json::json;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, time::Instant};
 
 fn run() -> Result<()> {
+    let command_started = Instant::now();
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
     if matches!(command.as_str(), "--help" | "-h") {
@@ -357,11 +358,13 @@ fn run() -> Result<()> {
     if command != "balance" {
         operation.ensure_resolved()?;
     }
+    let sync_started = Instant::now();
     let synced = if let Some(history) = args.get("--history") {
         chain.sync_cached_with_history(&wallet, &operation, Path::new(history))?
     } else {
         chain.sync_cached(&wallet, &operation)?
     };
+    let sync_ms = sync_started.elapsed().as_millis();
     if command == "balance" {
         let public = wallet.public_keypair().pubkey();
         println!(
@@ -454,15 +457,27 @@ fn run() -> Result<()> {
             amount,
         )?);
     }
-    let bytes = payments::build(
+    let expiry = chain.expiry()?;
+    let preparation_ms = command_started.elapsed().as_millis().saturating_sub(sync_ms);
+    let (bytes, proof_timings) = payments::build_with_timings(
         &wallet,
         &synced.state,
         sponsor.pubkey().to_bytes(),
-        chain.expiry()?,
+        expiry,
         payment,
     )?;
+    let submit_started = Instant::now();
     let submitted = chain.submit(&sponsor, &bytes, &operation)?;
-    println!("{}", serde_json::to_string(&submitted)?);
+    let mut result = serde_json::to_value(&submitted)?;
+    result["timings"] = json!({
+        "preparation_ms": preparation_ms,
+        "sync_ms": sync_ms,
+        "proof_key_ms": proof_timings.proof_key_ms,
+        "proof_build_ms": proof_timings.proof_build_ms,
+        "submit_ms": submit_started.elapsed().as_millis(),
+        "total_ms": command_started.elapsed().as_millis(),
+    });
+    println!("{}", result);
     Ok(())
 }
 

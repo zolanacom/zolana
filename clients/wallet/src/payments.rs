@@ -14,6 +14,7 @@ use orchard::{
     tree::Anchor,
     value::NoteValue,
 };
+use std::time::Instant;
 
 #[derive(Clone, Copy)]
 pub enum Payment<'a> {
@@ -83,7 +84,32 @@ pub fn build(
     expires_at: u64,
     payment: Payment<'_>,
 ) -> Result<Vec<u8>> {
-    PaymentProver::new().build(wallet, state, sponsor, expires_at, payment)
+    Ok(build_with_timings(wallet, state, sponsor, expires_at, payment)?.0)
+}
+
+/// Local durations only: no note, witness, seed or proof data enters telemetry.
+#[derive(serde::Serialize)]
+pub struct BuildTimings {
+    pub proof_key_ms: u128,
+    pub proof_build_ms: u128,
+}
+
+pub fn build_with_timings(
+    wallet: &WalletKey,
+    state: &WalletState,
+    sponsor: [u8; 32],
+    expires_at: u64,
+    payment: Payment<'_>,
+) -> Result<(Vec<u8>, BuildTimings)> {
+    let started = Instant::now();
+    let prover = PaymentProver::new();
+    let proof_key_ms = started.elapsed().as_millis();
+    let started = Instant::now();
+    let bytes = prover.build(wallet, state, sponsor, expires_at, payment)?;
+    Ok((bytes, BuildTimings {
+        proof_key_ms,
+        proof_build_ms: started.elapsed().as_millis(),
+    }))
 }
 
 /// Reuse the expensive circuit key across independent payments in a wallet session.

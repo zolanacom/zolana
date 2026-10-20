@@ -272,6 +272,7 @@ pub struct Submitted {
     pub upload_transactions: usize,
     pub upload_ms: u128,
     pub finalization_ms: u128,
+    pub cleanup_ms: u128,
     pub withdrawal: Option<crate::payments::WithdrawalReceipt>,
     pub user_fee_charged: Option<u64>,
 }
@@ -1372,6 +1373,7 @@ impl Chain {
         )?;
         fs::remove_file(pending_path)?;
         let finalization_ms = finalization_started.elapsed().as_millis();
+        let cleanup_started = Instant::now();
         // Finalization is already durable. Failure to reclaim staging rent must
         // not report a failed payment or encourage an unsafe fresh deposit retry.
         let reclaimed = self
@@ -1401,6 +1403,7 @@ impl Chain {
             upload_transactions,
             upload_ms,
             finalization_ms,
+            cleanup_ms: cleanup_started.elapsed().as_millis(),
             withdrawal: crate::payments::withdrawal_receipt(&payment),
             user_fee_charged,
         })
