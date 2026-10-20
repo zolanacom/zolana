@@ -14,6 +14,7 @@ pub mod operator;
 pub mod payments;
 pub mod progress;
 pub mod rpc;
+pub mod shielded;
 pub mod sponsor;
 mod upload;
 

@@ -14,6 +14,7 @@ import urllib.request
 from test_faucet import BoundedServer, Faucet
 
 METHODS = {
+    "getShieldedFeeQuote", "submitShieldedPayment", "getShieldedPaymentStatus",
     "getWalletReadBatch",
     "getWalletHistoryBlocks", "getWalletRetainedHistory", "getWalletCanonicalHistory",
     "getGenesisHash", "getHealth", "getVersion", "getAccountInfo", "getMultipleAccounts",
@@ -63,7 +64,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Gateway:
-    def __init__(self, faucet, history_root=None, archive_rpc=None):
+    def __init__(self, faucet, history_root=None, archive_rpc=None, relay_root=None):
+        self.relay = None
         self.faucet = faucet
         self.info = faucet.command("access-info")
         if self.info.get("invite_required") is not True:
@@ -92,6 +94,18 @@ class Gateway:
         if archive_rpc is not None:
             from gateway_archival import ArchiveRPC
             self.archive = ArchiveRPC(self, archive_rpc, ledger)
+
+        if relay_root is not None:
+            from shielded_relay import Relay
+            self.relay = Relay(relay_root)
+            if self.relay.config['network'] != self.info['network']:
+                self.relay.close()
+                raise ValueError('relay gateway network mismatch')
+
+    def shielded(self, request, proof):
+        if self.relay is None: raise ValueError('shielded relay is unavailable')
+        value = self.relay.dispatch(request['method'], request.get('params'), proof['fee_address'])
+        return json.dumps(dict(jsonrpc='2.0', id=request['id'], result=value)).encode()
 
     def canonical_history(self, request):
         if self.archive is None:
@@ -237,7 +251,8 @@ class Handler(BaseHTTPRequestHandler):
                     if time.monotonic() >= authorization_deadline:
                         raise ValueError('wallet authorization deadline exceeded')
                     self.server.app.faucet.command("authorize", proof)
-            if request['method'] == 'getWalletReadBatch':data = self.server.app.read_batch(request, calls)
+            if request['method'] in {'getShieldedFeeQuote', 'submitShieldedPayment', 'getShieldedPaymentStatus'}:data = self.server.app.shielded(request, proof)
+            elif request['method'] == 'getWalletReadBatch':data = self.server.app.read_batch(request, calls)
             elif request['method'] == 'getWalletRetainedHistory':data = self.server.app.retained_history(request)
             elif request['method'] == 'getWalletCanonicalHistory':data = self.server.app.canonical_history(request)
             else:data = self.server.app.history_blocks(request, slots) if request["method"] == "getWalletHistoryBlocks" else self.server.app.forward(raw)
@@ -272,10 +287,12 @@ def main():
     parser.add_argument("--tls-key",type=Path)
     parser.add_argument("--listener-config",type=Path,help="reviewed direct HTTPS binding; default remains loopback-only")
     parser.add_argument("--listener-sha256",help="independently reviewed exact configuration file digest")
+    parser.add_argument("--shielded-relay", type=Path, help="fixed owner-only relay configuration; opt-in")
     args = parser.parse_args()
     # Reuse the bounded, owner-only operator service interface; no worker starts here.
     faucet = Faucet(args.root, args.password_file)
-    app = Gateway(faucet,history_root=args.history,archive_rpc=args.archive_rpc)
+    app = Gateway(faucet,history_root=args.history,archive_rpc=args.archive_rpc,relay_root=args.shielded_relay)
+    if app.relay is not None: app.relay.start()
     from service_tls import listener
     server=listener(app.info['rpc_audience'],args.port,Handler,app,args.tls_cert,args.tls_key,args.listener_config,args.listener_sha256)
     try:
@@ -284,6 +301,7 @@ def main():
         pass
     finally:
         server.server_close()
+        if app.relay is not None: app.relay.close()
         faucet.close()
 
 

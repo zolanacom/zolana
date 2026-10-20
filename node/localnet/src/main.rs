@@ -2,8 +2,8 @@
 mod fault_lab;
 mod key_setup;
 mod load_lab;
-mod user_send_lab;
 mod pilot_treasury;
+mod user_send_lab;
 // Exercise the exact validator fault guard in a first-party workspace target.
 #[cfg(test)]
 #[allow(dead_code)]
@@ -97,12 +97,14 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
         }
     }
     let tail = restart_tail::plan(&nodes, vote_slot, floor)?;
-    let mut vote_data_slot=vote_slot;
-    let mut vote_ancestry_complete=true;
-    while vote_data_slot>floor {
-        let node=nodes.get(&vote_data_slot).ok_or("missing signed-vote data ancestry")?;
+    let mut vote_data_slot = vote_slot;
+    let mut vote_ancestry_complete = true;
+    while vote_data_slot > floor {
+        let node = nodes
+            .get(&vote_data_slot)
+            .ok_or("missing signed-vote data ancestry")?;
         vote_ancestry_complete &= node.full;
-        vote_data_slot=node.parent.ok_or("missing signed-vote data parent")?;
+        vote_data_slot = node.parent.ok_or("missing signed-vote data parent")?;
     }
     let slot = tail.checkpoint;
     let complete_tail = tail.complete_child;
@@ -116,9 +118,7 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
     if blockstore.is_dead(slot) || blockstore.has_duplicate_shreds_in_slot(slot) {
         return Err("restart checkpoint is dead or has duplicate shreds".into());
     }
-    if tower.root() >= slot
-        || blockstore.max_root() >= slot
-    {
+    if tower.root() >= slot || blockstore.max_root() >= slot {
         return Err(
             "tower is ahead of checkpoint or checkpoint would discard tower restoration".into(),
         );
@@ -143,17 +143,32 @@ fn restart_state(root: &Path, index: usize, name: &str, replay_plan: bool) -> Re
         return Err("checkpoint and signed tower vote are not on the same branch".into());
     }
     let mut hashes = serde_json::Map::new();
-    let mut restart_ancestors=serde_json::Map::new();
-    let mut current=slot;
+    let mut restart_ancestors = serde_json::Map::new();
+    let mut current = slot;
     for _ in 0..4096 {
-        let Some(meta)=blockstore.meta(current)? else {break;};
-        let Some(hash)=blockstore.get_bank_hash(current) else {break;};
-        if !meta.is_full() || blockstore.is_dead(current) || blockstore.has_duplicate_shreds_in_slot(current) {break;}
+        let Some(meta) = blockstore.meta(current)? else {
+            break;
+        };
+        let Some(hash) = blockstore.get_bank_hash(current) else {
+            break;
+        };
+        if !meta.is_full()
+            || blockstore.is_dead(current)
+            || blockstore.has_duplicate_shreds_in_slot(current)
+        {
+            break;
+        }
         restart_ancestors.insert(current.to_string(),json!({"bank_hash":hash.to_string(),"epoch":genesis.epoch_schedule.get_epoch(current),"leader_schedule_epoch":genesis.epoch_schedule.get_leader_schedule_epoch(current)}));
-        if current==0 {break;}
-        let Some(parent)=meta.parent_slot else {break;};
-        if parent>=current {return Err("invalid retained restart ancestor".into());}
-        current=parent;
+        if current == 0 {
+            break;
+        }
+        let Some(parent) = meta.parent_slot else {
+            break;
+        };
+        if parent >= current {
+            return Err("invalid retained restart ancestor".into());
+        }
+        current = parent;
     }
     let mut shreds = serde_json::Map::new();
     let mut dead_slots = Vec::new();
@@ -344,6 +359,10 @@ fn initialize(root: &Path, passwords: Option<(&[u8], &[u8])>) -> Result<()> {
     activate_feature(
         &mut genesis,
         native_payment_program::WITHDRAWAL_ACTIVATION_ID,
+    );
+    activate_feature(
+        &mut genesis,
+        native_payment_program::SHIELDED_FEE_ACTIVATION_ID,
     );
     genesis.poh_config.hashes_per_tick = None;
     genesis.epoch_schedule = EpochSchedule::custom(128, 128, false);
@@ -867,7 +886,10 @@ fn main() -> Result<()> {
         .next()
         .ok_or("expected init, exercise or recovery-check")?;
     let root = PathBuf::from(args.next().ok_or("expected disposable network directory")?);
-    if matches!(command.as_str(), "pilot-treasury-sign" | "pilot-treasury-check") {
+    if matches!(
+        command.as_str(),
+        "pilot-treasury-sign" | "pilot-treasury-check"
+    ) {
         return pilot_treasury::run(&command, &root, &args.collect::<Vec<_>>());
     }
     if command == "replay-user-send-check" {

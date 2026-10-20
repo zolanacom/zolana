@@ -758,3 +758,188 @@ fn recipient_bound_withdrawal_rejects_redirects_and_preserves_legacy_gate() {
     bank.process_transaction(&spend).unwrap();
     assert_eq!(bank.get_balance(&recipient), 990_000);
 }
+
+#[test]
+fn shielded_fee_native_atomicity_activation_and_exact_replay() {
+    use native_wallet::{
+        history::WalletState,
+        keys::{Network, WalletKey},
+        payments::{Payment, PaymentProver},
+    };
+    let relay = Keypair::new();
+    let mut config = genesis(&relay, true);
+    config.accounts.insert(
+        native_payment_program::SHIELDED_FEE_ACTIVATION_ID,
+        create_account(
+            &Feature {
+                activated_at: Some(0),
+            },
+            1_000_000,
+        )
+        .into(),
+    );
+    let mut disabled_config = config.clone();
+    disabled_config
+        .accounts
+        .remove(&native_payment_program::SHIELDED_FEE_ACTIVATION_ID);
+    let forks = BankForks::new_rw_arc(Bank::new_for_tests(&config));
+    let bank = forks.read().unwrap().root_bank();
+    let off_forks = BankForks::new_rw_arc(Bank::new_for_tests(&disabled_config));
+    let disabled = off_forks.read().unwrap().root_bank();
+    let network = Network {
+        network: FIXTURE_GENESIS,
+        genesis_hash: config.hash().to_string(),
+    };
+    let alice = WalletKey::generate(network.clone()).unwrap();
+    let bob = WalletKey::generate(network).unwrap();
+    let prover = PaymentProver::new();
+    let mut state = WalletState::new(&alice, config.rent.minimum_balance(STATE_BYTES)).unwrap();
+    assert_eq!(bank.get_balance(&alice.fee_keypair().pubkey()), 0);
+    assert_eq!(bank.get_balance(&alice.public_keypair().pubkey()), 0);
+    let deposit = prover
+        .build(
+            &alice,
+            &state,
+            relay.pubkey().to_bytes(),
+            100,
+            Payment::Deposit {
+                amount: 50_000_000,
+                recipient: &alice.address_text(),
+            },
+        )
+        .unwrap();
+    let mut transcript = Vec::new();
+    for target in [&bank, &disabled] {
+        let (buffer, txs) = stage_transactions(target, &relay, &deposit);
+        for tx in txs {
+            target.process_transaction(&tx).unwrap();
+            if std::sync::Arc::ptr_eq(target, &bank) {
+                transcript.push(tx);
+            }
+        }
+        let tx = finalize(target, &relay, buffer);
+        target.process_transaction(&tx).unwrap();
+        if std::sync::Arc::ptr_eq(target, &bank) {
+            transcript.push(tx);
+        }
+    }
+    let payment = wire::decode(FIXTURE_GENESIS, &deposit).unwrap();
+    state.accept(&payment.bundle, &payment.context, 0).unwrap();
+    let bytes = prover
+        .build(
+            &alice,
+            &state,
+            relay.pubkey().to_bytes(),
+            100,
+            Payment::ShieldedSend {
+                amount: 1_000_000,
+                recipient: &bob.address_text(),
+                fee: 3_000_000,
+            },
+        )
+        .unwrap();
+    let decoded = wire::decode(FIXTURE_GENESIS, &bytes).unwrap();
+    let markers: Vec<_> = decoded
+        .bundle
+        .actions()
+        .iter()
+        .map(|a| nullifiers::address(&a.nullifier().to_bytes()))
+        .collect();
+    let (buffer, txs) = stage_transactions(&bank, &relay, &bytes);
+    for tx in txs {
+        bank.process_transaction(&tx).unwrap();
+        transcript.push(tx);
+    }
+    let (disabled_buffer, disabled_txs) = stage_transactions(&disabled, &relay, &bytes);
+    for tx in disabled_txs {
+        disabled.process_transaction(&tx).unwrap();
+    }
+    let before_off = disabled.get_account(&pool_address());
+    assert!(disabled
+        .process_transaction(&finalize(&disabled, &relay, disabled_buffer))
+        .is_err());
+    assert_eq!(disabled.get_account(&pool_address()), before_off);
+    for key in &markers {
+        assert!(disabled.get_account(key).is_none());
+    }
+    let nfs = std::array::from_fn(|i| decoded.bundle.actions()[i].nullifier().to_bytes());
+    let mut instructions = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
+    instructions.extend(native_payment_program::instructions::finalize_and_close(
+        buffer,
+        relay.pubkey(),
+        nfs,
+        None,
+    ));
+    let before_pool = bank.get_account(&pool_address());
+    let before_buffer = bank.get_account(&buffer);
+    let mut broken = instructions.clone();
+    broken.push(system::transfer(
+        &relay.pubkey(),
+        &Pubkey::new_unique(),
+        u64::MAX,
+    ));
+    let failed = transaction(&bank, &relay, &broken, &[]);
+    assert!(bank.process_transaction(&failed).is_err());
+    transcript.push(failed);
+    assert_eq!(bank.get_account(&pool_address()), before_pool);
+    assert_eq!(bank.get_account(&buffer), before_buffer);
+    for key in &markers {
+        assert!(bank.get_account(key).is_none());
+    }
+    let relay_before = bank.get_balance(&relay.pubkey());
+    let refunded = bank.get_balance(&buffer);
+    let marker_rent = 2 * bank.get_minimum_balance_for_rent_exemption(nullifiers::MARKER_BYTES);
+    let final_tx = transaction(&bank, &relay, &instructions, &[]);
+    assert!(!final_tx
+        .message
+        .account_keys
+        .contains(&alice.fee_keypair().pubkey()));
+    assert!(!final_tx
+        .message
+        .account_keys
+        .contains(&alice.public_keypair().pubkey()));
+    bank.process_transaction(&final_tx).unwrap();
+    // Default test-genesis transaction fees are zero. Real RPC acceptance also
+    // checks nonzero signature fees and the relay's bounded gross-debit journal.
+    assert_eq!(
+        bank.get_balance(&relay.pubkey()),
+        relay_before + refunded + 3_000_000 - marker_rent
+    );
+    transcript.push(final_tx.clone());
+    assert!(bank.get_account(&buffer).is_none());
+    state.accept(&decoded.bundle, &decoded.context, 0).unwrap();
+    assert_eq!(state.balance().unwrap(), 46_000_000);
+    assert_eq!(state.pool.backing, 47_000_000);
+    assert_eq!(bank.get_balance(&alice.fee_keypair().pubkey()), 0);
+    let after_pool = bank.get_account(&pool_address());
+    // Replay in a new staging account: status-cache deduplication is not enough.
+    let (second, txs) = stage_transactions(&bank, &relay, &bytes);
+    for tx in txs {
+        bank.process_transaction(&tx).unwrap();
+        transcript.push(tx);
+    }
+    let duplicate = finalize(&bank, &relay, second);
+    assert!(bank.process_transaction(&duplicate).is_err());
+    transcript.push(duplicate);
+    assert_eq!(bank.get_account(&pool_address()), after_pool);
+    // Reconstruct every successful/failed transaction against the exact genesis.
+    let replay_forks = BankForks::new_rw_arc(Bank::new_for_tests(&config));
+    let replay = replay_forks.read().unwrap().root_bank();
+    for tx in transcript {
+        let _ = replay.process_transaction(&tx);
+    }
+    assert_eq!(
+        bank.get_account(&pool_address()),
+        replay.get_account(&pool_address())
+    );
+    assert_eq!(
+        bank.get_balance(&relay.pubkey()),
+        replay.get_balance(&relay.pubkey())
+    );
+    for key in &markers {
+        assert_eq!(bank.get_account(key), replay.get_account(key));
+    }
+    bank.freeze();
+    replay.freeze();
+    assert_eq!(bank.hash(), replay.hash());
+}

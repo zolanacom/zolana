@@ -25,6 +25,8 @@ class GatewayTests(unittest.TestCase):
                 if data!={'signature':'valid'}: raise ValueError('invalid proof')
         class App:
             faucet=Faucet()
+            def shielded(self, request, proof):
+                calls.append(('shielded',request['method'],proof)); return b'{"result":{"id":"original"}}'
             def read_batch(self, request, reads):
                 calls.append(('reads',reads)); return json.dumps({'result':reads}).encode()
             def history_blocks(self, request, slots):
@@ -49,6 +51,20 @@ class GatewayTests(unittest.TestCase):
         handler.send_header=lambda key,value:self.last_headers.__setitem__(key,value); handler.end_headers=lambda:None
         handler.do_POST()
         return response[0],json.loads(handler.wfile.getvalue()),calls
+
+    def test_shielded_methods_require_fresh_authorization_and_never_forward_to_raw_rpc(self):
+        header=base64.urlsafe_b64encode(b'{"signature":"valid"}').decode()
+        for method in ('getShieldedFeeQuote','submitShieldedPayment','getShieldedPaymentStatus'):
+            request=dict(jsonrpc='2.0',id=1,method=method,params=[])
+            code,_,seen=self.request(request)
+            self.assertEqual(code,403)
+            self.assertFalse(any(s[0] in ('shielded','forward') for s in seen))
+            code,_,seen=self.request(request,header)
+            self.assertEqual(code,200)
+            self.assertEqual([s[0] for s in seen],['ingress','authorize','shielded'])
+            code,_,seen=self.request(request,header,authorize_limit=0)
+            self.assertEqual(code,429)
+            self.assertFalse(any(s[0] in ('shielded','forward') for s in seen))
 
     def test_aggregate_is_read_only_bounded_and_each_read_consumes_authorization(self):
         calls=[dict(method='getFeeForMessage',params=['AAAA',{'commitment':'confirmed'}]),

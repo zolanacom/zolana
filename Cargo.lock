@@ -4445,6 +4445,7 @@ dependencies = [
  "solana-transaction",
  "solana-transaction-error",
  "solana-validator-exit",
+ "solana-version",
  "solana-vote-interface",
  "solana-vote-program",
  "tempfile",

@@ -165,6 +165,9 @@ fn finalize(context: &mut InvokeContext, slot: u64) -> Result<(), Error> {
     }
     let payment = wire::decode(state.network, buffer.payload()?)
         .map_err(|_| Error::InvalidInstructionData)?;
+    if payment.context.shielded_fee.is_some() && !context.get_feature_set().native_shielded_fees {
+        return Err(Error::InvalidInstructionData);
+    }
     if payment.context.sponsor != sponsor.to_bytes() {
         return Err(Error::MissingRequiredSignature);
     }

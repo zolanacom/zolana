@@ -200,6 +200,13 @@ pub(crate) struct AcceptedHistoryPayment {
     effects: VerifiedPayment,
 }
 impl AcceptedHistoryPayment {
+    pub(crate) fn payload_digest(&self) -> Result<[u8; 32]> {
+        Ok(native_payments::staging::payload_digest(&wire::encode(
+            PoolState::decode(&self.before)?.network,
+            &self.payment.context,
+            &self.payment.bundle,
+        )?))
+    }
     pub(crate) fn withdrawal(&self) -> Option<crate::payments::WithdrawalReceipt> {
         crate::payments::withdrawal_receipt(&self.payment)
     }

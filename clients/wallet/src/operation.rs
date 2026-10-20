@@ -10,6 +10,7 @@ pub struct WalletOperation {
     _lock: File,
     receipt: Option<PathBuf>,
     pub(crate) pending: PathBuf,
+    pub(crate) shielded: PathBuf,
     pub(crate) staging: PathBuf,
     pub(crate) scan_cache: PathBuf,
 }
@@ -36,6 +37,7 @@ impl WalletOperation {
             _lock: file,
             receipt: None,
             pending: suffix("pending.json"),
+            shielded: suffix("shielded.json"),
             staging: suffix("staging.json"),
             scan_cache: suffix("scan-cache"),
         })
@@ -53,7 +55,19 @@ impl WalletOperation {
         Ok(())
     }
 
+    pub fn has_staging(&self) -> bool {
+        self.staging.exists()
+    }
+    pub fn has_pending(&self) -> bool {
+        self.pending.exists()
+    }
+
     pub fn ensure_resolved(&self) -> Result<()> {
+        if self.shielded.exists() {
+            return Err(
+                "an unresolved shielded-fee payment exists; run native-shielded resolve".into(),
+            );
+        }
         if self.pending.exists() {
             return Err("an unresolved payment exists; run resolve before sending again".into());
         }

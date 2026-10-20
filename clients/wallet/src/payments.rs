@@ -18,10 +18,26 @@ use std::time::Instant;
 
 #[derive(Clone, Copy)]
 pub enum Payment<'a> {
-    Deposit { amount: u64, recipient: &'a str },
-    Send { amount: u64, recipient: &'a str },
-    Withdraw { amount: u64 },
-    WithdrawTo { amount: u64, recipient: [u8; 32] },
+    Deposit {
+        amount: u64,
+        recipient: &'a str,
+    },
+    Send {
+        amount: u64,
+        recipient: &'a str,
+    },
+    ShieldedSend {
+        amount: u64,
+        recipient: &'a str,
+        fee: u64,
+    },
+    Withdraw {
+        amount: u64,
+    },
+    WithdrawTo {
+        amount: u64,
+        recipient: [u8; 32],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +72,22 @@ pub fn validate(wallet: &WalletKey, state: &WalletState, payment: &Payment<'_>) 
         Payment::Send { amount, recipient } => {
             decode_address(&wallet.network, recipient)?;
             (*amount, true)
+        }
+        Payment::ShieldedSend {
+            amount,
+            recipient,
+            fee,
+        } => {
+            decode_address(&wallet.network, recipient)?;
+            if *amount == 0 || *fee == 0 {
+                return Err("payment and shielded fee must be positive".into());
+            }
+            (
+                amount
+                    .checked_add(*fee)
+                    .ok_or("payment plus fee overflow")?,
+                true,
+            )
         }
         Payment::Withdraw { amount } => (*amount, true),
         Payment::WithdrawTo { amount, recipient } => {
@@ -160,6 +192,16 @@ impl PaymentProver {
                 Some(decode_address(&wallet.network, recipient)?),
                 true,
             ),
+            Payment::ShieldedSend {
+                amount,
+                recipient,
+                fee,
+            } => (
+                amount,
+                i64::try_from(fee)?,
+                Some(decode_address(&wallet.network, recipient)?),
+                true,
+            ),
             Payment::Withdraw { amount } => (amount, i64::try_from(amount)?, None, true),
             Payment::WithdrawTo { amount, .. } => (amount, i64::try_from(amount)?, None, true),
         };
@@ -175,6 +217,11 @@ impl PaymentProver {
             version.default_flags(),
             anchor,
         )?;
+        let spend_amount = if let Payment::ShieldedSend { fee, .. } = payment {
+            amount.checked_add(fee).ok_or("payment plus fee overflow")?
+        } else {
+            amount
+        };
         if spends {
             let mut notes = state.unspent();
             notes.sort_by_key(|note| std::cmp::Reverse(note.note.value().inner()));
@@ -188,21 +235,21 @@ impl PaymentProver {
                 total = total
                     .checked_add(owned.note.value().inner())
                     .ok_or("note value overflow")?;
-                if total >= amount {
+                if total >= spend_amount {
                     break;
                 }
             }
-            if total < amount {
+            if total < spend_amount {
                 return Err(
                 "insufficient value in two notes; consolidate smaller notes before this payment"
                     .into(),
             );
             }
-            if total > amount {
+            if total > spend_amount {
                 builder.add_output(
                     None,
                     wallet.change_address(),
-                    NoteValue::from_raw(total - amount),
+                    NoteValue::from_raw(total - spend_amount),
                     [0; 512],
                 )?;
             }
@@ -222,6 +269,10 @@ impl PaymentProver {
             public_value_balance: public_balance,
             sponsor,
 
+            shielded_fee: match payment {
+                Payment::ShieldedSend { fee, .. } => Some(fee),
+                _ => None,
+            },
             withdrawal_recipient: match payment {
                 Payment::WithdrawTo { recipient, .. } => Some(recipient),
                 _ => None,
@@ -245,6 +296,125 @@ mod tests {
     use super::*;
     use crate::{history::WalletState, keys::Network};
     use solana_signer::Signer;
+
+    #[test]
+    fn shielded_fee_is_paid_from_notes_and_cannot_be_redirected_or_downgraded() {
+        let network = Network {
+            network: [9; 32],
+            genesis_hash: bs58::encode([8; 32]).into_string(),
+        };
+        let alice = WalletKey::generate(network.clone()).unwrap();
+        let bob = WalletKey::generate(network).unwrap();
+        let relay = [6; 32];
+        let prover = PaymentProver::new();
+        let mut a = WalletState::with_key(&alice, 1000, prover.verifying_key()).unwrap();
+        let mut b = WalletState::with_key(&bob, 1000, prover.verifying_key()).unwrap();
+        let deposit = prover
+            .build(
+                &alice,
+                &a,
+                relay,
+                100,
+                Payment::Deposit {
+                    amount: 1000,
+                    recipient: &alice.address_text(),
+                },
+            )
+            .unwrap();
+        let decoded = wire::decode(alice.network.network, &deposit).unwrap();
+        a.accept(&decoded.bundle, &decoded.context, 1).unwrap();
+        b.accept(&decoded.bundle, &decoded.context, 1).unwrap();
+        for (amount, fee) in [
+            (1000, 1),
+            (0, 1),
+            (1, 0),
+            (u64::MAX, 1),
+            (1, i64::MAX as u64),
+        ] {
+            assert!(validate(
+                &alice,
+                &a,
+                &Payment::ShieldedSend {
+                    amount,
+                    recipient: &bob.address_text(),
+                    fee
+                }
+            )
+            .is_err());
+        }
+        let bytes = prover
+            .build(
+                &alice,
+                &a,
+                relay,
+                100,
+                Payment::ShieldedSend {
+                    amount: 100,
+                    recipient: &bob.address_text(),
+                    fee: 30,
+                },
+            )
+            .unwrap();
+        assert_eq!(&bytes[..8], b"NPAY0003");
+        assert_eq!(bytes.len(), 9230);
+        let original = wire::decode(alice.network.network, &bytes).unwrap();
+        assert_eq!(original.context.public_value_balance, 30);
+        assert!(withdrawal_receipt(&original).is_none());
+        for context in [
+            AuthorizationContext {
+                sponsor: [7; 32],
+                ..original.context
+            },
+            AuthorizationContext {
+                expires_at: 99,
+                ..original.context
+            },
+            AuthorizationContext {
+                shielded_fee: None,
+                ..original.context
+            },
+        ] {
+            assert!(a.accept(&original.bundle, &context, 1).is_err());
+        }
+        for context in [
+            AuthorizationContext {
+                shielded_fee: Some(0),
+                ..original.context
+            },
+            AuthorizationContext {
+                shielded_fee: Some(31),
+                ..original.context
+            },
+            AuthorizationContext {
+                withdrawal_recipient: Some([8; 32]),
+                ..original.context
+            },
+        ] {
+            assert!(wire::encode(alice.network.network, &context, &original.bundle).is_err());
+        }
+        let mut malformed = bytes.clone();
+        malformed[88..96].copy_from_slice(&31u64.to_le_bytes());
+        assert!(wire::decode(alice.network.network, &malformed).is_err());
+        for length in [0, 8, 9222, 9229, 9231, 16384] {
+            let mut truncated = bytes.clone();
+            truncated.resize(length, 0);
+            assert!(wire::decode(alice.network.network, &truncated).is_err());
+        }
+        a.accept(&original.bundle, &original.context, 1).unwrap();
+        b.accept(&original.bundle, &original.context, 1).unwrap();
+        assert_eq!(a.balance().unwrap(), 870);
+        assert_eq!(b.balance().unwrap(), 100);
+        assert_eq!(a.pool.backing, 970);
+        assert!(a.accept(&original.bundle, &original.context, 1).is_err());
+        let restored = crate::history::Replay::restore_with_key(
+            &alice,
+            crate::history::Replay::from_state(a).snapshot(),
+            Some(prover.verifying_key()),
+        )
+        .unwrap();
+        assert_eq!(restored.state.balance().unwrap(), 870);
+        restored.state.reconcile(&b.pool).unwrap();
+    }
 
     #[test]
     fn withdrawal_recipient_is_authorized_and_cannot_be_downgraded_to_sponsor() {

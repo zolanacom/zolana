@@ -7,10 +7,15 @@ use solana_pubkey::Pubkey;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaymentKind {
     Send,
+    ShieldedSend,
     Withdraw(Pubkey),
 }
 impl PaymentKind {
     pub fn from_context(context: &AuthorizationContext) -> Result<Self> {
+        context.validate()?;
+        if context.shielded_fee.is_some() {
+            return Ok(Self::ShieldedSend);
+        }
         match (context.public_value_balance, context.withdrawal_recipient) {
             (0, None) => Ok(Self::Send),
             (value, Some(recipient)) if value > 0 && recipient != [0; 32] => {
@@ -24,12 +29,14 @@ impl PaymentKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Send => "send",
+            Self::ShieldedSend => "shielded-send",
             Self::Withdraw(_) => "withdraw",
         }
     }
     pub fn payload_len(self) -> usize {
         match self {
             Self::Send => 9222,
+            Self::ShieldedSend => 9230,
             Self::Withdraw(_) => 9254,
         }
     }
@@ -106,6 +113,7 @@ mod tests {
             public_value_balance: 0,
             sponsor: [7; 32],
             withdrawal_recipient: None,
+            shielded_fee: None,
         };
         assert_eq!(
             PaymentKind::from_context(&context).unwrap(),

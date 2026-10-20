@@ -1,6 +1,6 @@
 mod archival;
-mod retained;
 mod reads;
+mod retained;
 use crate::{
     archive::{Archive, HistoryBlock, Writer},
     cache::{self, Checkpoint},
@@ -63,6 +63,7 @@ pub struct Synced {
     canonical_from_slot: u64,
     withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
     finalizations: BTreeMap<String, (String, bool)>,
+    payment_digests: BTreeMap<String, [u8; 32]>,
     pub scan: ScanStats,
 }
 
@@ -93,6 +94,7 @@ struct ScanResult {
     canonical_from_slot: u64,
     withdrawals: BTreeMap<String, crate::payments::WithdrawalReceipt>,
     finalizations: BTreeMap<String, (String, bool)>,
+    payment_digests: BTreeMap<String, [u8; 32]>,
     scan: ScanStats,
 }
 
@@ -197,6 +199,10 @@ impl ScanResult {
                     data: ix.data.clone(),
                 };
                 if let Some(accepted) = self.replay.apply_verified(&instruction, block.slot)? {
+                    if canonical {
+                        self.payment_digests
+                            .insert(tx.signatures[0].to_string(), accepted.payload_digest()?);
+                    }
                     if let Some(withdrawal) = accepted.withdrawal().filter(|_| canonical) {
                         self.withdrawals
                             .insert(tx.signatures[0].to_string(), withdrawal);
@@ -232,6 +238,7 @@ impl ScanResult {
                 canonical_from_slot: self.canonical_from_slot,
                 withdrawals: self.withdrawals.clone(),
                 finalizations: self.finalizations.clone(),
+                payment_digests: self.payment_digests.clone(),
                 scan: self.scan.clone(),
             })
             .collect()
@@ -530,13 +537,17 @@ impl Chain {
         self.payment_fee_quote(payer, crate::fees::PaymentKind::Send)
     }
 
-    fn payment_fee_quote(
+    pub fn payment_fee_quote(
         &self,
         payer: Pubkey,
         kind: crate::fees::PaymentKind,
     ) -> Result<crate::fees::Quote> {
         let reads::QuoteInputs {
-            rent, markers, remaining, balance, hash,
+            rent,
+            markers,
+            remaining,
+            balance,
+            hash,
         } = self.quote_inputs(payer)?;
         let hash = hash.parse()?;
         let bytes = vec![0; kind.payload_len()]; // Exact two-action shape; no proof or private recipient is sent.
@@ -554,7 +565,7 @@ impl Chain {
             payer,
             [[1; 32], [2; 32]],
             match kind {
-                crate::fees::PaymentKind::Send => None,
+                crate::fees::PaymentKind::Send | crate::fees::PaymentKind::ShieldedSend => None,
                 crate::fees::PaymentKind::Withdraw(recipient) => Some(recipient),
             },
         ));
@@ -624,9 +635,7 @@ impl Chain {
             return Err("fee modes cannot be combined".into());
         }
         if self.sponsor_budget.is_some() || self.user_fees.is_some() {
-            let debit = fee
-                .checked_add(native_debit)
-                .ok_or("fee debit overflow")?;
+            let debit = fee.checked_add(native_debit).ok_or("fee debit overflow")?;
             if let Some(budget) = &self.sponsor_budget {
                 budget.charge(debit)?;
             }
@@ -659,6 +668,117 @@ impl Chain {
             }
         }
         Ok(())
+    }
+
+    pub fn validate_shielded_payload(&self, bytes: &[u8]) -> Result<()> {
+        let payment = wire::decode(self.network.network, bytes)?;
+        if payment.context.shielded_fee.is_none() {
+            return Err("shielded fee required".into());
+        }
+        let current = self
+            .rpc
+            .get_account_with_commitment(&pool_address(), CommitmentConfig::confirmed())?;
+        let pool = current.value.ok_or("pool missing")?;
+        if pool.owner != id() {
+            return Err("pool owner mismatch".into());
+        }
+        let state = PoolState::decode(&pool.data)?;
+        let addresses: Vec<_> = payment
+            .bundle
+            .actions()
+            .iter()
+            .map(|a| native_payment_program::nullifiers::address(&a.nullifier().to_bytes()))
+            .collect();
+        let markers = self
+            .rpc
+            .get_multiple_accounts_with_commitment(&addresses, CommitmentConfig::confirmed())?;
+        if markers.value.len() != 2
+            || markers
+                .value
+                .iter()
+                .flatten()
+                .any(|a| a.owner != solana_sdk_ids::system_program::id() || !a.data.is_empty())
+        {
+            return Err("nullifier spent or unavailable".into());
+        }
+        native_payments::verification::PaymentVerifier::new(
+            self.network.network,
+            orchard::circuit::VerifyingKey::build(
+                native_payments::verification::bundle_version().circuit_version(),
+            ),
+        )?
+        .verify(
+            &payment.bundle,
+            &payment.context,
+            &native_payments::verification::ValidationView {
+                current_slot: current.context.slot,
+                accepted_anchors: &state.roots(),
+                spent_nullifiers: &BTreeSet::new(),
+                authorized_public_value_balance: payment.context.public_value_balance,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn relay_rpc(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        if ![
+            "getShieldedFeeQuote",
+            "submitShieldedPayment",
+            "getShieldedPaymentStatus",
+        ]
+        .contains(&method)
+        {
+            return Err("unsupported shielded relay method".into());
+        }
+        Ok(self.rpc.send(
+            solana_rpc_client_api::request::RpcRequest::Custom { method },
+            params,
+        )?)
+    }
+
+    /// Full canonical replay authenticates the exact proof, not a relay status assertion.
+    pub fn shielded_outcome(
+        &self,
+        wallet: &WalletKey,
+        bytes: &[u8],
+        signature: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let payment = wire::decode(self.network.network, bytes)?;
+        if payment.context.shielded_fee.is_none() {
+            return Err("shielded fee required".into());
+        }
+        let synced = self
+            .scan_source_mode(&[wallet], None, None, None, false)?
+            .finish()
+            .pop()
+            .ok_or("missing canonical recovery state")?;
+        let digest = payload_digest(bytes);
+        let canonical = synced
+            .payment_digests
+            .iter()
+            .find(|(_, value)| **value == digest);
+        if let Some((original, _)) = canonical {
+            if signature.is_some_and(|s| s != original) {
+                return Err("relay signature differs from canonical payment".into());
+            }
+            return Ok(
+                serde_json::json!({"accepted":true,"signature":original,"shielded_fee":payment.context.shielded_fee,
+                "balance":synced.state.balance()?,"expires_at":payment.context.expires_at}),
+            );
+        }
+        if synced.slot > payment.context.expires_at {
+            return Ok(
+                serde_json::json!({"accepted":false,"expired_without_execution":true,"balance":synced.state.balance()?}),
+            );
+        }
+        Err(
+            "shielded payment remains unresolved; original proof retained, no new spend authorized"
+                .into(),
+        )
     }
 
     pub fn sync(&self, wallet: &WalletKey) -> Result<Synced> {
@@ -931,6 +1051,7 @@ impl Chain {
             canonical_from_slot,
             withdrawals: BTreeMap::new(),
             finalizations: BTreeMap::new(),
+            payment_digests: BTreeMap::new(),
             scan: stats,
         };
         if let Some(history) = history {
@@ -1025,13 +1146,14 @@ impl Chain {
         }
         // Retained proof effects reconstruct state, but retained metadata is
         // never evidence that a particular outer transaction was canonical.
-        if history.is_some() {
+        if let Some(history) = history {
             result.accepted.clear();
             result.withdrawals.clear();
             result.finalizations.clear();
+            result.payment_digests.clear();
             result.canonical_from_slot = result
                 .canonical_from_slot
-                .max(history.unwrap().tip().min(target).saturating_add(1));
+                .max(history.tip().min(target).saturating_add(1));
         }
         Ok(result)
     }
@@ -1166,7 +1288,9 @@ impl Chain {
         } else {
             vec![0; transactions.len()]
         };
-        transactions.iter().zip(fees)
+        transactions
+            .iter()
+            .zip(fees)
             .map(|(tx, fee)| {
                 // Debit each actual attempt durably before its first broadcast.
                 // Quoting a future chunk never spends/refills its authorization.
@@ -1180,7 +1304,8 @@ impl Chain {
                         ..Default::default()
                     },
                 )?)
-            }).collect()
+            })
+            .collect()
     }
 
     pub fn resolve(
@@ -1713,6 +1838,131 @@ mod recovery_tests {
     use solana_rpc_client_api::request::RpcRequest;
 
     #[test]
+    fn shielded_quote_cap_and_untrusted_receipts_cannot_clear_or_replace_intent() {
+        use crate::{
+            payments::{Payment, PaymentProver},
+            shielded::{self, Packet},
+        };
+        let network = Network {
+            network: [3; 32],
+            genesis_hash: bs58::encode([4; 32]).into_string(),
+        };
+        let wallet = WalletKey::generate(network.clone()).unwrap();
+        let relay = Keypair::new();
+        let make_chain = |mocks| Chain {
+            rpc: RpcClient::new_mock_with_mocks_map("fails", mocks),
+            network: network.clone(),
+            sponsor_budget: None,
+            user_fees: None,
+            history_batches: false,
+            verification_key: None,
+        };
+        let quote_method = RpcRequest::Custom {
+            method: "getShieldedFeeQuote",
+        };
+        for (fee, quoted_network) in [
+            (0, network.clone()),
+            (31, network.clone()),
+            (
+                30,
+                Network {
+                    network: [5; 32],
+                    ..network.clone()
+                },
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let chain = make_chain(MocksMap::from_iter([(
+                quote_method,
+                json!({"format":"native-shielded-fee-quote-v1",
+                "network":quoted_network,"payer":relay.pubkey().to_string(),"fee":fee}),
+            )]));
+            assert!(
+                shielded::send(&chain, &wallet, &operation, 100, &wallet.address_text(), 30)
+                    .is_err()
+            );
+            assert!(
+                !operation.shielded.exists()
+                    && !operation.pending.exists()
+                    && !operation.staging.exists()
+            );
+        }
+        let prover = PaymentProver::new();
+        let mut state = WalletState::with_key(&wallet, 1000, prover.verifying_key()).unwrap();
+        let deposit = prover
+            .build(
+                &wallet,
+                &state,
+                relay.pubkey().to_bytes(),
+                100,
+                Payment::Deposit {
+                    amount: 1000,
+                    recipient: &wallet.address_text(),
+                },
+            )
+            .unwrap();
+        let decoded = wire::decode(network.network, &deposit).unwrap();
+        state.accept(&decoded.bundle, &decoded.context, 1).unwrap();
+        let bytes = prover
+            .build(
+                &wallet,
+                &state,
+                relay.pubkey().to_bytes(),
+                100,
+                Payment::ShieldedSend {
+                    amount: 100,
+                    recipient: &wallet.address_text(),
+                    fee: 30,
+                },
+            )
+            .unwrap();
+        let packet = Packet {
+            network: network.clone(),
+            payload: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        let id = packet.id().unwrap();
+        for (ack, status) in [
+            (json!({"id":"substituted"}), json!({})),
+            (
+                json!({"id":id}),
+                json!({"id":"substituted","state":"accepted"}),
+            ),
+            (
+                json!({"id":id}),
+                json!({"id":id,"state":"accepted","signature":"invented"}),
+            ),
+            (json!({"id":id}), json!({"id":id,"state":"aborted"})),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
+            let raw = serde_json::to_vec(&packet).unwrap();
+            write_private_new(&operation.shielded, &raw).unwrap();
+            let chain = make_chain(MocksMap::from_iter([
+                (
+                    RpcRequest::Custom {
+                        method: "submitShieldedPayment",
+                    },
+                    ack,
+                ),
+                (
+                    RpcRequest::Custom {
+                        method: "getShieldedPaymentStatus",
+                    },
+                    status,
+                ),
+            ]));
+            assert!(shielded::recover(&chain, &wallet, &operation, false).is_err());
+            assert_eq!(
+                read_private(&operation.shielded, 20000).unwrap().as_slice(),
+                raw.as_slice()
+            );
+            assert!(operation.ensure_resolved().is_err());
+            assert!(!operation.pending.exists() && !operation.staging.exists());
+        }
+    }
+
+    #[test]
     fn confirmed_failed_burst_repairs_once_with_a_new_identity_before_finalization() {
         let network = Network {
             network: [3; 32],
@@ -1796,7 +2046,11 @@ mod recovery_tests {
                 assert!(receipt.staging_rent_reclaimed);
                 assert!(!operation.pending.exists() && !operation.staging.exists());
             } else {
-                assert!(result.err().unwrap().to_string().contains("fresh blockhash"));
+                assert!(result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("fresh blockhash"));
                 assert!(operation.staging.exists() && !operation.pending.exists());
             }
         }
@@ -2677,39 +2931,66 @@ mod recovery_tests {
             let operation = WalletOperation::acquire(&root.path().join("wallet")).unwrap();
             let payer = Keypair::new();
             let network = fixture(&operation, &payer, 100);
-            let mut record: StagingRecovery = serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
+            let mut record: StagingRecovery =
+                serde_json::from_slice(&read_private(&operation.staging, 4096).unwrap()).unwrap();
             let mut authorization = crate::fees::Authorization::new(100, 10).unwrap();
             authorization.charged = 80;
             record.user_fee = Some(authorization);
-            crate::sponsor::replace(&operation.staging, &serde_json::to_vec(&record).unwrap()).unwrap();
+            crate::sponsor::replace(&operation.staging, &serde_json::to_vec(&record).unwrap())
+                .unwrap();
             let original = fs::read(&operation.staging).unwrap();
-            let transactions: Vec<_> = (0..2).map(|_| Transaction::new_signed_with_payer(
-                &[instructions::seal(Pubkey::new_unique(), payer.pubkey())], Some(&payer.pubkey()), &[&payer], Default::default()
-            )).collect();
+            let transactions: Vec<_> = (0..2)
+                .map(|_| {
+                    Transaction::new_signed_with_payer(
+                        &[instructions::seal(Pubkey::new_unique(), payer.pubkey())],
+                        Some(&payer.pubkey()),
+                        &[&payer],
+                        Default::default(),
+                    )
+                })
+                .collect();
             let mut response: Vec<_> = transactions.iter().map(|tx| json!({
                 "request":{"method":"getFeeForMessage","params":[base64::engine::general_purpose::STANDARD.encode(tx.message.serialize()),{"commitment":"confirmed"}]},
                 "result":{"context":{"slot":34},"value":7}
             })).collect();
             match mode {
-                "missing" => { response.pop(); },
+                "missing" => {
+                    response.pop();
+                }
                 "null" => response[1]["result"]["value"] = json!(null),
                 "substituted" => response[1]["request"]["params"][0] = json!("AAAA"),
                 _ => (),
             }
             let mocks = MocksMap::from_iter([
-                (RpcRequest::Custom { method: "getWalletReadBatch" }, json!(response)),
-                (RpcRequest::SendTransaction, json!(transactions[0].signatures[0].to_string())),
+                (
+                    RpcRequest::Custom {
+                        method: "getWalletReadBatch",
+                    },
+                    json!(response),
+                ),
+                (
+                    RpcRequest::SendTransaction,
+                    json!(transactions[0].signatures[0].to_string()),
+                ),
             ]);
-            let chain = Chain { rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks), network,
-                sponsor_budget: None, user_fees: Some((payer.pubkey(),100,operation.staging.clone())),
-                history_batches: true, verification_key: None };
+            let chain = Chain {
+                rpc: RpcClient::new_mock_with_mocks_map("succeeds", mocks),
+                network,
+                sponsor_budget: None,
+                user_fees: Some((payer.pubkey(), 100, operation.staging.clone())),
+                history_batches: true,
+                verification_key: None,
+            };
             assert!(chain.send_uploads(&transactions).is_err());
             assert!(!operation.pending.exists());
-            let saved: StagingRecovery = serde_json::from_slice(&fs::read(&operation.staging).unwrap()).unwrap();
+            let saved: StagingRecovery =
+                serde_json::from_slice(&fs::read(&operation.staging).unwrap()).unwrap();
             let saved = saved.user_fee.unwrap();
             assert_eq!(saved.cleanup_reserve, 10);
             assert_eq!(saved.charged, if mode == "cap" { 87 } else { 80 });
-            if mode != "cap" { assert_eq!(fs::read(&operation.staging).unwrap(), original); }
+            if mode != "cap" {
+                assert_eq!(fs::read(&operation.staging).unwrap(), original);
+            }
         }
     }
 

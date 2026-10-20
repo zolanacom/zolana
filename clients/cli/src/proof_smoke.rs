@@ -64,6 +64,7 @@ impl DepositProver {
             sponsor,
 
             withdrawal_recipient: None,
+            shielded_fee: None,
         };
         let digest = authorization_digest(network, &bundle, &context)?;
         Ok((
@@ -169,6 +170,7 @@ pub fn build_fixture_for_network(
         sponsor,
 
         withdrawal_recipient: None,
+        shielded_fee: None,
     };
     let digest = authorization_digest(network, &funding, &funding_context)?;
     let funding = funding

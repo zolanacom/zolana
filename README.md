@@ -70,6 +70,12 @@ The [offline recovery runner](docs/offline-recovery-runbook.md) covers multiple 
 
 For fresh private rehearsals, the [host isolation runbook](docs/host-isolation-runbook.md) adds owner-only Unix transport for raw validator RPC, including recovery inspection. Invited clients still use verified HTTPS. The private transport closes loopback port impersonation; a dedicated OS service identity is required to exclude unrelated processes running as the operator's own user.
 
+The separate opt-in [shielded-fee send path](docs/shielded-fees-runbook.md) spends
+payment plus an exact fee from private notes, using a shared relay for public
+transport costs. It adds separately activated native V3 authorization and durable
+canonical recovery. It does not change existing wallet UI defaults or installed
+releases. See [the protocol decision](docs/decisions/0032-shielded-fees.md).
+
 ## Attribution
 
 Upstream attribution is preserved in [THIRD_PARTY.md](THIRD_PARTY.md) and vendored notices.

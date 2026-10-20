@@ -26,6 +26,23 @@ pub struct AuthorizationContext {
     pub sponsor: [u8; 32],
     /// Present only for recipient-bound withdrawals; never the fee payer role.
     pub withdrawal_recipient: Option<[u8; 32]>,
+    /// Exact public relay reimbursement, funded by shielded inputs (V3 only).
+    pub shielded_fee: Option<u64>,
+}
+
+impl AuthorizationContext {
+    pub fn validate(&self) -> Result<(), Error> {
+        if let Some(fee) = self.shielded_fee {
+            if fee == 0
+                || fee > i64::MAX as u64
+                || self.public_value_balance != fee as i64
+                || self.withdrawal_recipient.is_some()
+            {
+                return Err(Error::InvalidContext);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Authenticated node state, never values asserted by an untrusted RPC caller.
@@ -52,6 +69,7 @@ pub fn authorization_digest<A: Authorization>(
     bundle: &Bundle<A, i64>,
     context: &AuthorizationContext,
 ) -> Result<[u8; 32], Error> {
+    context.validate()?;
     if genesis == [0; 32]
         || context.sponsor == [0; 32]
         || context
@@ -69,7 +87,9 @@ pub fn authorization_digest<A: Authorization>(
         .into();
     let mut state = blake2b_simd::Params::new()
         .hash_length(32)
-        .personal(if context.withdrawal_recipient.is_some() {
+        .personal(if context.shielded_fee.is_some() {
+            b"NativePayAuthV3!"
+        } else if context.withdrawal_recipient.is_some() {
             b"NativePayAuthV2!"
         } else {
             b"NativePayAuthV1!"
@@ -81,6 +101,9 @@ pub fn authorization_digest<A: Authorization>(
     state.update(&context.expires_at.to_le_bytes());
     state.update(&context.public_value_balance.to_le_bytes());
     state.update(&context.sponsor);
+    if let Some(fee) = context.shielded_fee {
+        state.update(&fee.to_le_bytes());
+    }
     if let Some(recipient) = context.withdrawal_recipient {
         state.update(&recipient);
     }

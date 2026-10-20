@@ -1,5 +1,6 @@
 #[derive(Clone, Copy, Default)]
 pub struct SVMFeatureSet {
+    pub native_shielded_fees: bool,
     pub native_recipient_withdrawals: bool,
     pub move_precompile_verification_to_svm: bool,
     pub stricter_abi_and_runtime_constraints: bool,
@@ -42,6 +43,7 @@ pub struct SVMFeatureSet {
 impl SVMFeatureSet {
     pub fn all_enabled() -> Self {
         Self {
+            native_shielded_fees: true,
             native_recipient_withdrawals: true,
             move_precompile_verification_to_svm: true,
             stricter_abi_and_runtime_constraints: true,

@@ -5,7 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "native-validator"
+path = "src/bin/native-validator.rs"
+
 [dependencies]
+log = "0.4"
+solana-version = { path = "../agave/version" }
 # Select the exact patched networking/concurrency revisions used by upstream.
 quinn = "=0.11.8"
 quinn-proto = "=0.11.12"

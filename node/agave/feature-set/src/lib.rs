@@ -102,6 +102,7 @@ impl FeatureSet {
 
     pub fn runtime_features(&self) -> SVMFeatureSet {
         SVMFeatureSet {
+            native_shielded_fees: self.is_active(&native_shielded_fees::id()),
             native_recipient_withdrawals: self.is_active(&native_recipient_withdrawals::id()),
             move_precompile_verification_to_svm: self
                 .is_active(&move_precompile_verification_to_svm::id()),
@@ -1141,8 +1142,18 @@ pub mod native_recipient_withdrawals {
     }
 }
 
+pub mod native_shielded_fees {
+    pub const fn id() -> solana_pubkey::Pubkey {
+        solana_pubkey::Pubkey::new_from_array([
+            194, 47, 61, 8, 73, 55, 102, 89, 124, 17, 171, 200, 51, 88, 71, 95, 72, 43, 189, 112,
+            141, 91, 229, 76, 97, 21, 3, 87, 217, 161, 55, 209,
+        ])
+    }
+}
+
 pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::new(|| {
     [
+        (native_shielded_fees::id(), "Native shielded payment fee reimbursement"),
         (native_recipient_withdrawals::id(), "Native withdrawals to independently authorized recipients"),
         (native_private_payments::id(), "Native private payments for the development fork"),
         (secp256k1_program_enabled::id(), "secp256k1 program"),

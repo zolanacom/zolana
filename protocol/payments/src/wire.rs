@@ -18,6 +18,7 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"NPAY0001";
 const WITHDRAWAL_MAGIC: &[u8; 8] = b"NPAY0002";
+const SHIELDED_FEE_MAGIC: &[u8; 8] = b"NPAY0003";
 const ACTION_BYTES: usize = 884;
 const HEADER_BYTES: usize = 122;
 
@@ -31,6 +32,7 @@ pub fn encode(
     context: &AuthorizationContext,
     bundle: &Bundle<Authorized, i64>,
 ) -> Result<Vec<u8>, Error> {
+    context.validate()?;
     if genesis == [0; 32] || context.sponsor == [0; 32] {
         return Err(Error::InvalidContext);
     }
@@ -53,7 +55,9 @@ pub fn encode(
         return Err(Error::WrongValueBalance);
     }
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(if context.withdrawal_recipient.is_some() {
+    bytes.extend_from_slice(if context.shielded_fee.is_some() {
+        SHIELDED_FEE_MAGIC
+    } else if context.withdrawal_recipient.is_some() {
         WITHDRAWAL_MAGIC
     } else {
         MAGIC
@@ -62,6 +66,9 @@ pub fn encode(
     bytes.extend_from_slice(&context.expires_at.to_le_bytes());
     bytes.extend_from_slice(&context.public_value_balance.to_le_bytes());
     bytes.extend_from_slice(&context.sponsor);
+    if let Some(fee) = context.shielded_fee {
+        bytes.extend_from_slice(&fee.to_le_bytes());
+    }
     if let Some(recipient) = context.withdrawal_recipient {
         bytes.extend_from_slice(&recipient);
     }
@@ -93,7 +100,9 @@ pub fn encode(
 pub fn decode(genesis: [u8; 32], bytes: &[u8]) -> Result<DecodedPayment, Error> {
     let proof_length = Proof::expected_proof_size(ACTION_COUNT);
     let recipient_bound = bytes.get(..8) == Some(WITHDRAWAL_MAGIC.as_slice());
+    let shielded_fee = bytes.get(..8) == Some(SHIELDED_FEE_MAGIC.as_slice());
     let expected_length = HEADER_BYTES
+        + if shielded_fee { 8 } else { 0 }
         + if recipient_bound { 32 } else { 0 }
         + ACTION_COUNT * ACTION_BYTES
         + 4
@@ -104,7 +113,7 @@ pub fn decode(genesis: [u8; 32], bytes: &[u8]) -> Result<DecodedPayment, Error> 
     }
     let mut input = bytes;
     let magic = take::<8>(&mut input)?;
-    if &magic != MAGIC && &magic != WITHDRAWAL_MAGIC {
+    if &magic != MAGIC && &magic != WITHDRAWAL_MAGIC && &magic != SHIELDED_FEE_MAGIC {
         return Err(Error::UnsupportedVersion);
     }
     if genesis == [0; 32] || take::<32>(&mut input)? != genesis {
@@ -114,12 +123,18 @@ pub fn decode(genesis: [u8; 32], bytes: &[u8]) -> Result<DecodedPayment, Error> 
         expires_at: u64::from_le_bytes(take(&mut input)?),
         public_value_balance: i64::from_le_bytes(take(&mut input)?),
         sponsor: take(&mut input)?,
+        shielded_fee: if shielded_fee {
+            Some(u64::from_le_bytes(take(&mut input)?))
+        } else {
+            None
+        },
         withdrawal_recipient: if recipient_bound {
             Some(take(&mut input)?)
         } else {
             None
         },
     };
+    context.validate()?;
     if context.sponsor == [0; 32] {
         return Err(Error::InvalidContext);
     }
