@@ -152,7 +152,7 @@ def checks(output,timeout=3600):
     compiler,version=toolchain();env,roots,_,_=environment(output,source,(PROJECT/'.tools/cargo').resolve(),compiler)
     path_audit(read(output/'native-wallet',64*1024*1024),roots);linkage(output/'native-wallet')
     command=[str(compiler/'bin/cargo'),'test','--offline','--locked','--profile','wallet-release','--target',version['host'],'-j','1',
-        '-p','native-wallet','-p','native-payments','--lib','--','--test-threads=1']
+        '-p','native-wallet','-p','native-payments','--features','native-wallet/apple-fast-field','--lib','--','--test-threads=1']
     atomic(output/'tests-state.json',{'status':'running','jobs':1,'validators_started':0})
     try:
         seconds=run_compiler(command,source,env,output/'tests.log',timeout)
@@ -176,7 +176,7 @@ def build(output,timeout=3600):
     atomic(output/'state.json',marker)
     try:
         probe_result=probes(output,env,roots,rust,native,compiler)
-        command=[str(compiler/'bin/cargo'),'build','--offline','--locked','--profile','wallet-release','--target',version['host'],'-j','1','-p','native-wallet','--bin','native-wallet']
+        command=[str(compiler/'bin/cargo'),'build','--offline','--locked','--profile','wallet-release','--target',version['host'],'-j','1','-p','native-wallet','--bin','native-wallet','--features','apple-fast-field']
         marker.update(status='building',jobs=1,priority='nice-15');atomic(output/'state.json',marker)
         print(json.dumps({'building':True,'jobs':1,'priority':'nice-15','offline':True,'separate_output':True}),flush=True)
         seconds=run_compiler(command,source,env,output/'build.log',timeout)

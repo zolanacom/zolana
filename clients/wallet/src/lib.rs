@@ -4,6 +4,7 @@
 pub mod access;
 mod archive;
 mod cache;
+pub mod command_session;
 pub mod connection;
 pub mod faucet;
 pub mod fees;
