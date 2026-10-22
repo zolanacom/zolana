@@ -4,6 +4,9 @@
 //! mutate a ledger, authorize a deposit debit, or constitute a deployed chain.
 #![forbid(unsafe_code)]
 
+pub mod anchors;
+pub mod envelope;
+pub mod native_accounts;
 pub mod staging;
 pub mod state;
 pub mod verification;

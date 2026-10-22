@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zolana encrypted storage acceptance</title>
+<h1>Encrypted browser storage acceptance</h1>
+<p>Disposable synthetic ciphertext only. No wallet keys, RPC calls, payments or existing wallet databases.</p>
+<p>This checks persistence and recovery, not encryption or chain finality.</p>
+<button id="run" type="button">Run storage tests</button>
+<button id="prepare" type="button">Prepare a pending packet for reload</button>
+<button id="recover" type="button">Check prepared reload recovery</button>
+<pre id="output">Ready. All databases use fresh random fixture identities.</pre>
+<script type="module" src="./storage-test.js"></script>
+</html>

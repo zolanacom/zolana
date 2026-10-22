@@ -36,7 +36,7 @@ this archive is for local rehearsal, not an installer ready for distribution.
    balances and payments require the configured network and retained history.
 
 Wallet data lives outside the archive in your user application-data directory,
-under Zolana Test Wallet and this chain's genesis hash. --data-dir selects
+in the wallet's folder for this chain's genesis hash. --data-dir selects
 another owner-only directory. Reuse that directory when updating a bundle.
 Never delete an unfinished payment's files or start a replacement payment to
 resolve an unknown result. Use Check previous payment, then Recover upload rent.
@@ -54,16 +54,22 @@ unknown payment executed or never executed. Recovery tries complete canonical
 RPC history when needed; if unavailable, keep the pending file and ask the local
 operator for archival RPC recovery. Never send a replacement as a recovery step.
 
-This package has no operator sponsor. It receives native private payments,
-sends privately and withdraws with user-paid fees after its separate public fee
-account has test coins, including upfront refundable upload rent. Send shows
-the fee address, public funding shortfall and gross debit cap before you confirm.
-Private value is separate from gas; the recipient receives the full amount.
-If this profile configures a test faucet, select Get test coins + gas after
-saving and confirming your recovery file. One grant supplies 1,000,000 private
-test units and 150,000,000 public gas units. The wallet checks finalization
-for a few minutes; Check coins + gas resumes the same claim after a restart.
-Restoring your seed reuses the original grant; it cannot request a second one.
+This package has no operator sponsor. Native private-send profiles pay the
+reviewed fee from private notes: no public gas balance of your own is needed
+for those sends. Review both the amount and private fee before confirming.
+Public withdrawals still require a funded public fee account. Legacy send
+profiles also use that public fee account, including upfront refundable upload
+rent; their review shows its funding shortfall and authorized gross debit cap.
+The private recipient receives the reviewed amount.
+
+A configured test-coin endpoint does not guarantee a live funded grant worker.
+After saving and confirming your recovery file, use Check test coin grant
+(invited profiles) or Request test coins. The returned grant status describes
+queued, started, ready or operator-recovery state. Queued is not finalized.
+The wallet checks an original queued/started grant for a few minutes; check the
+same grant when you return. Grant amounts and whether public gas is included
+depend on the selected testnet policy. Native private-only grants do not include
+public gas. Restoring your seed reuses the original grant, not a second one.
 If invitation access is enabled, the first screen after backup is Join the
 private testnet. Enter your operator invitation once to admit this wallet and
 queue the same fixed grant. Restoring your seed restores access without another
@@ -74,16 +80,19 @@ Profiles without a faucet still require separately provisioned test balances.
 Faucet capacity and funds are finite; there is no automatic refill.
 
 The wallet service and browser use your password locally. RPC and, when requested, a signed public faucet claim leave the device.
-The seed/password never leave the local wallet. The faucet sees the private
-receiving and public fee addresses together. Its test grants have no monetary
-value; the public gas transfer reveals a funding relationship. Remote profiles use
+The seed/password and spending/viewing keys stay in the local wallet. Native
+proof generation and payment decryption happen on this device. The invited
+gateway knows your membership and receiving address, sees IP/request timing,
+and can link submissions to membership. Test grants have no monetary value;
+a legacy public-gas grant also reveals a public funding relationship. Remote profiles use
 normal certificate-validated HTTPS, no redirects and no proxy auto-discovery.
 Local HTTPS profiles may carry a public local test CA. This adds trust only
 inside this wallet; certificate expiry and hostname verification remain enabled.
 No CA/server private key or raw-RPC operator credential is in the package. If a
 certificate expires or verification fails, keep the original wallet and contact
 the local operator; do not disable TLS checks.
-The RPC/validator consensus is trusted; this is not a light client. Shielded
-contents are private; public fees, funding/withdrawal amounts and timing are
-visible. This prototype is unaudited; physical phone/Safari and remote hosting
+The RPC/validator consensus is trusted; this is not a light client. Native shielded-send amounts and private counterparties are hidden from the
+public ledger. Shared relay payer, fee, timing and nullifiers remain public;
+public deposits/withdrawals reveal their amounts and public accounts. This is
+not anonymity from the gateway operator or post-quantum security. This prototype is unaudited; physical phone/Safari and remote hosting
 have not been accepted. Keep recovery files and passwords out of bug reports.

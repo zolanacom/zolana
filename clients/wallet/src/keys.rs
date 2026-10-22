@@ -1,8 +1,4 @@
 use crate::Result;
-use chacha20poly1305::{
-    aead::{Aead, Payload},
-    KeyInit, XChaCha20Poly1305, XNonce,
-};
 use orchard::{
     keys::{FullViewingKey, Scope, SpendingKey},
     Address,
@@ -16,9 +12,6 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const ROUNDS: u32 = 600_000;
-const FORMAT: &str = "native-wallet-seed-v1";
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Network {
     pub network: [u8; 32],
@@ -28,7 +21,7 @@ pub struct Network {
 impl Network {
     pub fn load(path: &Path) -> Result<Self> {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-        if value["pool_format"] != "NPOOL003"
+        if !matches!(value["pool_format"].as_str(), Some("NPOOL003" | "NPOOL004"))
             || value["program"] != native_payment_program::id().to_string()
             || value["pool"] != native_payment_program::pool_address().to_string()
         {
@@ -49,32 +42,28 @@ impl Network {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    format: String,
-    network: Network,
-    rounds: u32,
-    salt: [u8; 16],
-    nonce: [u8; 24],
-    ciphertext: Vec<u8>,
-}
-
-impl Envelope {
-    fn aad(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&(
-            &self.format,
-            &self.network,
-            self.rounds,
-            self.salt,
-            self.nonce,
-        ))?)
+fn seed_network(network: &Network) -> native_wallet_seed::Network {
+    native_wallet_seed::Network {
+        network: network.network,
+        genesis_hash: network.genesis_hash.clone(),
     }
 }
 
 pub struct WalletKey {
     seed: Zeroizing<[u8; 32]>,
     pub network: Network,
+}
+
+impl native_wallet_core::WalletKeys for WalletKey {
+    fn network_domain(&self) -> [u8; 32] {
+        self.network.network
+    }
+    fn genesis_hash(&self) -> &str {
+        &self.network.genesis_hash
+    }
+    fn spending_key(&self) -> native_wallet_core::Result<SpendingKey> {
+        Ok(WalletKey::spending_key(self))
+    }
 }
 
 impl WalletKey {
@@ -147,65 +136,39 @@ impl WalletKey {
     }
 
     pub fn save(&self, path: &Path, password: &[u8]) -> Result<()> {
-        validate_password(password)?;
-        let mut envelope = Envelope {
-            format: FORMAT.to_owned(),
-            network: self.network.clone(),
-            rounds: ROUNDS,
-            salt: rand::random(),
-            nonce: rand::random(),
-            ciphertext: Vec::new(),
-        };
-        let key = derive(password, &envelope.salt);
-        let cipher =
-            XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| "key initialization failed")?;
-        envelope.ciphertext = cipher
-            .encrypt(
-                &XNonce::from(envelope.nonce),
-                Payload {
-                    msg: &self.seed[..],
-                    aad: &envelope.aad()?,
-                },
-            )
-            .map_err(|_| "seed encryption failed")?;
-        write_private_new(path, &serde_json::to_vec_pretty(&envelope)?)
+        let encoded =
+            native_wallet_seed::encrypt(&self.seed, password, &seed_network(&self.network))?;
+        write_private_new(path, &encoded)
     }
 
     pub fn open(path: &Path, password: &[u8], expected: &Network) -> Result<Self> {
         validate_password(password)?;
         let bytes = read_private(path, 4096)?;
-        let envelope: Envelope = serde_json::from_slice(&bytes)?;
-        if envelope.format != FORMAT
-            || envelope.rounds != ROUNDS
-            || envelope.ciphertext.len() != 48
-            || &envelope.network != expected
-        {
-            return Err("seed format or network mismatch".into());
-        }
-        expected.validate()?;
-        let key = derive(password, &envelope.salt);
-        let cipher =
-            XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| "key initialization failed")?;
-        let plain = Zeroizing::new(
-            cipher
-                .decrypt(
-                    &XNonce::from(envelope.nonce),
-                    Payload {
-                        msg: &envelope.ciphertext,
-                        aad: &envelope.aad()?,
-                    },
-                )
-                .map_err(|_| "password is incorrect or encrypted seed was modified")?,
-        );
-        let seed: [u8; 32] = plain
-            .as_slice()
-            .try_into()
-            .map_err(|_| "invalid seed length")?;
-        if !bool::from(SpendingKey::from_bytes(seed).is_some()) {
+        Self::open_encrypted(&bytes, password, expected)
+    }
+
+    /// Authenticate exactly the bytes installed into a fresh wallet path.
+    /// Copying the same authenticated ciphertext creates no new encryption and
+    /// never reuses a nonce to encrypt a different plaintext. No KDF is reduced.
+    pub fn restore(
+        backup: &Path,
+        path: &Path,
+        password: &[u8],
+        expected: &Network,
+    ) -> Result<Self> {
+        let bytes = read_private(backup, 4096)?;
+        let wallet = Self::open_encrypted(&bytes, password, expected)?;
+        write_private_new(path, &bytes)?;
+        Ok(wallet)
+    }
+
+    fn open_encrypted(bytes: &[u8], password: &[u8], expected: &Network) -> Result<Self> {
+        let seed = native_wallet_seed::decrypt(bytes, password, &seed_network(expected))?;
+        if !bool::from(SpendingKey::from_bytes(*seed).is_some()) {
             return Err("invalid spending seed".into());
         }
         Ok(Self {
-            seed: Zeroizing::new(seed),
+            seed,
             network: expected.clone(),
         })
     }
@@ -216,15 +179,11 @@ impl WalletKey {
 }
 
 pub(crate) fn derive(password: &[u8], salt: &[u8]) -> Zeroizing<[u8; 32]> {
-    let mut output = Zeroizing::new([0; 32]);
-    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(password, salt, ROUNDS, &mut output[..]);
-    output
+    native_wallet_seed::derive(password, salt)
 }
 
 pub(crate) fn validate_password(password: &[u8]) -> Result<()> {
-    if !(12..=1024).contains(&password.len()) {
-        return Err("password file must contain 12 to 1024 bytes".into());
-    }
+    native_wallet_seed::validate_password(password)?;
     Ok(())
 }
 
@@ -291,54 +250,173 @@ pub fn write_private_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn encode_address(network: &Network, address: &Address) -> String {
-    let mut bytes = vec![1];
-    bytes.extend_from_slice(&network_tag(network));
-    bytes.extend_from_slice(&address.to_raw_address_bytes());
-    let checksum = blake2b_simd::blake2b(&bytes);
-    bytes.extend_from_slice(&checksum.as_bytes()[..4]);
-    format!("npriv1{}", bs58::encode(bytes).into_string())
+    native_wallet_core::encode_address(network.network, &network.genesis_hash, address)
 }
-
 pub fn decode_address(network: &Network, text: &str) -> Result<Address> {
-    if text.len() > 140 {
-        return Err("invalid receiving address length".into());
-    }
-    let bytes = bs58::decode(
-        text.strip_prefix("npriv1")
-            .ok_or("invalid receiving address prefix")?,
-    )
-    .into_vec()?;
-    if bytes.len() != 80
-        || bytes[0] != 1
-        || bytes[1..33] != network_tag(network)
-        || blake2b_simd::blake2b(&bytes[..76]).as_bytes()[..4] != bytes[76..]
-    {
-        return Err("receiving address checksum or network mismatch".into());
-    }
-    Option::from(Address::from_raw_address_bytes(
-        &bytes[33..76].try_into().unwrap(),
-    ))
-    .ok_or_else(|| "invalid shielded address encoding".into())
-}
-
-fn network_tag(network: &Network) -> [u8; 32] {
-    let mut state = blake2b_simd::Params::new()
-        .hash_length(32)
-        .personal(b"NPayWalletAddrV1")
-        .to_state();
-    state.update(&network.network);
-    state.update(network.genesis_hash.as_bytes());
-    state
-        .finalize()
-        .as_bytes()
-        .try_into()
-        .expect("32-byte address domain")
+    native_wallet_core::decode_address(network.network, &network.genesis_hash, text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use solana_signer::Signer;
+
+    #[test]
+    fn browser_vault_fixed_fixture_public_identity_reference() {
+        // Public disposable fixture shared with the browser-vault parity test.
+        // Print only public identity: never a seed, password or private key.
+        let network = Network {
+            network: [7; 32],
+            genesis_hash: "1".repeat(32),
+        };
+        assert!(bool::from(SpendingKey::from_bytes([7; 32]).is_some()));
+        let wallet = WalletKey {
+            seed: Zeroizing::new([7; 32]),
+            network: network.clone(),
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "fixture":"synthetic-public-vault-identity-v1", "network":network,
+                "address":wallet.address_text(), "public_key":wallet.public_keypair().pubkey().to_string(),
+                "fee_address":wallet.fee_keypair().pubkey().to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn shared_seed_codec_opens_original_native_reference_envelope() {
+        use chacha20poly1305::{
+            aead::{Aead, Payload},
+            KeyInit, XChaCha20Poly1305, XNonce,
+        };
+        #[derive(Serialize)]
+        struct LegacyEnvelope {
+            format: String,
+            network: Network,
+            rounds: u32,
+            salt: [u8; 16],
+            nonce: [u8; 24],
+            ciphertext: Vec<u8>,
+        }
+        let network = Network {
+            network: [71; 32],
+            genesis_hash: bs58::encode([72; 32]).into_string(),
+        };
+        let original = WalletKey::generate(network.clone()).unwrap();
+        let password = b"independent native compatibility fixture";
+        let mut envelope = LegacyEnvelope {
+            format: "native-wallet-seed-v1".into(),
+            network: network.clone(),
+            rounds: 600_000,
+            salt: [3; 16],
+            nonce: [4; 24],
+            ciphertext: Vec::new(),
+        };
+        let aad = serde_json::to_vec(&(
+            &envelope.format,
+            &envelope.network,
+            envelope.rounds,
+            envelope.salt,
+            envelope.nonce,
+        ))
+        .unwrap();
+        let mut key = Zeroizing::new([0; 32]);
+        pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(password, &envelope.salt, 600_000, &mut key[..]);
+        envelope.ciphertext = XChaCha20Poly1305::new_from_slice(&key[..])
+            .unwrap()
+            .encrypt(
+                &XNonce::from(envelope.nonce),
+                Payload {
+                    msg: &original.seed[..],
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+        let encoded = serde_json::to_vec_pretty(&envelope).unwrap();
+        let restored = WalletKey::open_encrypted(&encoded, password, &network).unwrap();
+        assert_eq!(restored.address_text(), original.address_text());
+        assert_eq!(
+            restored.public_keypair().pubkey(),
+            original.public_keypair().pubkey()
+        );
+        assert_eq!(
+            restored.fee_keypair().pubkey(),
+            original.fee_keypair().pubkey()
+        );
+        assert_eq!(
+            *native_wallet_seed::decrypt(&encoded, password, &seed_network(&network)).unwrap(),
+            *original.seed
+        );
+    }
+
+    #[test]
+    fn authenticated_restore_installs_exact_ciphertext_and_never_publishes_invalid_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = Network {
+            network: [31; 32],
+            genesis_hash: bs58::encode([32; 32]).into_string(),
+        };
+        let wallet = WalletKey::generate(network.clone()).unwrap();
+        let backup = dir.path().join("backup");
+        let password = b"authenticated backup restore password";
+        wallet.save(&backup, password).unwrap();
+        let original = fs::read(&backup).unwrap();
+        let target = dir.path().join("wallet");
+        let restored = WalletKey::restore(&backup, &target, password, &network).unwrap();
+        assert_eq!(restored.address_text(), wallet.address_text());
+        assert_eq!(
+            restored.fee_keypair().pubkey(),
+            wallet.fee_keypair().pubkey()
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(WalletKey::restore(&backup, &target, password, &network).is_err());
+        assert_eq!(fs::read(&target).unwrap(), original);
+        let rejected = dir.path().join("rejected");
+        assert!(
+            WalletKey::restore(&backup, &rejected, b"a different wrong password", &network)
+                .is_err()
+        );
+        assert!(!rejected.exists());
+        let mut wrong = network.clone();
+        wrong.network[0] ^= 1;
+        assert!(WalletKey::restore(&backup, &rejected, password, &wrong).is_err());
+        assert!(!rejected.exists());
+        let mut envelope: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        envelope["ciphertext"][0] =
+            serde_json::json!(envelope["ciphertext"][0].as_u64().unwrap() ^ 1);
+        let corrupt = dir.path().join("corrupt");
+        write_private_new(&corrupt, &serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert!(WalletKey::restore(&corrupt, &rejected, password, &network).is_err());
+        assert!(!rejected.exists());
+        assert_eq!(fs::read(&backup).unwrap(), original);
+    }
+
+    #[test]
+    fn explicit_pool_profiles_preserve_the_serialized_network_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("network.json");
+        let network = Network {
+            network: [43; 32],
+            genesis_hash: bs58::encode([44; 32]).into_string(),
+        };
+        for format in ["NPOOL003", "NPOOL004"] {
+            let mut profile = serde_json::to_value(&network).unwrap();
+            profile["pool_format"] = format.into();
+            profile["program"] = native_payment_program::id().to_string().into();
+            profile["pool"] = native_payment_program::pool_address().to_string().into();
+            fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+            let restored = Network::load(&path).unwrap();
+            assert_eq!(restored, network);
+            let identity = serde_json::to_value(&restored).unwrap();
+            assert_eq!(identity.as_object().unwrap().len(), 2);
+            assert!(identity.get("pool_format").is_none());
+        }
+    }
 
     #[test]
     fn encrypted_seed_restores_independent_network_bound_public_signing_authority() {
@@ -408,8 +486,9 @@ mod tests {
                 .to_raw_address_bytes(),
             wallet.receiving_address().to_raw_address_bytes()
         );
-        let mut data: Envelope = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        data.ciphertext[0] ^= 1;
+        let mut data: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        data["ciphertext"][0] = serde_json::json!(data["ciphertext"][0].as_u64().unwrap() ^ 1);
         fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
         assert!(WalletKey::open(&path, b"a unique local test password", &network).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();

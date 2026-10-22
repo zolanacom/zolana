@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocol/payments", "clients/cli", "clients/wallet", "node/adapter", "node/validator-check", "node/localnet", "node/rpc-access"]
+members = ["protocol/payments", "clients/cli", "clients/wallet", "clients/wallet-seed", "clients/wallet-core", "clients/browser-core", "node/adapter", "node/validator-check", "node/localnet", "node/rpc-access"]
 exclude = ["node/agave"]
 resolver = "2"
 
@@ -10,7 +10,9 @@ rust-version = "1.92"
 license = "MIT"
 
 [workspace.dependencies]
-orchard = "=0.16.0"
+# Platform-neutral circuit material. Native consumers retain multicore through
+# native-payments' default feature; the browser feasibility slice opts out.
+orchard = { version = "=0.16.0", default-features = false, features = ["circuit", "std", "zeroize"] }
 blake2b_simd = "1"
 rand = { version = "0.10", features = ["sys_rng"] }
 incrementalmerkletree = "0.9"
@@ -31,6 +33,12 @@ opt-level = 2
 # Keep local wallet runs representative of optimized cryptographic execution.
 [profile.dev.package.native-wallet]
 opt-level = 2
+
+# Match release arithmetic for the opt-in assembly backend. Its upstream
+# debug operand checks have no constant-time guarantee; separate tests exercise
+# those contracts with assertions enabled. All payment validation stays active.
+[profile.dev.package.pasta_curves]
+debug-assertions = false
 
 # Separate, bounded release candidate; never replaces local debug artifacts.
 [profile.wallet-release]

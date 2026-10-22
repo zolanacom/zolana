@@ -1,4 +1,4 @@
-//! Internal snapshots are accepted only after wallet-key authenticated decryption.
+//! Plaintext state codec; caller must authenticate encrypted checkpoint first.
 use super::*;
 use orchard::{
     note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
@@ -7,19 +7,19 @@ use orchard::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Internal plaintext checkpoint data. Hosts must authenticate decryption before
+/// importing, and encrypt before exporting to disk/JS. This is not a WASM API.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ReplaySnapshot {
-    pool: Vec<u8>,
-    leaves: Vec<[u8; 32]>,
-    spent: BTreeSet<[u8; 32]>,
-    notes: Vec<SavedNote>,
-    buffers: Vec<([u8; 32], Vec<u8>)>,
+pub struct StateSnapshot {
+    pub pool: Vec<u8>,
+    pub leaves: Vec<[u8; 32]>,
+    pub spent: BTreeSet<[u8; 32]>,
+    pub notes: Vec<SavedNote>,
 }
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SavedNote {
+pub struct SavedNote {
     position: u32,
     recipient: Vec<u8>,
     value: u64,
@@ -28,19 +28,18 @@ struct SavedNote {
     version: u8,
 }
 
-impl Replay {
-    pub(crate) fn snapshot(&self) -> ReplaySnapshot {
-        ReplaySnapshot {
-            pool: self.state.pool.encode(),
+impl WalletState {
+    pub fn snapshot(&self) -> StateSnapshot {
+        StateSnapshot {
+            pool: self.pool.encode(),
             leaves: self
-                .state
+                .tree
                 .leaves
                 .iter()
                 .map(MerkleHashOrchard::to_bytes)
                 .collect(),
-            spent: self.state.spent.clone(),
+            spent: self.spent.clone(),
             notes: self
-                .state
                 .notes
                 .iter()
                 .map(|owned| SavedNote {
@@ -55,26 +54,15 @@ impl Replay {
                     },
                 })
                 .collect(),
-            buffers: self
-                .buffers
-                .iter()
-                .map(|(key, value)| (key.to_bytes(), value.bytes().to_vec()))
-                .collect(),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn restore(wallet: &WalletKey, snapshot: ReplaySnapshot) -> Result<Self> {
-        Self::restore_with_key(wallet, snapshot, None)
-    }
-
-    pub(crate) fn restore_with_key(
-        wallet: &WalletKey,
-        snapshot: ReplaySnapshot,
+    pub fn restore_with_key(
+        wallet: &(impl WalletKeys + ?Sized),
+        snapshot: StateSnapshot,
         key: Option<Arc<VerifyingKey>>,
     ) -> Result<Self> {
         let pool = PoolState::decode(&snapshot.pool)?;
-        if pool.network != wallet.network.network
+        if pool.network != wallet.network_domain()
             || snapshot.leaves.len() as u64 != pool.note_count()
             || snapshot.spent.len() as u64 != pool.note_count()
         {
@@ -85,14 +73,16 @@ impl Replay {
             None => WalletState::new(wallet, pool.rent_floor)?,
         };
         state.pool = pool;
-        state.leaves = snapshot
-            .leaves
-            .into_iter()
-            .map(|leaf| {
-                Option::from(MerkleHashOrchard::from_bytes(&leaf))
-                    .ok_or_else(|| "invalid cached tree leaf".into())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        state.tree = WitnessTree::from_leaves(
+            snapshot
+                .leaves
+                .into_iter()
+                .map(|leaf| {
+                    Option::from(MerkleHashOrchard::from_bytes(&leaf))
+                        .ok_or_else(|| "invalid cached tree leaf".into())
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )?;
         state.spent = snapshot.spent;
         let mut positions = BTreeSet::new();
         for saved in snapshot.notes {
@@ -128,6 +118,7 @@ impl Replay {
             ))
             .ok_or("invalid cached note")?;
             let leaf = state
+                .tree
                 .leaves
                 .get(saved.position as usize)
                 .ok_or("cached note is outside the tree")?;
@@ -139,21 +130,7 @@ impl Replay {
                 position: saved.position,
             });
         }
-        if !state.leaves.is_empty() {
-            state.witness(0)?;
-        }
         state.reconcile(&state.pool)?;
-        let mut buffers = HashMap::new();
-        for (key, encoded) in snapshot.buffers {
-            let key = Pubkey::new_from_array(key);
-            let buffer = Buffer::decode(&encoded)?;
-            if key == pool_address()
-                || key.to_bytes() == buffer.sponsor()
-                || buffers.insert(key, buffer).is_some()
-            {
-                return Err("invalid cached staging account".into());
-            }
-        }
-        Ok(Self { state, buffers })
+        Ok(state)
     }
 }

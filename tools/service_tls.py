@@ -1,7 +1,9 @@
 """Verified local TLS listeners; no cleartext sibling or global trust-store changes."""
 import os
+import ipaddress
 from pathlib import Path
 import ssl
+import socket
 import stat
 import urllib.parse
 from test_faucet import BoundedServer
@@ -31,10 +33,30 @@ def context(cert,key):
     return ctx
 
 
+def check_activated_socket(stream, port, bind_ip='127.0.0.1'):
+    """Adopt only an already-listening TCP socket at its explicit exact bind."""
+    address=ipaddress.IPv4Address(bind_ip)
+    if (type(port) is not int or not 1<=port<=65535 or str(address)!=bind_ip
+            or address.is_multicast or str(address)=='255.255.255.255'
+            or stream.family != socket.AF_INET or
+            stream.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM or
+            stream.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1 or
+            stream.getsockname() != (bind_ip, port)):
+        raise ValueError('activated TLS socket differs from its pinned TCP listener')
+
+
 class TLSServer(BoundedServer):
-    def __init__(self,address,handler,ctx):
+    def __init__(self,address,handler,ctx,activated_socket=None):
         self.tls_context=ctx
-        super().__init__(address,handler)
+        if activated_socket is None:
+            super().__init__(address,handler)
+        else:
+            check_activated_socket(activated_socket,address[1],address[0])
+            super().__init__(address,handler,bind_and_activate=False)
+            self.socket.close()
+            self.socket=activated_socket
+            self.server_address=address
+            self.server_name,self.server_port=address
     def process_request_thread(self,request,address):
         try:
             request.settimeout(3)
@@ -45,18 +67,20 @@ class TLSServer(BoundedServer):
         super().process_request_thread(secure,address)
 
 
-def listener(endpoint,port,handler,app,cert=None,key=None,listener_config=None,listener_sha256=None):
+def listener(endpoint,port,handler,app,cert=None,key=None,listener_config=None,listener_sha256=None,activated_socket=None):
     if listener_config is not None or listener_sha256 is not None:
         if listener_config is None or listener_sha256 is None:
             raise ValueError('direct TLS requires both reviewed configuration and digest')
         from direct_tls import listener as direct_listener
-        return direct_listener(endpoint,port,handler,app,cert,key,listener_config,listener_sha256)
+        return direct_listener(endpoint,port,handler,app,cert,key,listener_config,listener_sha256,activated_socket)
     parsed=urllib.parse.urlsplit(endpoint)
     if parsed.hostname!='127.0.0.1' or parsed.port!=port or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ValueError('listener must match its exact pinned loopback audience')
     tls=parsed.scheme=='https'
     if tls!=(cert is not None and key is not None) or (not tls and (cert is not None or key is not None)) or parsed.scheme not in ['http','https']:
         raise ValueError('HTTPS requires both certificate and private key; no HTTP fallback')
-    server=TLSServer(('127.0.0.1',port),handler,context(cert,key)) if tls else BoundedServer(('127.0.0.1',port),handler)
+    if activated_socket is not None and not tls:
+        raise ValueError('activated public sockets require TLS')
+    server=TLSServer(('127.0.0.1',port),handler,context(cert,key),activated_socket) if tls else BoundedServer(('127.0.0.1',port),handler)
     server.authority,server.app=f'127.0.0.1:{port}',app
     return server

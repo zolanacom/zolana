@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zolana local vault crypto acceptance</title>
+<h1>Local vault crypto acceptance</h1>
+<p>Disposable wallets on a synthetic network. No RPC, payments, user passwords, seeds or existing wallet data.</p>
+<p>The page shows checks, not addresses to fund. This tests creation and recovery; it does not test payments or finality.</p>
+<button id="run" type="button">Run real vault tests</button>
+<button id="prepare" type="button">Prepare encrypted wallet for reload</button>
+<button id="recover" type="button">Check encrypted wallet after reload</button>
+<pre id="output">Ready. The seed stays inside an opaque WASM vault handle.</pre>
+<script type="module" src="./vault-test.js"></script>
+</html>

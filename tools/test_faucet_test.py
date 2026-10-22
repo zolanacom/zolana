@@ -28,7 +28,8 @@ class DistributionTests(unittest.TestCase):
         result=type('Result',(),dict(returncode=0,stdout=json.dumps(config)))()
         with tempfile.TemporaryDirectory() as directory, patch('wallet_ui.subprocess.run',return_value=result):
             app=WalletApp.from_profile(Path('profile.json'),Path(directory)/'client')
-            self.assertTrue(app.status()['test_faucet_available'])
+            self.assertTrue(app.status()['test_faucet_configured'])
+            self.assertNotIn('test_faucet_available', app.status())
             with self.assertRaisesRegex(ValueError,'recovery'): app.action({'action':'test-coins','password':'local-password-long'})
             app.ack.touch()
             with patch.object(app,'cli',return_value={'state':'queued'}) as cli:

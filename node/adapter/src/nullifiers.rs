@@ -1,19 +1,12 @@
 //! Permanent replay protection, authenticated by proof-derived PDA addresses.
-use crate::{id, pool_address};
 use solana_pubkey::Pubkey;
 
 pub const MARKER_BYTES: usize = 40;
 
 pub fn address(nullifier: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            b"native-payment-spent-v1",
-            pool_address().as_ref(),
-            nullifier,
-        ],
-        &id(),
-    )
-    .0
+    Pubkey::new_from_array(native_payments::native_accounts::nullifier_address(
+        nullifier,
+    ))
 }
 
 pub fn encode(nullifier: &[u8; 32]) -> [u8; MARKER_BYTES] {

@@ -11,7 +11,10 @@ def policy(path, expected, endpoint, port, cert, key):
     raw=read(path,8192,secret=True)
     if not hex64(expected) or sha(raw)!=expected:
         raise ValueError('reviewed direct TLS configuration digest differs')
-    value=decode(raw)
+    return validate_policy(decode(raw),endpoint,port,cert,key)
+
+
+def validate_policy(value,endpoint,port,cert,key):
     fields={'format','audience','bind_ip','port','certificate_sha256','key_sha256'}
     if (not isinstance(value,dict) or set(value)!=fields or value['format']!='zolana-direct-tls-v1' or
             value['audience']!=endpoint or type(port) is not int or type(value['port']) is not int or value['port']!=port or not 1<=port<=65535 or
@@ -70,15 +73,24 @@ def guarded(handler):
     return Direct
 
 
-def listener(endpoint,port,handler,app,cert,key,config,expected):
+def configured_listener(endpoint,port,handler,app,cert,key,value,activated_socket=None,tls_context=None):
+    """Use an explicit binding verified by a sealed ingress/rolling TLS manifest."""
     from service_tls import context,TLSServer
-    value,authority,host,dns=policy(config,expected,endpoint,port,cert,key)
-    ctx=context(cert,key)
+    value,authority,host,dns=validate_policy(value,endpoint,port,cert,key)
+    ctx=context(cert,key) if tls_context is None else tls_context
+    if not isinstance(ctx,ssl.SSLContext) or ctx.minimum_version<ssl.TLSVersion.TLSv1_2:
+        raise ValueError('verified TLS1.2-or-newer server context required')
+    ctx.set_alpn_protocols(['http/1.1'])
     def sni(_connection,name,_context):
         if (dns and name!=host) or (not dns and name is not None):
             return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
         return None
     ctx.set_servername_callback(sni)
-    server=TLSServer((value['bind_ip'],port),guarded(handler),ctx)
+    server=TLSServer((value['bind_ip'],port),guarded(handler),ctx,activated_socket)
     server.authority,server.app=authority,app
     return server
+
+
+def listener(endpoint,port,handler,app,cert,key,config,expected,activated_socket=None):
+    value,_,_,_=policy(config,expected,endpoint,port,cert,key)
+    return configured_listener(endpoint,port,handler,app,cert,key,value,activated_socket)

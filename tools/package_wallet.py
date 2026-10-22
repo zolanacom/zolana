@@ -14,8 +14,22 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 def public_profile(network, label, rpc, transport):
+    audiences = {}
+    if "access_audiences" in network:
+        value = network["access_audiences"]
+        if (not isinstance(value, dict) or set(value) !=
+                {"format", "network", "genesis_hash", "rpc", "faucet"}):
+            raise ValueError("explicit complete public access audience mapping required")
+        audiences["access_audiences"] = value
     return {"format": "native-wallet-profile-v1", "label": label, "key_mode": "user-wallet-v1",
             **{key: network[key] for key in ("network", "genesis_hash", "program", "pool", "pool_format", "recipient_withdrawals")},
+            # These explicit modes select native proof submission and verified
+            # compact history. Dropping them silently selects the legacy path.
+            # The wallet's canonical profile parser validates their values and
+            # the final HTTPS/admission settings before any archive is written.
+            **{key: network[key] for key in ("private_send_transport", "retained_history_format")
+               if network.get(key) is not None},
+            **audiences,
             "rpc": {"transport": transport, "url": rpc}}
 
 
@@ -107,6 +121,7 @@ def main():
     for destination, source in {
         "bin/native-wallet": args.binary,
         "runtime/wallet_ui.py": PROJECT / "tools/wallet_ui.py",
+        "runtime/wallet_session.py": PROJECT / "tools/wallet_session.py",
         "runtime/wallet_launch.py": PROJECT / "tools/wallet_launch.py",
         "LICENSE": PROJECT / "LICENSE", "THIRD_PARTY.md": PROJECT / "THIRD_PARTY.md",
         "AGAVE-LICENSE": PROJECT / "node/agave/LICENSE",

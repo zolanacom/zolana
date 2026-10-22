@@ -21,7 +21,7 @@ def load(root):
 
 ASSETS = PROJECT / "clients/wallet-ui"
 WALLET = PROJECT / "target/debug/native-wallet"
-PAYMENT_PHASES = {'key', 'sync', 'prove', 'upload', 'confirm', 'finalize'}
+PAYMENT_PHASES = {'key', 'sync', 'prove', 'upload', 'confirm', 'finalize', 'native_packet_durable'}
 
 
 def streaming_cli(args, password, callback, timeout=180):
@@ -75,6 +75,7 @@ class WalletApp:
         self.test_faucet = False
         self.invite_required = False
         self.admitted = False
+        self.private_send_transport = None
         self.network_file = self.root / "network.json"
         self.binary = WALLET
         if not self.root.is_relative_to(PROJECT / ".data"):
@@ -114,6 +115,8 @@ class WalletApp:
         self.ack = self.directory / "backup-confirmed"
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
+        self._command_session = None
+        self._command_session_unsupported = False
 
     @classmethod
     def from_profile(cls, network_file, data_directory, profile="default", binary=WALLET):
@@ -153,6 +156,7 @@ class WalletApp:
         app.test_faucet = config.get("faucet") is not None
         app.invite_required = config.get("invite_required") is True
         app.admitted = False
+        app.private_send_transport = config.get('private_send_transport')
         app.sponsor_password_file = None
         app.binary = Path(binary).resolve()
         app._storage(profile)
@@ -160,10 +164,13 @@ class WalletApp:
 
     def status(self):
         return {"exists": self.wallet.exists() or self.backup.exists(), "needs_backup": not self.ack.exists(),
-                "pending": Path(str(self.wallet) + ".pending.json").exists(),
+                "pending": any(Path(str(self.wallet) + suffix).exists() for suffix in ('.pending.json', '.shielded.json', '.native.json')),
                 "staging": Path(str(self.wallet) + ".staging.json").exists(),
                 "network": self.network_label if self.tester else ("Local testnet rehearsal" if self.private_setup else "Local test network"), "solana_funding_available": False,
-                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True, "test_faucet_available": self.test_faucet, "invite_required": self.invite_required, "testnet_admitted": self.admitted,
+                "recipient_withdrawals": self.withdrawal_enabled, "faucet_amount": self.faucet_amount, "operator_sponsor_available": not self.private_setup or self.sponsor_password_file is not None, "user_paid_fees": True, "user_paid_sends": True,
+                # A pinned endpoint does not prove a live funded grant worker.
+                "test_faucet_configured": self.test_faucet, "invite_required": self.invite_required, "testnet_admitted": self.admitted,
+                "private_send_transport": getattr(self, 'private_send_transport', None),
                 "genesis_hash": getattr(self,'genesis_hash',None), "previous_wallet_port": getattr(self,'previous_wallet_port',None)}
 
     def cli(self, command, password, extra=()):
@@ -183,16 +190,39 @@ class WalletApp:
         attempts = 4 if self.tester and self.invite_required and command in {"join", "access-status", "test-coins"} else 1
         for attempt in range(attempts):
             callback = getattr(self, 'progress_callback', None)
-            if callback is not None and command in {'send', 'withdraw'}:
-                result = streaming_cli(args, password, callback)
-            else:
-                result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
+            result = None
+            if (getattr(self, 'private_send_transport', None) == 'native-inline-v1'
+                    and command in {'balance', 'fees', 'send', 'resolve'}
+                    and (command != 'fees' or list(extra) == ['--payment', 'send'])
+                    and '--history' not in args
+                    and not getattr(self, '_command_session_unsupported', False)):
+                from wallet_session import CommandSession, SessionUnsupported
+                if getattr(self, '_command_session', None) is None:
+                    self._command_session = CommandSession(self.binary, self.network_file, self.wallet)
+                try:
+                    result = self._command_session.run_cli(
+                        args, password, callback=callback if command == 'send' else None)
+                except SessionUnsupported:
+                    # This exact old-binary startup rejection received no
+                    # password or request. Never fallback after a write.
+                    self._command_session_unsupported = True
+                    self._command_session = None
+            if result is None:
+                if callback is not None and command in {'send', 'withdraw'}:
+                    result = streaming_cli(args, password, callback)
+                else:
+                    result = subprocess.run(args, input=password, capture_output=True, text=True, timeout=180)
             if not result.returncode:
                 return json.loads(result.stdout)
             error = result.stderr.strip().removeprefix("Wallet error: ")
             if attempt + 1 == attempts or not error.startswith("error sending request for url ("):
                 raise ValueError(error)
             time.sleep(0.5 * 2 ** attempt + secrets.randbelow(251) / 1000)
+
+    def close(self):
+        session = getattr(self, '_command_session', None)
+        if session is not None:
+            session.close()
 
     def action(self, request):
         action = request.get("action")
@@ -203,6 +233,8 @@ class WalletApp:
             raise ValueError("Fee selection is only supported for sends and withdrawals.")
         if action != "fees" and "payment" in request:
             raise ValueError("Payment quote selection is only supported for fees.")
+        if action != 'send' and 'max_shielded_fee' in request:
+            raise ValueError('A shielded fee cap is only supported for private sends.')
         if action == "create":
             return self.cli("init", password, ["--backup", str(self.backup)])
         if action == "restore":
@@ -240,7 +272,11 @@ class WalletApp:
                 result = self.cli("access-status", password)
             self.admitted = result.get("admitted") is True
             return result
-        if self.invite_required and action in {"balance", "fees", "test-coins", "send", "withdraw", "resolve", "reclaim"}:
+        # Native balance RPCs still require fresh signed gateway authorization.
+        # Reuse only the UI admission check, never a balance or RPC response.
+        if self.invite_required and action in {"balance", "fees", "test-coins", "send", "withdraw", "resolve", "reclaim"} and not (
+                action == 'balance' and self.private_send_transport == 'native-inline-v1'
+                and self.admitted is True):
             access = self.cli("access-status", password)
             self.admitted = access.get("admitted") is True
             if not self.admitted:
@@ -262,6 +298,19 @@ class WalletApp:
         if action in {"fund", "send", "withdraw", "resolve", "reclaim"}:
             if not self.ack.exists():
                 raise ValueError("Save and confirm your encrypted recovery file before making payments.")
+            native_send = getattr(self, 'private_send_transport', None) == 'native-inline-v1'
+            if action == 'send' and native_send:
+                if request.get('fee_mode', 'shielded') != 'shielded' or 'max_fee_debit' in request:
+                    raise ValueError('This profile uses shielded fees for private sends; review its private fee quote.')
+                cap = request.get('max_shielded_fee')
+                amount, recipient = request.get('amount'), request.get('recipient')
+                if type(cap) is not int or not 1 <= cap <= 100_000_000:
+                    raise ValueError('Review and authorize a bounded shielded fee first.')
+                if type(amount) is not int or not 1 <= amount <= 1_000_000_000 or not isinstance(recipient, str) or not recipient.startswith('npriv1') or len(recipient) > 140:
+                    raise ValueError('Enter a private receiving address and a positive whole amount.')
+                return self.cli('send', password, ['--fee-payer', 'shielded', '--max-shielded-fee', str(cap), '--amount', str(amount), '--to', recipient])
+            if 'max_shielded_fee' in request or request.get('fee_mode') == 'shielded':
+                raise ValueError('Shielded send fees require the original explicit native profile.')
             user_paid = action in {"send", "withdraw"} and request.get("fee_mode", "sponsor" if (not self.private_setup or self.sponsor_password_file is not None) else "user") == "user"
             if action in {"send", "withdraw"} and request.get("fee_mode", "user") not in ("user", "sponsor"):
                 raise ValueError("Choose user-paid or sponsored fees.")
@@ -415,6 +464,7 @@ def serve(app, port, duration):
     finally:
         timer.cancel()
         server.server_close()
+        app.close()
 
 
 def main(argv=None):
@@ -423,6 +473,7 @@ def main(argv=None):
     source.add_argument("--root", type=Path)
     source.add_argument("--network-profile", type=Path)
     parser.add_argument("--data-dir", type=Path)
+    parser.add_argument("--binary", type=Path, help="explicit native-wallet executable for standalone profiles")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--duration", type=int, default=1800)
     parser.add_argument("--start-network", action="store_true")
@@ -436,10 +487,10 @@ def main(argv=None):
     if args.network_profile:
         if not args.data_dir or args.start_network or args.sponsor_password_file or args.rpc_index != 0:
             parser.error("standalone mode requires --data-dir and forbids validator/sponsor options")
-        app = WalletApp.from_profile(args.network_profile, args.data_dir, args.profile, WALLET)
+        app = WalletApp.from_profile(args.network_profile, args.data_dir, args.profile, args.binary or WALLET)
     else:
-        if args.data_dir:
-            parser.error("--data-dir is only for standalone profiles")
+        if args.data_dir or args.binary:
+            parser.error("--data-dir and --binary are only for standalone profiles")
         app = WalletApp(args.root, args.profile, args.rpc_index, args.sponsor_password_file)
     children = [None, None]
     if args.previous_wallet_port is not None:

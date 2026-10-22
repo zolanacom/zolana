@@ -29,7 +29,7 @@ async function layout(page, name, screenshot = false) {
   if (screenshot) await page.screenshot({ path: path.join(evidence, name + '.png'), fullPage: true });
 }
 async function balance(page, value) {
-  await page.waitForFunction(expected => document.querySelector('#balance')?.textContent.trim().startsWith(expected + ' '), value, {timeout:180000});
+  await page.waitForFunction(expected => Number(document.querySelector('#balance')?.firstChild?.textContent.replace(/,/g,'').trim()) === expected, value, {timeout:180000});
   await page.waitForFunction(() => !document.querySelector('#refresh')?.disabled);
 }
 async function run() {
@@ -106,17 +106,17 @@ async function run() {
   assert.equal(await restored.locator('#address').innerText(),address);
   await restored.getByRole('button',{name:'Back to wallet',exact:true}).tap();
   result.checks.push('file upload, wrong password rejection, funded seed-only restore');
-  await restored.getByRole('button',{name:'Send',exact:true}).tap();
+  await restored.getByRole('button',{name:'Send privately',exact:true}).tap();
   await restored.getByLabel('Recipient address',{exact:true}).fill(recipient);
-  await restored.getByLabel('Amount in test units',{exact:true}).fill('7');
+  await restored.getByLabel('Amount in ZOL test units',{exact:true}).fill('7');
   await restored.setViewportSize({width:390,height:420});
-  await restored.getByLabel('Amount in test units',{exact:true}).tap();
+  await restored.getByLabel('Amount in ZOL test units',{exact:true}).tap();
   await restored.getByRole('button',{name:'Use test sponsor',exact:true}).click();
   await layout(restored,'keyboard-height-send');
   await restored.getByRole('button',{name:'Review payment',exact:true}).tap();
   await restored.getByRole('button',{name:'Edit payment',exact:true}).tap();
   assert.equal(await restored.getByLabel('Recipient address',{exact:true}).inputValue(),recipient);
-  assert.equal(await restored.getByLabel('Amount in test units',{exact:true}).inputValue(),'7');
+  assert.equal(await restored.getByLabel('Amount in ZOL test units',{exact:true}).inputValue(),'7');
   await restored.setViewportSize({width:320,height:568});
   await restored.getByRole('button',{name:'Review payment',exact:true}).tap();
   assert.equal(await restored.evaluate(()=>scrollY),0,'New views should start at their heading');
@@ -125,7 +125,7 @@ async function run() {
   await balance(restored,93);
   assert.match(await restored.locator('#receipt').innerText(),/Payment finalized/);
   await layout(restored,'paid-320',true);
-  await restored.getByRole('button',{name:'Lock',exact:true}).tap();
+  await restored.getByRole('button',{name:'Lock wallet',exact:true}).tap();
   await restored.getByLabel('Wallet password',{exact:true}).fill(password);
   await restored.getByRole('button',{name:'Unlock wallet',exact:true}).tap();
   await balance(restored,93);

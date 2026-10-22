@@ -44,6 +44,19 @@ Repeat concurrent acceptance on a fresh fixture:
 python3 -B tools/load_localnet.py --root .data/load-new --clients 24
 ```
 
-The runner owns/stops both validators, performs deposit and nonuniform private-send bursts, checks both validators' balances/nullifiers, rejects live duplicates, restarts and audits. `--baseline` is only for the historical 16-root NPOOL002 build; it is expected to reject eight of 24 payments. Never point a new-format binary at an old ledger. See LOCAL-008 for concurrency, LOCAL-009 for incremental sync and LOCAL-010 for completed mobile/file-flow verification and snapshot-peer recovery.
+The runner owns/stops both validators, performs deposit and nonuniform private-send bursts, checks both validators' balances/nullifiers, rejects live duplicates, restarts and audits. `--baseline` is only for the historical 16-root NPOOL002 build; it is expected to reject eight of 24 payments. Never point a new-format binary at an old ledger.
 
-Invited admission/status transport errors now receive at most four retries with bounded backoff/jitter and the same original wallet/invitation inputs. Payments, authorization failures and quota rejections are not automatically retried. Ten-wallet validation covers the actual four-slot listener burst, completed-claim retry and source-lock recovery. Restart existing local UI servers on their original storage/profile to load a source update; signed standalone releases still require their normal reviewed packaging process.
+Invited admission/status transport errors now receive at most four retries with bounded backoff/jitter and the same original wallet/invitation inputs. Payments, authorization failures and quota rejections are not automatically retried. The [ten-wallet rehearsal](ten-wallet-rehearsal.md) covers the four-slot listener burst, completed-claim retry and source-lock recovery. Restart existing local UI servers on their original storage/profile to load a source update; signed standalone releases still require their normal reviewed packaging process.
+
+## Remote native profile
+
+For a remote (Linux-hosted) native NPOOL004 profile, use an explicit reviewed binary and separate disposable test storage, without `--start-network`:
+
+```sh
+python3 -B tools/wallet_ui.py \
+  --network-profile /absolute/path/reviewed-native-profile.json \
+  --data-dir /absolute/path/new-owner-only-test-storage \
+  --binary /absolute/path/pinned/native-wallet --duration 600
+```
+
+The profile must preserve `private_send_transport: native-inline-v1` and `retained_history_format: compact-v2`, invited HTTPS and its exact pinned identity/trust. Existing storage is bound to its original profile; do not edit that profile or overwrite a wallet to make a new launch work. A configured admission endpoint does not establish live funding. See the [privacy and delivery review](privacy-boundary-LOCAL-070.md) for limits. The NPOOL003 fixture commands above intentionally start local validators; this remote-profile path does not.

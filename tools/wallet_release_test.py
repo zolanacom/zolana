@@ -81,6 +81,14 @@ class ReleaseTests(unittest.TestCase):
         files['assets/favicon.svg']+=b'changed'
         with self.assertRaisesRegex(ValueError,'digest mismatch'):release.inventory(files)
 
+    def test_session_runtime_is_optional_for_old_releases_and_authenticated_when_present(self):
+        release.inventory(self.files)
+        files=self.mutate(self.files,'runtime/wallet_session.py',b'# public prover session adapter\n')
+        bundle=self.opened().install(*self.sign(files=files))
+        self.assertEqual((bundle/'runtime/wallet_session.py').read_bytes(),files['runtime/wallet_session.py'])
+        files['runtime/wallet_session.py']+=b'changed'
+        with self.assertRaisesRegex(ValueError,'digest mismatch'):release.inventory(files)
+
     def test_changed_archive_or_descriptor_or_signature_or_wrong_key_is_denied(self):
         archive_path,descriptor=self.sign();obj=self.opened();original=archive_path.read_bytes()
         archive_path.write_bytes(original+b'changed')
@@ -107,6 +115,49 @@ class ReleaseTests(unittest.TestCase):
         fresh=self.root/'minimum';release.initialize(fresh,self.public,self.pin,'invited-rehearsal',self.profile,2)
         obj=release.Installation(fresh);self.addCleanup(obj.close)
         with self.assertRaisesRegex(ValueError,'pinned policy'):obj.verify(*paths)
+
+    def public_access_release(self):
+        # Transport URLs and signed authorization audiences are deliberately
+        # different, as in074. The release verifier binds the complete bytes;
+        # the canonical native parser owns profile semantics.
+        profile=release.decode(self.files['wallet-profile.json'])
+        profile.update(label='Invited public transport',invite_required=True,
+            rpc=dict(transport='https',url='https://198.51.100.74'),
+            faucet=dict(transport='https',url='https://198.51.100.74:8444'),
+            access_audiences=dict(format='native-access-audiences-v1',network=profile['network'][:],genesis_hash=profile['genesis_hash'],
+                rpc='https://127.0.0.1:39443',faucet='https://127.0.0.1:39444'))
+        self.files=self.mutate(self.files,'wallet-profile.json',release.encode(profile))
+        self.profile=release.sha(self.files['wallet-profile.json']);self.install_root=self.root/'public-install'
+        release.initialize(self.install_root,self.public,self.pin,'invited-rehearsal',self.profile,1)
+        return profile
+
+    def test_signed_public_profile_preserves_complete_access_audiences(self):
+        profile=self.public_access_release();paths=self.sign();obj=self.opened()
+        action,files,_,_=obj.verify(*paths)
+        self.assertEqual(action['release']['profile_sha256'],self.profile)
+        self.assertEqual(files['wallet-profile.json'],release.encode(profile))
+        bundle=obj.install(*paths)
+        self.assertEqual(release.decode((bundle/'wallet-profile.json').read_bytes()),profile)
+        self.assertNotEqual(profile['rpc']['url'],profile['access_audiences']['rpc'])
+        self.assertEqual(release.decode((bundle/'wallet-profile.json').read_bytes())['access_audiences'],profile['access_audiences'])
+
+    def test_validly_signed_transport_audience_or_network_change_cannot_change_profile_pin(self):
+        profile=self.public_access_release();obj=self.opened();accepted=obj.install(*self.sign())
+        for kind in ('transport','audience','network'):
+            changed=copy.deepcopy(profile)
+            if kind=='transport':changed['rpc']['url']='https://198.51.100.75'
+            elif kind=='audience':changed['access_audiences']['rpc']='https://127.0.0.1:39445'
+            else:
+                changed['network'][0]^=1;changed['access_audiences']['network']=changed['network'][:]
+            files=self.mutate(self.files,'wallet-profile.json',release.encode(changed))
+            paths=self.sign(2,files,'public-'+kind);raw=paths[1].read_bytes();descriptor=release.decode(raw)
+            # Establish that checksums and the real publisher signature are
+            # valid; only a deliberately different in-memory policy accepts it.
+            self.assertEqual(descriptor['archive_sha256'],release.sha(paths[0].read_bytes()))
+            shadow={**obj.trust,'profile_sha256':release.sha(files['wallet-profile.json'])}
+            self.assertEqual(release.authenticate(raw,Path(str(paths[1])+'.sig').read_bytes(),shadow),descriptor)
+            with self.subTest(kind=kind),self.assertRaisesRegex(ValueError,'pinned policy'):obj.verify(*paths)
+            self.assertEqual(obj.current(),accepted);self.assertEqual(obj.state['sequence'],1);self.assertIsNone(obj.state['pending'])
 
     def test_rollback_and_same_sequence_equivocation_survive_restart(self):
         old=self.sign(1);new=self.sign(2);obj=self.opened();obj.install(*new);obj.close();obj=self.opened()

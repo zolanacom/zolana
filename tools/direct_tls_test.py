@@ -153,6 +153,42 @@ class DirectPolicyTests(unittest.TestCase):
             with self.assertRaises(ssl.SSLCertVerificationError):
                 request(self.port,None,f'rpc.pilot.invalid:{self.port}',name='rpc.pilot.invalid')
 
+    @unittest.skipUnless(sys.platform=='linux','real activated SO_ACCEPTCONN acceptance runs on Linux')
+    def test_reviewed_all_interface_socket_is_adopted_with_real_peer_and_tls_guards(self):
+        calls=[]
+        class Faucet:
+            def ingress(self,channel,peer):calls.append((channel,peer))
+        class App:
+            faucet=Faucet()
+            def forward(self,raw):calls.append('upstream');return b'{"result":"genuine"}'
+        inherited=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        try:
+            inherited.bind(('0.0.0.0',self.port));inherited.listen(8)
+            self.write(dict(self.value,bind_ip='0.0.0.0'))
+            server=listener(self.endpoint,self.port,GatewayHandler,App(),self.cert,self.key,
+                self.path,self.digest,activated_socket=inherited)
+            self.assertIs(server.socket,inherited)
+            with running(server):
+                host=f'rpc.pilot.invalid:{self.port}'
+                self.assertEqual(request(self.port,self.tls/'ca.crt',host,name='rpc.pilot.invalid')[0],200)
+                self.assertEqual(calls,[('rpc','127.0.0.1'),'upstream']);calls.clear()
+                self.assertEqual(request(self.port,self.tls/'ca.crt',host,[('X-Forwarded-For','198.51.100.9')],name='rpc.pilot.invalid')[0],403)
+                self.assertEqual(calls,[])
+                self.assertEqual(request(self.port,self.tls/'ca.crt','wrong.invalid',name='rpc.pilot.invalid')[0],403)
+                with self.assertRaises(ssl.SSLError):request(self.port,self.tls/'ca.crt',host,name=None,verify=False)
+        finally:inherited.close()
+
+    @unittest.skipUnless(sys.platform=='linux','real activated SO_ACCEPTCONN acceptance runs on Linux')
+    def test_activated_direct_socket_must_match_reviewed_bind_and_port(self):
+        inherited=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        try:
+            inherited.bind(('127.0.0.1',self.port));inherited.listen(8)
+            self.write(dict(self.value,bind_ip='0.0.0.0'))
+            with self.assertRaisesRegex(ValueError,'activated TLS socket'):
+                listener(self.endpoint,self.port,GatewayHandler,object(),self.cert,self.key,
+                    self.path,self.digest,activated_socket=inherited)
+        finally:inherited.close()
+
 
 class NativeDirectTests(unittest.TestCase):
     prepare=fixtures.PilotTests.prepare

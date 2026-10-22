@@ -6,10 +6,84 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from wallet_ui import Handler, WalletApp, streaming_cli
+from wallet_ui import Handler, WalletApp, main, streaming_cli
 
 
 class WalletUiTests(unittest.TestCase):
+    def test_standalone_cli_uses_explicit_binary_and_never_starts_validators(self):
+        app = object()
+        with patch('wallet_ui.WalletApp.from_profile', return_value=app) as load, \
+                patch('wallet_ui.serve') as serve:
+            main(['--network-profile', 'native-profile.json', '--data-dir', 'new-test-data',
+                  '--binary', 'pinned/native-wallet', '--port', '18765', '--duration', '60'])
+        load.assert_called_once_with(Path('native-profile.json'), Path('new-test-data'), 'default', Path('pinned/native-wallet'))
+        serve.assert_called_once_with(app, 18765, 60)
+
+    def test_explicit_binary_cannot_change_fixture_validator_launch(self):
+        with patch('wallet_ui.WalletApp') as app, self.assertRaises(SystemExit) as denied:
+            main(['--root', '.data/preserved', '--binary', 'other-wallet', '--start-network'])
+        self.assertEqual(denied.exception.code, 2)
+        app.assert_not_called()
+
+    def test_admitted_native_balance_reads_again_without_repeating_status_preflight(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            app.invite_required = True
+            app.private_send_transport = 'native-inline-v1'
+            app.admitted = True
+            password = 'local-test-password\r\n'
+            with patch.object(app, 'cli', side_effect=[{'balance': 7}, {'balance': 8}]) as cli:
+                self.assertEqual(app.action(dict(action='balance', password=password)), {'balance': 7})
+                self.assertEqual(app.action(dict(action='balance', password=password)), {'balance': 8})
+            self.assertEqual([entry.args for entry in cli.call_args_list],
+                             [('balance', password), ('balance', password)])
+
+    def test_balance_preflight_remains_for_first_reads_and_other_transports(self):
+        for transport, admitted in [('native-inline-v1', False), ('native-inline-v1', 1),
+                                    ('native-inline-v1', 'yes'), (None, True), ('legacy', True)]:
+            with self.subTest(transport=transport, admitted=admitted), tempfile.TemporaryDirectory() as name:
+                app = self.app(Path(name))
+                app.invite_required = True
+                app.private_send_transport = transport
+                app.admitted = admitted
+                with patch.object(app, 'cli', side_effect=[{'admitted': True}, {'balance': 7}]) as cli:
+                    self.assertEqual(app.action(dict(action='balance', password='local-test-password')), {'balance': 7})
+                self.assertEqual([entry.args for entry in cli.call_args_list],
+                                 [('access-status', 'local-test-password'), ('balance', 'local-test-password')])
+                self.assertIs(app.admitted, True)
+
+    def test_native_balance_rpc_revocation_propagates_without_reusing_previous_balance(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            app.invite_required = True
+            app.private_send_transport = 'native-inline-v1'
+            app.admitted = True
+            app.wallet.write_bytes(b'preserved encrypted wallet')
+            app.backup.write_bytes(b'preserved encrypted backup')
+            before = (app.wallet.read_bytes(), app.backup.read_bytes())
+            denied = ValueError('RPC invitation access revoked')
+            with patch.object(app, 'cli', side_effect=[{'balance': 7}, denied]) as cli:
+                self.assertEqual(app.action(dict(action='balance', password='local-test-password')), {'balance': 7})
+                with self.assertRaisesRegex(ValueError, 'revoked') as failed:
+                    app.action(dict(action='balance', password='local-test-password'))
+                self.assertIs(failed.exception, denied)
+            self.assertEqual([entry.args[0] for entry in cli.call_args_list], ['balance', 'balance'])
+            self.assertEqual((app.wallet.read_bytes(), app.backup.read_bytes()), before)
+
+    def test_native_fees_and_value_actions_still_check_admission_fresh(self):
+        with tempfile.TemporaryDirectory() as name:
+            app = self.app(Path(name))
+            app.invite_required = True
+            app.private_send_transport = 'native-inline-v1'
+            for action in ('fees', 'send', 'withdraw', 'resolve', 'test-coins', 'reclaim'):
+                with self.subTest(action=action):
+                    app.admitted = True
+                    with patch.object(app, 'cli', return_value={'admitted': False, 'state': 'revoked'}) as cli:
+                        with self.assertRaisesRegex(ValueError, 'access is unavailable'):
+                            app.action(dict(action=action, password='local-test-password'))
+                        cli.assert_called_once_with('access-status', 'local-test-password')
+                    self.assertIs(app.admitted, False)
+
     def test_progress_disconnect_does_not_interrupt_or_retry_the_original_cli(self):
         with tempfile.TemporaryDirectory() as name:
             marker = Path(name) / 'attempts'
@@ -247,3 +321,30 @@ print(json.dumps({'signature':'original-finalized-signature','staging_rent_recla
                 self.assertEqual(cli.call_args.args,("fees","local-test-password",["--payment","send"]))
                 with self.assertRaisesRegex(ValueError,"only supported for fees"):
                     app.action({**request,"payment":"send"})
+
+    def test_native_send_uses_private_fee_cap_and_pending_journal_without_operator_options(self):
+        with tempfile.TemporaryDirectory() as name:
+            app=self.app(Path(name));app.private_send_transport='native-inline-v1';app.ack.touch()
+            request=dict(action='send',password='local-test-password',amount=10,recipient='npriv1example',fee_mode='shielded',max_shielded_fee=3000000)
+            with patch.object(app,'cli',return_value={}) as cli:
+                app.action(request)
+                self.assertEqual(cli.call_args.args,('send','local-test-password',['--fee-payer','shielded','--max-shielded-fee','3000000','--amount','10','--to','npriv1example']))
+                for cap in [True,0,-1,1.5,'3000000',100000001]:
+                    with self.assertRaises(ValueError):app.action({**request,'max_shielded_fee':cap})
+                for extra in [dict(fee_mode='user'),dict(fee_mode='sponsor'),dict(max_fee_debit=100),dict(amount=True)]:
+                    with self.assertRaises(ValueError):app.action({**request,**extra})
+                app.action(dict(action='resolve',password='local-test-password'))
+                self.assertEqual(cli.call_args.args,('resolve','local-test-password'))
+            for suffix in ['.shielded.json','.native.json']:
+                journal=Path(str(app.wallet)+suffix);journal.write_text('preserved')
+                self.assertTrue(app.status()['pending']);journal.unlink()
+            self.assertEqual(app.status()['private_send_transport'],'native-inline-v1')
+            app.private_send_transport=None
+            with self.assertRaises(ValueError):app.action(request)
+
+    def test_native_durable_progress_is_observation_and_requires_one_final_result(self):
+        phases=[]
+        script='import sys,json;sys.stdin.read();print(json.dumps({"wallet_progress":"native_packet_durable"}));print(json.dumps({"accepted":True,"encrypted_checkpoint_durable":True}))'
+        result=streaming_cli([sys.executable,'-c',script],'local-test-password',phases.append,timeout=5)
+        self.assertEqual(phases,['native_packet_durable'])
+        self.assertTrue(json.loads(result.stdout)['encrypted_checkpoint_durable'])

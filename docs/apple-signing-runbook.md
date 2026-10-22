@@ -1,33 +1,23 @@
-# Local Apple signing preparation
+# Apple release preparation
 
-Use a previously authenticated path-remapped archive, its signed descriptor and independently initialized verifier state. Work on copies. Keep validators paused; this performs no RPC requests, payment broadcasts, service installation or administrator actions.
+This preparation is tested locally with injected fixtures only; real Developer ID signing and notarization have not been performed, and no real Apple Developer identity has been used with this path. Further Apple delivery work is deferred under the [browser-first delivery decision](decisions/0035-browser-first-wallet-delivery.md). This runbook is an optional future distribution path, not mandatory public onboarding.
 
-```sh
-python3 -B tools/wallet_apple.py prepare \
-  --archive /private/tmp/reviewed-input/wallet.tar.gz \
-  --release /private/tmp/reviewed-input/release.json \
-  --trust-root /private/tmp/reviewed-trust \
-  --root /private/tmp/new-apple-preparation
-python3 -B tools/wallet_apple.py verify --root /private/tmp/new-apple-preparation
-```
+## Separate real and rehearsal paths
 
-Trust must already carry the externally established publisher/profile/channel/minimum-sequence pins. Never initialize trust from a download. Input verification enforces its existing rollback cursor. A new preparation root must not exist. Use `--resume` only for that original input/trust binding. Corrupt or partial initialization fails closed; retain it rather than resetting state.
+`tools/wallet_apple.py` remains the frozen ad-hoc signing rehearsal library. It never produces an Apple-approved release.
 
-`state.json` points to a completed private attempt. Attempts retain original native bytes, empty entitlements, transformed payload, signed `wallet-rehearsal.dmg`, `REHEARSAL.json` and `NOTARIZATION-PLAN.json`. Interrupted attempts are retained. `BUILD.json` describes pre-sign bytes; `APPLE.json` binds them to the transformed signature/executable. Normalized code/data identity is checked independently of whole-file hashes.
+`tools/wallet_apple_release.py` is the new explicit Developer ID preparation CLI. It requires independently initialized publisher/profile/channel/minimum-sequence trust, an original authenticated path-remapped archive/descriptor, explicit usable Developer ID Application certificate SHA1, Team ID and bundle identifier. Never derive trust from a download or invent an identity. Missing identity refuses before workspace creation. Work only in a genuinely new private root; resume only the original immutable input binding. Interrupted attempts stay retained.
 
-`wallet_apple.mounted_payload(root)` provides locked read-only inspection and normal cleanup. `wallet_apple.recover_mount(root)` reconciles a crashed inspector's exact owned attachment. Unexpected image/mountpoint/device state stops cleanup rather than detaching another disk. The copied launcher uses isolated Python; Python 3.10+ remains external. Nothing is copied into Applications or existing tester wallet state.
+Preparation signs copies with hardened runtime, empty entitlements and secure timestamps. Verification requires an Apple-anchored Developer ID chain, exact public leaf fingerprint, Team/identifier and unchanged executable code/data. BUILD retains pre-sign provenance, APPLE binds the transformation, exact inventories bind resources and a separately signed DMG/receipt binds resulting bytes. `verify --root ... --receipt-sha256 ...` verifies completed preparation. `prepare --help` lists its required arguments. Actual preparation may contact Apple's timestamp service; no real invocation has occurred.
 
-Run finite real-artifact acceptance against the retained LOCAL-036 sequence-5 fixture:
+## Notarization and interruption recovery
 
-```sh
-python3 -B tools/wallet_apple_rehearsal.py --source /private/tmp/native-remapped-wallet-036-9v420550
-python3 -B -m unittest discover -s tools -p '*_test.py'
-```
+`tools/apple_notary_release.py init --root ... --prepared-root ... --preparation-sha256 ... --keychain-profile ...` requires the completed, independently pinned Developer ID receipt. It freezes a submission copy and binds an explicitly reviewed credential profile NAME, never its secret. No credential setup is performed by this tool. An account holder must establish real membership/certificate and appropriate notary authentication separately; do not enter passwords/API secrets in command arguments or receipts.
 
-This kills real preparation processes after payload/image signing and an actual mounted inspector, resumes original inputs, tests the hardened native wallet offline with a fresh encrypted seed/restore, and kills the fixture handoff before hypothetical acknowledgement. It never contacts Apple. Ignored `.local/apple-037-stage.json` and `.local/apple-037-result.json` link retained evidence.
+Use `status --root ...` to inspect bound state. Each live `submit`, `check`, `reconcile`, `staple` or `assess` operation requires `--execute` for that specific action. CLI fixture mode does not exist. Submit does not wait; it durably records intent BEFORE the external operation and UUID BEFORE polling. A timeout or lost response leaves submission_unknown. Do not resubmit: reconcile the exact original job with `reconcile --submission-id ... --execute`, requiring the completed job log to match the exact submitted SHA256. Preserve unknown/rejected state and diagnostics.
 
-The disabled plan is data, not a live release executor. A future implementation must create a **new Developer ID artifact**, use hardened runtime, an explicit reviewed identity and secure timestamps, regenerate provenance/inventories, then create/sign the image. [Apple's requirements](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) apply to real distribution. Never treat the ad-hoc image as a release.
+Accepted info is followed by the bound raw log. Stapling works on a separate attempt copy, validates the ticket and exact signature, then records the changed digest. Local Gatekeeper assessment remains distinct; neither accepted status nor successful local assessment proves external-device behavior. Final `release_ready` stays false: post-stapling publisher signing/update integration and real external-device acceptance remain required.
 
-Submit without waiting, persist the UUID before polling and bind results to the exact submitted digest. An uncertain response requires explicit reconciliation; do not blindly upload again. Persist rejection and diagnostic logs privately. Accepted status alone does not prove ticket installation or end-user Gatekeeper acceptance. Staple, validate and assess in a clean environment, then hash/sign the final distributable with independently distributed publisher pins because stapling changes bytes. Credential values never belong in commands, receipts, logs or source. Live operations remain unimplemented and untested.
+The new apple-developer-id inventory is intentionally refused by the old installer. Do not relabel it or reuse the original signed descriptor. A self-contained .app/runtime and normal quarantine installation also remain unimplemented. Signing the current CLI/folder would not remove its external Python3.10/Terminal dependency.
 
-The transformed `apple-signing-rehearsal` inventory is intentionally unsupported by the current update installer. Do not relabel it or reuse the original descriptor: its bytes changed. Production update integration requires separate review/acceptance.
+Focused local tests are `wallet_apple_release_test.py` and `apple_notary_release_test.py`. They inject Apple responses and permanently label fixtures; passing them does not notarize software. Actual power-loss durability, real certificate/authentication, Apple service results and clean external-device acceptance are untested.
