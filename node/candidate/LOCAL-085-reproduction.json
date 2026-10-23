@@ -1,0 +1,38 @@
+{
+  "actual_inventory": "LOCAL-085-linux-source-inventory.json",
+  "actual_inventory_sha256": "e78fff0241f87b9c85c6f8d07c3b4a227580e99ee97513fa36ee2b2e2bf11e75",
+  "actual_source_inventory_equivalent": true,
+  "baseline_manifest": "LOCAL-072-source.json",
+  "baseline_manifest_sha256": "57a947addd2dff75665241af64a40be3ed9d07b9bd64e3e57cc94e2c37bb10d2",
+  "binary_sha256": "939ccf20bd67fd3d1276431e27a86ad4e1171cc290598af45e657fc865eda492",
+  "bit_identical_binary_rebuild_claimed": false,
+  "delta_patch": "agave-4.3.2-LOCAL-085.patch",
+  "delta_patch_sha256": "76ac5672649823ab10f6f4620fe4603fbb16f3b26ec3ac8dc0f495bbcf33998b",
+  "format": "zolana085-full-source-inventory-comparison-v1",
+  "frozen_incremental_input_sha256": "99c936bd90dab96b9788e7d573834f7801d99c2dfad527fd0cdd81a875a6b69f",
+  "local_delta_apply_after_hashes_verified": 27,
+  "metadata_explanation": "Generated source-preparation receipt absent from actual build tree; not a Rust/Cargo input. Newly generated LOCAL085 receipt is likewise preparation metadata, not source equivalence evidence.",
+  "mutated_files": [],
+  "observed_utc": "2026-10-23T05:51:16Z",
+  "regular_files_equal": 1916,
+  "selected_binary": "zolana-fast-check",
+  "selected_source": "zolana-fast-check/src/main.rs",
+  "separate_preparer_metadata": {
+    "zolana-candidate.json": {
+      "bytes": 16829,
+      "sha256": "d20a1d35b9c31360b00e62f0806f1470931fcefae092e4276a73d1f6d558526c"
+    }
+  },
+  "symlinks_equal": 4,
+  "total_regular_file_bytes": 29739768,
+  "unexplained_actual_extra_files": [],
+  "unexplained_reconstructed_extra_files": [],
+  "unselected_diagnostic_bins_compiled_into_selected_runner": false,
+  "unselected_diagnostic_bins_included": [
+    "zolana-fast-check/src/bin/vat-public-inspect-consensus.rs",
+    "zolana-fast-check/src/bin/vat-public-inspect-legacy.rs",
+    "zolana-fast-check/src/bin/vat-public-inspect.rs",
+    "zolana-fast-check/src/bin/vote-history-public-tail.rs",
+    "zolana-fast-check/src/bin/vote-history-public.rs"
+  ]
+}

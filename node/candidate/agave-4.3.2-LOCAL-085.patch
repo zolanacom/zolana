@@ -1,0 +1,3783 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -14488,12 +14488,15 @@
+  "solana-rent",
+  "solana-rpc-client",
+  "solana-rpc-client-api",
++ "solana-runtime",
+  "solana-sdk-ids",
+  "solana-sha256-hasher",
++ "solana-shred-version",
+  "solana-signature",
+  "solana-signer",
+  "solana-system-transaction",
+  "solana-transaction-status-client-types",
++ "solana-unified-scheduler-pool",
+  "wincode",
+  "zolana-native-check",
+ ]
+diff --git a/runtime/Cargo.toml b/runtime/Cargo.toml
+--- a/runtime/Cargo.toml
++++ b/runtime/Cargo.toml
+@@ -21,6 +21,10 @@
+ 
+ [features]
+ agave-unstable-api = []
++# Explicit coordinated private-pilot consensus repair; never enabled by default.
++zolana-pilot-vat-recovery = []
++# Distinct, default-OFF future-only upgrade; incompatible with old201 retry.
++zolana-pilot-202-recovery = ["solana-sha256-hasher/sha2"]
+ conformance = [
+     "agave-unstable-api",
+     "dep:prost",
+diff --git a/runtime/src/bank.rs b/runtime/src/bank.rs
+--- a/runtime/src/bank.rs
++++ b/runtime/src/bank.rs
+@@ -236,6 +236,23 @@
+ mod fee_distribution;
+ mod metrics;
+ pub(crate) mod partitioned_epoch_rewards;
++#[cfg(all(feature = "zolana-pilot-vat-recovery", feature = "zolana-pilot-202-recovery"))]
++compile_error!("old201 retry and new202 recovery must never be enabled together");
++
++#[path = "bank/pilot_epoch202_recovery.rs"]
++mod pilot_epoch202_recovery;
++
++#[cfg(any(feature = "dev-context-only-utils", feature = "zolana-pilot-202-recovery"))]
++#[path = "bank/pilot_epoch202_shared.rs"]
++mod pilot_epoch202_shared;
++
++#[cfg(feature = "dev-context-only-utils")]
++#[path = "bank/pilot_vat_diagnostic.rs"]
++mod pilot_vat_diagnostic;
++
++#[cfg(all(test, feature = "zolana-pilot-vat-recovery"))]
++#[path = "bank/pilot_vat_recovery_tests.rs"]
++mod pilot_vat_recovery_tests;
+ mod recent_blockhashes_account;
+ mod serde_snapshot;
+ mod sysvar_cache;
+@@ -674,6 +691,8 @@
+             inflation,
+             stakes_cache,
+             epoch_stakes,
++            #[cfg(feature = "zolana-pilot-202-recovery")]
++            pilot_epoch202_view: _,
+             is_delta,
+             #[cfg(feature = "dev-context-only-utils")]
+             hash_overrides,
+@@ -975,6 +994,9 @@
+     /// staked nodes on epoch boundaries, saved off when a bank.slot() is at
+     ///   a leader schedule calculation boundary
+     epoch_stakes: HashMap<Epoch, VersionedEpochStakes>,
++    /// Nonserialized, future-only metadata; never contains a VAT-consumed flag.
++    #[cfg(feature = "zolana-pilot-202-recovery")]
++    pilot_epoch202_view: OnceLock<Option<VersionedEpochStakes>>,
+ 
+     /// A boolean reflecting whether any entries were recorded into the PoH
+     /// stream for the slot == self.slot
+@@ -1248,6 +1270,8 @@
+             inflation: Arc::<RwLock<Inflation>>::default(),
+             stakes_cache: StakesCache::default(),
+             epoch_stakes: HashMap::<Epoch, VersionedEpochStakes>::default(),
++            #[cfg(feature = "zolana-pilot-202-recovery")]
++            pilot_epoch202_view: OnceLock::new(),
+             is_delta: AtomicBool::default(),
+             rewards: RwLock::<Vec<(Pubkey, RewardInfo)>>::default(),
+             cluster_type: Option::<ClusterType>::default(),
+@@ -1503,6 +1527,8 @@
+             // we will .clone_with_epoch() this soon after stake data update; so just .clone() for now
+             stakes_cache,
+             epoch_stakes,
++            #[cfg(feature = "zolana-pilot-202-recovery")]
++            pilot_epoch202_view: OnceLock::new(),
+             parent_hash: parent.hash(),
+             parent_slot: parent.slot(),
+             leader,
+@@ -1558,6 +1584,8 @@
+             ancestors.extend(new.parents_iter().map(|parent| parent.slot()));
+             new.ancestors = Ancestors::from(ancestors);
+         });
++
++        new.pilot_epoch202_materialize_from_parent(&parent);
+ 
+         let prepare_timings = new.prepare_for_block_execution(
+             parent.epoch(),
+@@ -2182,6 +2210,8 @@
+             inflation: Arc::new(RwLock::new(fields.inflation)),
+             stakes_cache: StakesCache::new(stakes),
+             epoch_stakes,
++            #[cfg(feature = "zolana-pilot-202-recovery")]
++            pilot_epoch202_view: OnceLock::new(),
+             is_delta: AtomicBool::new(fields.is_delta),
+             rewards: RwLock::new(vec![]),
+             cluster_type: Some(genesis_config.cluster_type),
+@@ -2625,7 +2655,11 @@
+         // update epoch_stakes cache
+         //  if my parent didn't populate for this staker's epoch, we've
+         //  crossed a boundary
+-        if !self.epoch_stakes.contains_key(&leader_schedule_epoch) {
++        // An explicitly opted-in private pilot may repair only its exhausted,
++        // still-future empty membership. Nonempty snapshots remain immutable.
++        let retry_empty_future = self.pilot_empty_future_stakes_recovery_active()
++            && leader_schedule_epoch == self.epoch().saturating_add(1);
++        if !self.epoch_stakes.contains_key(&leader_schedule_epoch) || retry_empty_future {
+             self.epoch_stakes.retain(|&epoch, _| {
+                 // Note the greater-than-or-equal (and the `- 1`) is needed here
+                 // to ensure we retain the oldest epoch, if that epoch is 0.
+@@ -2642,6 +2676,11 @@
+             };
+             let stakes = SerdeStakesToStakeFormat::from(stakes);
+             let new_epoch_stakes = VersionedEpochStakes::new(stakes, leader_schedule_epoch);
++            // Keep the required empty entry, without repeated VAT/reward/account
++            // side effects, until ordinary signed transfers restore eligibility.
++            if retry_empty_future && new_epoch_stakes.total_stake() == 0 {
++                return;
++            }
+             info!(
+                 "new epoch stakes, epoch: {}, total_stake: {}",
+                 leader_schedule_epoch,
+@@ -2664,6 +2703,47 @@
+             }
+             self.epoch_stakes
+                 .insert(leader_schedule_epoch, new_epoch_stakes);
++        }
++    }
++
++    /// Narrow opt-in for the exhausted, unfinalized future membership of the
++    /// original private pilot. The launcher must independently pin its exact
++    /// genesis hash before enabling this binary. This is a consensus upgrade:
++    /// a previously empty future snapshot may be populated later in epoch 201.
++    /// It neither replaces positive stake snapshots nor supplies fallback stake.
++    pub fn pilot_empty_future_stakes_recovery_active(&self) -> bool {
++        #[cfg(not(feature = "zolana-pilot-vat-recovery"))]
++        {
++            false
++        }
++        #[cfg(feature = "zolana-pilot-vat-recovery")]
++        {
++            if !self.feature_set.snapshot().alpenglow
++                || self.epoch() != 201
++                || self.slot() < 411_648
++                || self.epoch_schedule.slots_per_epoch != 2048
++                || self.epoch_schedule.leader_schedule_slot_offset != 2048
++                || !self
++                    .epoch_stakes
++                    .get(&202)
++                    .is_some_and(|s| s.total_stake() == 0)
++                || !self
++                    .epoch_stakes
++                    .get(&201)
++                    .is_some_and(|s| s.total_stake() > 0)
++            {
++                return false;
++            }
++            let Some(account) = self.get_account(&native_payment_program::pool_address()) else {
++                return false;
++            };
++            if account.owner() != &native_payment_program::id()
++                || account.data().get(..8) != Some(b"NPOOL004".as_slice())
++            {
++                return false;
++            }
++            native_payments::state::PoolState::decode(account.data())
++                .is_ok_and(|state| state.network == [67; 32] && state.uses_slot_anchors())
+         }
+     }
+ 
+@@ -3141,7 +3221,8 @@
+         if !state.uses_slot_anchors() {
+             return; // Feature activation never migrates existing NPOOL003.
+         }
+-        let completed = state.with_completed_slot(self.slot())
++        let completed = state
++            .with_completed_slot(self.slot())
+             .expect("native slot checkpoint must follow this Bank's ancestry");
+         account.set_data_from_slice(&completed.encode());
+         self.store_account(&address, &account);
+@@ -5910,6 +5991,11 @@
+ 
+     /// Get the EpochStakes for a given epoch
+     pub fn epoch_stakes(&self, epoch: Epoch) -> Option<&VersionedEpochStakes> {
++        #[cfg(feature = "zolana-pilot-202-recovery")]
++        if epoch == 202 && self.pilot_epoch202_anchor_identity().is_some()
++            && self.epoch_stakes.get(&202).is_some_and(|stakes| stakes.total_stake() == 0) {
++            return self.pilot_epoch202_recovery_view();
++        }
+         self.epoch_stakes.get(&epoch)
+     }
+ 
+@@ -5952,13 +6038,12 @@
+ 
+     /// Returns a mapping from validator [`Pubkey`] to stake in Lamports for the given epoch.
+     pub fn epoch_staked_nodes(&self, epoch: Epoch) -> Option<Arc<HashMap<Pubkey, u64>>> {
+-        Some(self.epoch_stakes.get(&epoch)?.stakes().staked_nodes())
++        Some(self.epoch_stakes(epoch)?.stakes().staked_nodes())
+     }
+ 
+     /// Returns the total stake in Lamports for the given epoch.
+     pub fn epoch_total_stake(&self, epoch: Epoch) -> Option<u64> {
+-        self.epoch_stakes
+-            .get(&epoch)
++        self.epoch_stakes(epoch)
+             .map(|epoch_stakes| epoch_stakes.total_stake())
+     }
+ 
+@@ -5969,7 +6054,7 @@
+ 
+     /// Returns a mapping from [`Pubkey`] to (stake in Lamports and [`VoteAccount`]) for the given epoch.
+     pub fn epoch_vote_accounts(&self, epoch: Epoch) -> Option<&VoteAccountsHashMap> {
+-        let epoch_stakes = self.epoch_stakes.get(&epoch)?.stakes();
++        let epoch_stakes = self.epoch_stakes(epoch)?.stakes();
+         Some(epoch_stakes.vote_accounts().as_ref())
+     }
+ 
+diff --git a/runtime/src/bank/pilot_epoch202_recovery.rs b/runtime/src/bank/pilot_epoch202_recovery.rs
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/bank/pilot_epoch202_recovery.rs
+@@ -0,0 +1,222 @@
++//! Explicit, default-OFF LOCAL085 upgrade. No historical201 retry or parent debit.
++#[cfg(feature = "zolana-pilot-202-recovery")]
++use super::pilot_epoch202_shared::*;
++use super::*;
++use serde_json::{json, Value};
++
++const ROOT_HASH: &str = "BYnRBCtGoKuEqWz36fwqYn6uBe1yY5ftp5oW9qs22Gdz";
++const PARENT_HASH: &str = "HXxWUSa9AoiyFJ7BEsVHNXLVNziD64zayM5592axQAsh";
++const PARENT_ID: &str = "FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu";
++const ROOT_INPUT: &str = "6e56d2954b6e1ea6afdcd14e9688fca011bae4c9b357cf8d904fe9669e7b038e";
++const PARENT_INPUT: &str = "f98785132ad63e75b9cdc21622992fc825d796ae9ef3c7f21fa45099cb87c2c9";
++const CONSENSUS: &str = "fe6f03c9cd7ed3d9774f71acd97f0f16b5dda937fcfcca483e66d6b1e0352e30";
++
++impl Bank {
++    /// Unique public linked-runtime proof; no config, ledger or key access.
++    pub fn pilot_epoch202_build_info_v1() -> Value {
++        json!({"format":"zolana085-epoch202-runtime-build-v1",
++            "compiled_new_feature":cfg!(feature="zolana-pilot-202-recovery"),
++            "compiled_old_retry_feature":cfg!(feature="zolana-pilot-vat-recovery"),
++            "historical201_policy":"existing-entry-preserved-v1",
++            "activation_first_slot":413696,"target_epoch":202,
++            "genesis_hash":"Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p","network":vec![67u8;32],
++            "root_anchor":{"slot":413694,"bank_hash":ROOT_HASH,"raw_input_sha256":ROOT_INPUT},
++            "signed_parent":{"slot":413695,"bank_hash":PARENT_HASH,"block_id":PARENT_ID,
++                "raw_input_sha256":PARENT_INPUT},"consensus_output_sha256":CONSENSUS})
++    }
++
++    /// Borrowed future202 consensus metadata only. OFF always returns None.
++    pub fn pilot_epoch202_recovery_view(&self) -> Option<&VersionedEpochStakes> {
++        #[cfg(not(feature = "zolana-pilot-202-recovery"))]
++        {
++            None
++        }
++        #[cfg(feature = "zolana-pilot-202-recovery")]
++        {
++            // Neither mutable accounts nor an incomplete frozen block identity
++            // may poison the once cell before its immutable inputs are known.
++            if !self.is_frozen() {
++                return None;
++            }
++            let input_pin = self.pilot_epoch202_anchor_identity()?;
++            frozen_view(self.is_frozen(), &self.pilot_epoch202_view, || {
++                self.pilot_epoch202_derive(input_pin)
++            })
++        }
++    }
++
++    #[cfg(feature = "zolana-pilot-202-recovery")]
++    pub(super) fn pilot_epoch202_anchor_identity(&self) -> Option<&'static str> {
++        if !self.is_frozen() || self.epoch() != 201 {
++            return None;
++        }
++        match self.slot() {
++            413694 if self.hash().to_string() == ROOT_HASH => Some(ROOT_INPUT),
++            413695
++                if self.hash().to_string() == PARENT_HASH
++                    && self
++                        .block_id()
++                        .is_some_and(|id| id.to_string() == PARENT_ID) =>
++            {
++                Some(PARENT_INPUT)
++            }
++            _ => None,
++        }
++    }
++
++    #[cfg(feature = "zolana-pilot-202-recovery")]
++    fn pilot_epoch202_derive(&self, input_pin: &str) -> Option<VersionedEpochStakes> {
++        // Raw fields only: invoking epoch_stakes/get_rank_map/whole diagnostic
++        // here would recursively ask for the view being initialized.
++        if !self.feature_set.snapshot().alpenglow
++            || !self.is_alpenglow()
++            || self.epoch_schedule.slots_per_epoch != 2048
++            || self.epoch_schedule.leader_schedule_slot_offset != 2048
++            || self.epoch_schedule.warmup
++            || !self
++                .epoch_stakes
++                .get(&201)
++                .is_some_and(|s| s.total_stake() > 0)
++            || !self
++                .epoch_stakes
++                .get(&202)
++                .is_some_and(|s| s.total_stake() == 0)
++            || self.epoch_stakes.contains_key(&203)
++        {
++            return None;
++        }
++        let pool = self.get_account(&native_payment_program::pool_address())?;
++        if pool.owner() != &native_payment_program::id()
++            || pool.data().get(..8) != Some(b"NPOOL004".as_slice())
++        {
++            return None;
++        }
++        let pool = native_payments::state::PoolState::decode(pool.data()).ok()?;
++        if pool.network != [67; 32] || !pool.uses_slot_anchors() {
++            return None;
++        }
++        let minimum = self.minimum_vote_account_balance_for_vat();
++        let vat = self.vat_to_burn_per_epoch();
++        let top = self.get_top_epoch_stakes();
++        if top.vote_accounts().len() != 3 {
++            return None;
++        }
++        let cached = self.stakes_cache.stakes();
++        let mut entries = Vec::with_capacity(3);
++        for vote in ORIGINAL_VOTES {
++            let actual = self.get_account(&vote)?;
++            let cache = cached.vote_accounts().get(&vote)?;
++            let stake = top.vote_accounts().get_delegated_stake(&vote);
++            if stake == 0 || cache.account() != &actual {
++                return None;
++            }
++            entries.push(EligibleInput {
++                vote,
++                delegated_weight: stake,
++                actual_lamports: actual.lamports(),
++                owner: *actual.owner(),
++                vote_data_sha256: solana_sha256_hasher::hash(actual.data()).to_bytes(),
++            });
++        }
++        drop(cached);
++        if eligible_digest(&entries, vat, minimum).as_deref() != Some(input_pin) {
++            return None;
++        }
++        let outputs =
++            prospective_consensus_outputs(top.vote_accounts(), &self.epoch_schedule, vat, minimum)?;
++        if consensus_digest(&outputs) != CONSENSUS {
++            return None;
++        }
++        Some(VersionedEpochStakes::new(
++            SerdeStakesToStakeFormat::from(top),
++            202,
++        ))
++    }
++
++    pub(super) fn pilot_epoch202_materialize_from_parent(&mut self, parent: &Bank) {
++        #[cfg(not(feature = "zolana-pilot-202-recovery"))]
++        {
++            let _ = parent;
++        }
++        #[cfg(feature = "zolana-pilot-202-recovery")]
++        {
++            if self.epoch() != 202 {
++                return;
++            }
++            if self
++                .epoch_stakes
++                .get(&202)
++                .is_some_and(|s| s.total_stake() > 0)
++            {
++                return;
++            }
++            assert!(
++                self.slot() >= 413696
++                    && parent.slot() == 413695
++                    && parent.pilot_epoch202_anchor_identity() == Some(PARENT_INPUT),
++                "LOCAL085202 requires exact immutable signed695 parent"
++            );
++            assert!(
++                self.epoch_stakes
++                    .get(&202)
++                    .is_some_and(|s| s.total_stake() == 0),
++                "LOCAL085202 requires original empty202 entry"
++            );
++            let projected = parent
++                .pilot_epoch202_recovery_view()
++                .expect("LOCAL085202 real membership/input/consensus pin refused");
++            let schedule = crate::leader_schedule_utils::leader_schedule_from_vote_accounts(
++                202,
++                &self.epoch_schedule,
++                projected.stakes().vote_accounts().as_ref(),
++            )
++            .expect("LOCAL085202 real leader schedule missing");
++            let (_, index) = self.epoch_schedule.get_epoch_and_slot_index(self.slot());
++            assert_eq!(
++                *self.leader(),
++                schedule[index],
++                "LOCAL085202 leader differs from real membership"
++            );
++            self.pilot_epoch202_install(projected.clone());
++        }
++    }
++
++    #[cfg(feature = "zolana-pilot-202-recovery")]
++    fn pilot_epoch202_install(&mut self, projected: VersionedEpochStakes) {
++        assert!(
++            !self.freeze_started(),
++            "LOCAL085202 cannot debit a frozen Bank"
++        );
++        if self
++            .epoch_stakes
++            .get(&202)
++            .is_some_and(|s| s.total_stake() > 0)
++        {
++            return;
++        }
++        assert!(self
++            .epoch_stakes
++            .get(&202)
++            .is_some_and(|s| s.total_stake() == 0));
++        assert!(projected.total_stake() > 0);
++        // Bank-local effects: never mutate a parent sidecar/VAT-consumed flag.
++        self.maybe_burn_vat_from_staked_accounts(&projected);
++        self.epoch_stakes.insert(202, projected);
++    }
++}
++
++#[cfg(feature = "zolana-pilot-202-recovery")]
++fn frozen_view(
++    frozen: bool,
++    cell: &OnceLock<Option<VersionedEpochStakes>>,
++    derive: impl FnOnce() -> Option<VersionedEpochStakes>,
++) -> Option<&VersionedEpochStakes> {
++    if !frozen {
++        return None;
++    }
++    cell.get_or_init(derive).as_ref()
++}
++
++#[cfg(all(test, feature = "zolana-pilot-202-recovery"))]
++#[path = "pilot_epoch202_recovery_tests.rs"]
++mod tests;
+diff --git a/runtime/src/bank/pilot_epoch202_recovery_tests.rs b/runtime/src/bank/pilot_epoch202_recovery_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/bank/pilot_epoch202_recovery_tests.rs
+@@ -0,0 +1,192 @@
++//! Disposable synthetic Bank bookkeeping; actual anchor replay is a separate gate.
++use super::*;
++use crate::genesis_utils::{
++    create_genesis_config_with_alpenglow_vote_accounts, ValidatorVoteKeypairs,
++};
++use solana_signer::Signer;
++use std::sync::atomic::{AtomicUsize, Ordering};
++
++fn fixture() -> (
++    Arc<Bank>,
++    Arc<RwLock<crate::bank_forks::BankForks>>,
++    [Pubkey; 3],
++    SlotLeader,
++) {
++    let keys = (0..3)
++        .map(|_| ValidatorVoteKeypairs::new_rand())
++        .collect::<Vec<_>>();
++    let genesis = create_genesis_config_with_alpenglow_vote_accounts(
++        1_000_000_000_000_000,
++        &keys,
++        vec![10_000_000_000; 3],
++    )
++    .genesis_config;
++    let mut bank = Bank::new_for_tests(&genesis);
++    let votes = std::array::from_fn(|i| keys[i].vote_keypair.pubkey());
++    for vote in votes {
++        let mut account = bank.get_account(&vote).unwrap();
++        account.set_lamports(5_000_000_000_000);
++        bank.store_account_and_update_capitalization(&vote, &account);
++    }
++    bank.epoch_stakes.insert(
++        202,
++        VersionedEpochStakes::new(
++            SerdeStakesToStakeFormat::from(Stakes::<StakeAccount<Delegation>>::new(
++                VoteAccounts::default(),
++                0,
++            )),
++            202,
++        ),
++    );
++    bank.freeze();
++    let leader = SlotLeader {
++        id: keys[0].node_keypair.pubkey(),
++        vote_address: votes[0],
++    };
++    let (bank, forks) = bank.wrap_with_bank_forks_for_tests();
++    (bank, forks, votes, leader)
++}
++
++#[test]
++fn unready_query_cannot_poison_once_cell_before_valid_immutable_derivation() {
++    let (parent, _forks, _, _) = fixture();
++    let projected = VersionedEpochStakes::new(
++        SerdeStakesToStakeFormat::from(parent.get_top_epoch_stakes()),
++        202,
++    );
++    let cell = OnceLock::new();
++    let calls = AtomicUsize::new(0);
++    assert!(frozen_view(false, &cell, || {
++        calls.fetch_add(1, Ordering::SeqCst);
++        Some(projected.clone())
++    })
++    .is_none());
++    assert!(cell.get().is_none());
++    assert_eq!(calls.load(Ordering::SeqCst), 0);
++    assert!(frozen_view(true, &cell, || {
++        calls.fetch_add(1, Ordering::SeqCst);
++        Some(projected.clone())
++    })
++    .is_some());
++    assert_eq!(calls.load(Ordering::SeqCst), 1);
++    assert!(frozen_view(true, &cell, || panic!(
++        "immutable membership must be memoized"
++    ))
++    .is_some());
++}
++
++#[test]
++fn public_view_refuses_non_anchor_without_changes_or_false_memoization() {
++    let (parent, forks, votes, leader) = fixture();
++    let child = Bank::new_from_parent_with_bank_forks(&forks, Arc::clone(&parent), leader, 1);
++    let before = (
++        child.capitalization(),
++        votes.map(|vote| child.get_account(&vote).unwrap()),
++        child.epoch_stakes.clone(),
++    );
++    assert!(child.pilot_epoch202_recovery_view().is_none());
++    assert!(child.pilot_epoch202_view.get().is_none());
++    child.freeze();
++    assert!(child.pilot_epoch202_recovery_view().is_none());
++    assert!(child.pilot_epoch202_view.get().is_none());
++    assert_eq!(
++        before.1,
++        votes.map(|vote| child.get_account(&vote).unwrap())
++    );
++    assert_eq!(before.2, child.epoch_stakes);
++    // Freeze may burn an unrelated preexisting incinerator balance; view itself does not.
++    let frozen_cap = child.capitalization();
++    assert!(child.pilot_epoch202_recovery_view().is_none());
++    assert_eq!(frozen_cap, child.capitalization());
++}
++
++#[test]
++fn alternative_children_each_pay_deferred202_and_parent_remains_untouched() {
++    let (parent, forks, votes, leader) = fixture();
++    let projected = VersionedEpochStakes::new(
++        SerdeStakesToStakeFormat::from(parent.get_top_epoch_stakes()),
++        202,
++    );
++    let balances = votes.map(|vote| parent.get_balance(&vote));
++    let parent_hash = parent.hash();
++    let parent_cap = parent.capitalization();
++    let parent_map = parent.epoch_stakes.clone();
++    let mut first = Bank::new_from_parent(Arc::clone(&parent), leader, 1);
++    let mut second = Bank::new_from_parent(Arc::clone(&parent), leader, 2);
++    for child in [&mut first, &mut second] {
++        let vat = child.vat_to_burn_per_epoch();
++        let before = child.capitalization();
++        child.pilot_epoch202_install(projected.clone());
++        assert_eq!(
++            votes.map(|vote| child.get_balance(&vote)),
++            balances.map(|balance| balance - vat)
++        );
++        assert_eq!(
++            child.get_balance(&solana_sdk_ids::incinerator::id()),
++            3 * vat
++        );
++        let after = votes.map(|vote| child.get_balance(&vote));
++        child.pilot_epoch202_install(projected.clone());
++        assert_eq!(after, votes.map(|vote| child.get_balance(&vote)));
++        child.freeze();
++        assert_eq!(child.capitalization(), before - 3 * vat);
++    }
++    // Register both alternate children in the held real ForkGraph after the
++    // mutable bookkeeping assertions, as the ordinary helper does.
++    forks.write().unwrap().insert(first);
++    forks.write().unwrap().insert(second);
++    assert_eq!(parent_hash, parent.hash());
++    assert_eq!(parent_cap, parent.capitalization());
++    assert_eq!(balances, votes.map(|vote| parent.get_balance(&vote)));
++    assert_eq!(parent_map, parent.epoch_stakes);
++}
++
++#[test]
++fn restored_positive_membership_is_not_debited_or_replaced() {
++    let (parent, forks, votes, leader) = fixture();
++    let projected = VersionedEpochStakes::new(
++        SerdeStakesToStakeFormat::from(parent.get_top_epoch_stakes()),
++        202,
++    );
++    let mut paid = Bank::new_from_parent(parent, leader, 1);
++    paid.pilot_epoch202_install(projected.clone());
++    paid.freeze();
++    let saved = wincode::serialize(paid.epoch_stakes.get(&202).unwrap()).unwrap();
++    let restored: DeserializableVersionedEpochStakes = wincode::deserialize(&saved).unwrap();
++    let paid = forks
++        .write()
++        .unwrap()
++        .insert(paid)
++        .clone_without_scheduler();
++    let mut next = Bank::new_from_parent(paid, leader, 3);
++    next.epoch_stakes.insert(202, restored.into());
++    let before = (
++        votes.map(|vote| next.get_balance(&vote)),
++        next.capitalization(),
++        next.epoch_stakes.clone(),
++    );
++    next.pilot_epoch202_install(projected);
++    assert_eq!(
++        before,
++        (
++            votes.map(|vote| next.get_balance(&vote)),
++            next.capitalization(),
++            next.epoch_stakes.clone()
++        )
++    );
++    forks.write().unwrap().insert(next);
++}
++
++#[test]
++fn linked_build_info_declares_distinct_upgrade_and_exact_fixed_pins() {
++    let info = Bank::pilot_epoch202_build_info_v1();
++    assert_eq!(info["format"], "zolana085-epoch202-runtime-build-v1");
++    assert_eq!(info["compiled_new_feature"], true);
++    assert_eq!(info["compiled_old_retry_feature"], false);
++    assert_eq!(info["activation_first_slot"], 413696);
++    assert_eq!(info["consensus_output_sha256"], CONSENSUS);
++    assert_ne!(
++        info["root_anchor"]["raw_input_sha256"],
++        info["signed_parent"]["raw_input_sha256"]
++    );
++}
+diff --git a/runtime/src/bank/pilot_epoch202_shared.rs b/runtime/src/bank/pilot_epoch202_shared.rs
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/bank/pilot_epoch202_shared.rs
+@@ -0,0 +1,231 @@
++//! Pure bounded public input/output helpers; no Bank reads or mutations.
++use super::*;
++use serde_json::{json, Value};
++
++pub(super) const ELIGIBLE_DOMAIN: &[u8] = b"zolana085-epoch202-eligible-inputs-v1\0";
++pub(super) const ORIGINAL_VOTES: [Pubkey; 3] = [
++    solana_pubkey::pubkey!("7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn"),
++    solana_pubkey::pubkey!("Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX"),
++    solana_pubkey::pubkey!("GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju"),
++];
++
++#[derive(Clone)]
++pub(super) struct EligibleInput {
++    pub(super) vote: Pubkey,
++    pub(super) delegated_weight: u64,
++    pub(super) actual_lamports: u64,
++    pub(super) owner: Pubkey,
++    pub(super) vote_data_sha256: [u8; 32],
++}
++
++pub(super) fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
++}
++
++/// Canonical JSON of internally constructed, bounded PUBLIC diagnostic output.
++/// Object keys sort recursively; array order and integer representations remain
++/// exact. This is not a replacement for each anchor's full account-data pin.
++fn canonical_public_json(value: &Value, out: &mut Vec<u8>) {
++    match value {
++        Value::Object(fields) => {
++            out.push(b'{');
++            let mut keys = fields.keys().collect::<Vec<_>>();
++            keys.sort_unstable();
++            for (index, key) in keys.into_iter().enumerate() {
++                if index != 0 {
++                    out.push(b',');
++                }
++                out.extend(serde_json::to_vec(key).unwrap());
++                out.push(b':');
++                canonical_public_json(&fields[key], out);
++            }
++            out.push(b'}');
++        }
++        Value::Array(items) => {
++            out.push(b'[');
++            for (index, item) in items.iter().enumerate() {
++                if index != 0 {
++                    out.push(b',');
++                }
++                canonical_public_json(item, out);
++            }
++            out.push(b']');
++        }
++        _ => out.extend(serde_json::to_vec(value).unwrap()),
++    }
++}
++
++pub(super) fn consensus_digest(outputs: &Value) -> String {
++    let mut bytes = b"zolana085-epoch202-consensus-outputs-v1\0".to_vec();
++    canonical_public_json(outputs, &mut bytes);
++    hex(solana_sha256_hasher::hash(&bytes).as_ref())
++}
++
++pub(super) fn decoded_vote_state(vote: &Pubkey, account: &VoteAccount) -> Value {
++    let view = account.vote_state_view();
++    let timestamp = view.last_timestamp();
++    let nonrolling_pin =
++        solana_vote_interface::state::VoteStateV4::deserialize(account.account().data(), vote)
++            .ok()
++            .and_then(|mut state| {
++                state.votes.clear();
++                state.root_slot = None;
++                state.epoch_credits.clear();
++                state.last_timestamp = Default::default();
++                wincode::serialize(&solana_vote_interface::state::VoteStateVersions::new_v4(
++                    state,
++                ))
++                .ok()
++            })
++            .map(|bytes| hex(solana_sha256_hasher::hash(&bytes).as_ref()));
++    json!({
++        "node_pubkey": view.node_pubkey().to_string(),
++        "authorized_voter_202": view.get_authorized_voter(202).map(ToString::to_string),
++        "bls_pubkey_compressed_hex": view.bls_pubkey_compressed().map(|key| hex(&key)),
++        "inflation_commission_bps": view.inflation_rewards_commission(),
++        "legacy_commission_percent": view.commission(),
++        "block_revenue_commission_bps": view.block_revenue_commission(),
++        "inflation_rewards_collector": view.inflation_rewards_collector().map(ToString::to_string),
++        "block_revenue_collector": view.block_revenue_collector().map(ToString::to_string),
++        "pending_delegator_rewards": view.pending_delegator_rewards(),
++        "nonrolling_configuration_sha256":nonrolling_pin,
++        "normalization":"parsed V4; only votes/root_slot/epoch_credits/last_timestamp cleared; financial/configuration fields retained",
++        "root_slot": view.root_slot(), "last_voted_slot": view.last_voted_slot(),
++        "votes": view.votes_iter().map(|vote| json!({"slot":vote.slot(),
++            "confirmation_count":vote.confirmation_count()})).collect::<Vec<_>>(),
++        "credits": view.credits(),
++        "epoch_credits": view.epoch_credits_iter().map(|item| json!({
++            "epoch":item.epoch(),"credits":item.credits(),"previous_credits":item.prev_credits()
++        })).collect::<Vec<_>>(),
++        "last_timestamp": {"slot":timestamp.slot,"timestamp":timestamp.timestamp},
++    })
++}
++
++/// Full prospective leader/membership/quorum outputs derived by ordinary
++/// constructors, without changing Bank getters, epoch maps, or accounts.
++pub(super) fn prospective_consensus_outputs(
++    accounts: &solana_vote::vote_account::VoteAccounts,
++    schedule: &EpochSchedule,
++    vat: u64,
++    minimum: u64,
++) -> Option<Value> {
++    if accounts.len() != 3
++        || schedule.slots_per_epoch != 2048
++        || schedule.leader_schedule_slot_offset != 2048
++        || schedule.warmup
++    {
++        return None;
++    }
++    let mut ordered = accounts.as_ref().iter().collect::<Vec<_>>();
++    ordered.sort_unstable_by_key(|(vote, _)| vote.to_bytes());
++    let mut nodes = std::collections::HashSet::new();
++    let mut keys = std::collections::HashSet::new();
++    for (_, (stake, account)) in &ordered {
++        let view = account.vote_state_view();
++        let key = view.bls_pubkey_compressed()?;
++        if *stake == 0
++            || account.lamports() < minimum
++            || view.get_authorized_voter(202).is_none()
++            || !nodes.insert(*view.node_pubkey())
++            || !keys.insert(key)
++            || crate::epoch_stakes::bls_pubkey_compressed_bytes_to_bls_pubkey(key).is_none()
++        {
++            return None;
++        }
++    }
++    let projected = VersionedEpochStakes::new(
++        SerdeStakesToStakeFormat::from(Stakes::<StakeAccount<Delegation>>::new(
++            accounts.clone(),
++            201,
++        )),
++        202,
++    );
++    let rank_map = projected.bls_pubkey_to_rank_map();
++    if rank_map.len() != 3 || rank_map.total_stake().get() != projected.total_stake() {
++        return None;
++    }
++    let votes = ordered.iter().map(|(vote, (stake, account))| {
++        let view = account.vote_state_view();
++        json!({"vote":vote.to_string(),"node":view.node_pubkey().to_string(),
++            "delegated_weight":stake,"authorized_voter_202":view.get_authorized_voter(202).unwrap().to_string(),
++            "bls_pubkey_compressed_hex":hex(&view.bls_pubkey_compressed().unwrap())})
++    }).collect::<Vec<_>>();
++    let mut node_rows = projected
++        .node_id_to_vote_accounts()
++        .iter()
++        .collect::<Vec<_>>();
++    node_rows.sort_unstable_by_key(|(node, _)| node.to_bytes());
++    let node_rows = node_rows
++        .into_iter()
++        .map(|(node, value)| {
++            let mut votes = value.vote_accounts.clone();
++            votes.sort_unstable_by_key(|vote| vote.to_bytes());
++            json!({"node":node.to_string(),"total_stake":value.total_stake,
++            "vote_accounts":votes.iter().map(ToString::to_string).collect::<Vec<_>>()})
++        })
++        .collect::<Vec<_>>();
++    let staked_nodes = projected.stakes().staked_nodes();
++    let mut staked_nodes = staked_nodes.iter().collect::<Vec<_>>();
++    staked_nodes.sort_unstable_by_key(|(node, _)| node.to_bytes());
++    let mut authorized = projected
++        .epoch_authorized_voters()
++        .iter()
++        .collect::<Vec<_>>();
++    authorized.sort_unstable_by_key(|(vote, _)| vote.to_bytes());
++    let ranks = (0..rank_map.len()).map(|rank| {
++        let entry = rank_map.get_pubkey_stake_entry(rank).unwrap();
++        let account = accounts.get(&entry.vote_account_pubkey).unwrap();
++        json!({"rank":rank,"vote":entry.vote_account_pubkey.to_string(),
++            "node":entry.node_pubkey.to_string(),"stake":entry.stake.get(),
++            "bls_pubkey_compressed_hex":hex(&account.vote_state_view().bls_pubkey_compressed().unwrap())})
++    }).collect::<Vec<_>>();
++    let leaders = crate::leader_schedule_utils::leader_schedule_from_vote_accounts(
++        202,
++        schedule,
++        accounts.as_ref(),
++    )?;
++    if leaders.num_slots() != 2048 {
++        return None;
++    }
++    Some(json!({
++        "target_epoch":202,"slots_per_epoch":2048,"repeat_slots":4,"vat":vat,
++        "minimum_vote_balance":minimum,"total_stake":projected.total_stake(),
++        "votes":votes,"node_vote_accounts":node_rows,
++        "staked_nodes":staked_nodes.into_iter().map(|(node, stake)| json!({
++            "node":node.to_string(),"stake":stake})).collect::<Vec<_>>(),
++        "authorized_voters":authorized.into_iter().map(|(vote, voter)| json!({
++            "vote":vote.to_string(),"authorized_voter":voter.to_string()})).collect::<Vec<_>>(),
++        "bls_total_stake":rank_map.total_stake().get(),"bls_ranks":ranks,
++        "slot_leaders":leaders.get_slot_leaders().map(|leader| json!({
++            "id":leader.id.to_string(),"vote_address":leader.vote_address.to_string()})).collect::<Vec<_>>(),
++    }))
++}
++
++/// Exact public wire contract shared with the future activation implementation.
++/// The caller separately checks eligibility, BLS, original identities and cache
++/// fidelity. This function only encodes three distinct bounded public entries.
++pub(super) fn eligible_digest(entries: &[EligibleInput], vat: u64, minimum: u64) -> Option<String> {
++    if entries.len() != 3 {
++        return None;
++    }
++    let mut sorted = entries.to_vec();
++    sorted.sort_unstable_by_key(|entry| entry.vote.to_bytes());
++    if sorted.windows(2).any(|pair| pair[0].vote == pair[1].vote) {
++        return None;
++    }
++    let mut bytes = Vec::with_capacity(ELIGIBLE_DOMAIN.len() + 32 + 4 * 8 + 4 + 3 * 112);
++    bytes.extend_from_slice(ELIGIBLE_DOMAIN);
++    bytes.extend_from_slice(&[67; 32]);
++    for value in [201u64, 202u64, vat, minimum] {
++        bytes.extend_from_slice(&value.to_le_bytes());
++    }
++    bytes.extend_from_slice(&3u32.to_le_bytes());
++    for entry in sorted {
++        bytes.extend_from_slice(entry.vote.as_ref());
++        bytes.extend_from_slice(&entry.delegated_weight.to_le_bytes());
++        bytes.extend_from_slice(&entry.actual_lamports.to_le_bytes());
++        bytes.extend_from_slice(entry.owner.as_ref());
++        bytes.extend_from_slice(&entry.vote_data_sha256);
++    }
++    Some(hex(solana_sha256_hasher::hash(&bytes).as_ref()))
++}
+diff --git a/runtime/src/bank/pilot_vat_diagnostic.rs b/runtime/src/bank/pilot_vat_diagnostic.rs
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/bank/pilot_vat_diagnostic.rs
+@@ -0,0 +1,520 @@
++//! Bounded read-only public diagnostics for offline pilot bank restoration.
++//! Does not retry admission, burn VAT, update epoch maps or submit transactions.
++use super::*;
++use serde_json::{json, Value};
++
++use super::pilot_epoch202_shared::*;
++
++impl Bank {
++    /// Exactly three caller-reviewed PUBLIC vote addresses. No key material,
++    /// account bytes, delegation addresses or private wallet state is returned.
++    pub fn pilot_vat_diagnostic(&self, votes: [Pubkey; 3]) -> Value {
++        let minimum = self.minimum_vote_account_balance_for_vat();
++        let (cached, delegation_count, references) = {
++            let stakes = self.stakes_cache.stakes();
++            let references = votes.map(|vote| {
++                let mut count = 0u64;
++                let mut nominal = 0u128;
++                for (_, account) in stakes.stake_delegations().iter() {
++                    let delegation = account.delegation();
++                    if delegation.voter_pubkey == vote {
++                        count += 1;
++                        nominal += u128::from(delegation.stake);
++                    }
++                }
++                (count, nominal.to_string())
++            });
++            (
++                stakes.vote_accounts().clone(),
++                stakes.stake_delegations().len(),
++                references,
++            )
++        };
++        let cached_total = cached
++            .delegated_stakes()
++            .map(|(_, stake)| u128::from(stake))
++            .sum::<u128>();
++        let top = self.get_top_epoch_stakes();
++        let top_total = top
++            .vote_accounts()
++            .delegated_stakes()
++            .map(|(_, stake)| u128::from(stake))
++            .sum::<u128>();
++        let rows = votes.iter().enumerate().map(|(index, vote)| {
++            let cache = cached.get(vote);
++            let actual = self.get_account(vote);
++            let actual_vote = actual.clone().and_then(|account| VoteAccount::try_from(account).ok());
++            json!({
++                "vote": vote.to_string(),
++                "cached_present": cache.is_some(),
++                "cached_stake": cached.get_delegated_stake(vote),
++                "cached_lamports": cache.map(VoteAccount::lamports),
++                "cached_owner": cache.map(|account| account.owner().to_string()),
++                "cached_node": cache.map(|account| account.node_pubkey().to_string()),
++                "cached_bls_present": cache.map(|account| account.vote_state_view().bls_pubkey_compressed().is_some()),
++                "cached_balance_sufficient": cache.map(|account| account.lamports() >= minimum),
++                "accounts_db_present": actual.is_some(),
++                "accounts_db_lamports": actual.as_ref().map(ReadableAccount::lamports),
++                "accounts_db_owner": actual.as_ref().map(|account| account.owner().to_string()),
++                "accounts_db_vote_parse_ok": actual_vote.is_some(),
++                "accounts_db_bls_present": actual_vote.as_ref().map(|account| account.vote_state_view().bls_pubkey_compressed().is_some()),
++                "accounts_db_node": actual_vote.as_ref().map(|account| account.node_pubkey().to_string()),
++                "decoded_vote_state": actual_vote.as_ref().map(|account| decoded_vote_state(vote, account)),
++                "accounts_db_balance_sufficient": actual.as_ref().map(|account| account.lamports() >= minimum),
++                "cached_account_equals_accounts_db": cache.zip(actual.as_ref()).map(|(left, right)| left.account() == right),
++                "delegation_references": references[index].0,
++                "nominal_delegation_lamports": references[index].1,
++                "filtered_top_stake": top.vote_accounts().get_delegated_stake(vote),
++            })
++        }).collect::<Vec<_>>();
++        let pool = self.get_account(&native_payment_program::pool_address());
++        let pool_owner_ok = pool
++            .as_ref()
++            .is_some_and(|a| a.owner() == &native_payment_program::id());
++        let pool_magic_ok = pool
++            .as_ref()
++            .is_some_and(|a| a.data().get(..8) == Some(b"NPOOL004".as_slice()));
++        let decoded = pool
++            .as_ref()
++            .map(|a| native_payments::state::PoolState::decode(a.data()));
++        let pool_decode_ok = decoded.as_ref().is_some_and(|result| result.is_ok());
++        let state = decoded.as_ref().and_then(|result| result.as_ref().ok());
++        let pool_network_ok = state.is_some_and(|state| state.network == [67; 32]);
++        let pool_anchors_ok = state.is_some_and(|state| state.uses_slot_anchors());
++        let mut requested = votes;
++        requested.sort_unstable_by_key(|vote| vote.to_bytes());
++        let mut original = ORIGINAL_VOTES;
++        original.sort_unstable_by_key(|vote| vote.to_bytes());
++        let expected_three = requested == original;
++        let eligible_exact = top.vote_accounts().len() == 3
++            && ORIGINAL_VOTES
++                .iter()
++                .all(|vote| top.vote_accounts().get_delegated_stake(vote) > 0);
++        let actual_bls = ORIGINAL_VOTES.iter().all(|vote| {
++            self.get_account(vote)
++                .and_then(|account| VoteAccount::try_from(account).ok())
++                .is_some_and(|account| account.vote_state_view().bls_pubkey_compressed().is_some())
++        });
++        let cache_actual = ORIGINAL_VOTES.iter().all(|vote| {
++            cached
++                .get(vote)
++                .zip(self.get_account(vote).as_ref())
++                .is_some_and(|(cache, actual)| cache.account() == actual)
++        });
++        let entries = ORIGINAL_VOTES
++            .iter()
++            .filter_map(|vote| {
++                let account = self.get_account(vote)?;
++                Some(EligibleInput {
++                    vote: *vote,
++                    delegated_weight: top.vote_accounts().get_delegated_stake(vote),
++                    actual_lamports: account.lamports(),
++                    owner: *account.owner(),
++                    vote_data_sha256: solana_sha256_hasher::hash(account.data()).to_bytes(),
++                })
++            })
++            .collect::<Vec<_>>();
++        let mut entries = entries;
++        entries.sort_unstable_by_key(|entry| entry.vote.to_bytes());
++        let conditions = [
++            ("source_epoch_is_201", self.epoch() == 201),
++            ("frozen_bank", self.is_frozen()),
++            ("expected_three_vote_set", expected_three),
++            ("eligible_set_exact", eligible_exact),
++            ("actual_vote_bls", actual_bls),
++            ("cache_equals_accounts_db", cache_actual),
++            (
++                "alpenglow",
++                self.feature_set.snapshot().alpenglow && self.is_alpenglow(),
++            ),
++            (
++                "epoch_schedule",
++                self.epoch_schedule.slots_per_epoch == 2048
++                    && self.epoch_schedule.leader_schedule_slot_offset == 2048
++                    && !self.epoch_schedule.warmup,
++            ),
++            (
++                "pool_guard",
++                pool_owner_ok
++                    && pool_magic_ok
++                    && pool_decode_ok
++                    && pool_network_ok
++                    && pool_anchors_ok,
++            ),
++        ];
++        let satisfied = conditions.iter().all(|(_, value)| *value);
++        let prospective = prospective_consensus_outputs(
++            top.vote_accounts(),
++            &self.epoch_schedule,
++            self.vat_to_burn_per_epoch(),
++            minimum,
++        );
++        let prospective_report = json!({
++            "format":"zolana085-epoch202-consensus-comparison-v1",
++            "preconditions_satisfied":satisfied && prospective.is_some(),
++            "digest_sha256":if satisfied { prospective.as_ref().map(consensus_digest) } else { None },
++            "outputs":prospective,
++            "full_vote_account_equality_claimed":false,
++            "bank_map_changed":false,"accounts_changed":false,
++        });
++        let eligible_report = json!({
++            "format": "zolana085-epoch202-eligible-inputs-v1",
++            "source_epoch": 201, "target_epoch": 202,
++            "vat": self.vat_to_burn_per_epoch(), "minimum_vote_balance": minimum,
++            "eligible_count": top.vote_accounts().len(),
++            "preconditions": conditions.into_iter()
++                .map(|(name, value)| (name.to_owned(), json!(value)))
++                .collect::<serde_json::Map<_, _>>(),
++            "preconditions_satisfied": satisfied,
++            "entries": entries.iter().map(|entry| json!({
++                "vote": entry.vote.to_string(), "delegated_weight": entry.delegated_weight,
++                "actual_lamports": entry.actual_lamports, "owner": entry.owner.to_string(),
++                "vote_data_sha256": hex(&entry.vote_data_sha256),
++            })).collect::<Vec<_>>(),
++            "digest_sha256": if satisfied {
++                eligible_digest(&entries, self.vat_to_burn_per_epoch(), minimum)
++            } else { None },
++        });
++        let epoch201_positive = self.epoch_stakes(201).is_some_and(|s| s.total_stake() > 0);
++        let epoch202_empty = self.epoch_stakes(202).is_some_and(|s| s.total_stake() == 0);
++        let epochs = [201u64, 202, 203].map(|epoch| {
++            let stakes = self.epoch_stakes(epoch);
++            json!({"epoch": epoch, "present": stakes.is_some(),
++                "total_stake": stakes.map(VersionedEpochStakes::total_stake),
++                "votes": votes.map(|vote| json!({"vote": vote.to_string(),
++                    "stake": stakes.map(|s| s.stakes().vote_accounts().get_delegated_stake(&vote))}))})
++        });
++        json!({
++            "format": "zolana085-offline-public-bank-diagnostic-v1",
++            "slot": self.slot(), "epoch": self.epoch(), "frozen": self.is_frozen(),
++            "block_height": self.block_height(), "bank_hash": self.hash().to_string(),
++            "capitalization": self.capitalization(),
++            "epoch_schedule": {"slots_per_epoch": self.epoch_schedule.slots_per_epoch,
++                "leader_schedule_slot_offset": self.epoch_schedule.leader_schedule_slot_offset,
++                "warmup": self.epoch_schedule.warmup,
++                "leader_schedule_epoch": self.get_leader_schedule_epoch(self.slot())},
++            "gate": {"compiled_pilot_feature": cfg!(feature = "zolana-pilot-vat-recovery"),
++                "alpenglow_feature_active": self.feature_set.snapshot().alpenglow,
++                "bank_is_alpenglow": self.is_alpenglow(),
++                "epoch_is_201": self.epoch() == 201, "slot_at_least_411648": self.slot() >= 411_648,
++                "slots_per_epoch_is_2048": self.epoch_schedule.slots_per_epoch == 2048,
++                "leader_schedule_offset_is_2048": self.epoch_schedule.leader_schedule_slot_offset == 2048,
++                "epoch201_positive": epoch201_positive, "epoch202_present_and_empty": epoch202_empty,
++                "pool_present": pool.is_some(), "pool_owner_ok": pool_owner_ok,
++                "pool_magic_v4": pool_magic_ok, "pool_decode_ok": pool_decode_ok,
++                "pool_network_is_67": pool_network_ok, "pool_uses_slot_anchors": pool_anchors_ok,
++                "runtime_gate_active": self.pilot_empty_future_stakes_recovery_active(),
++                "retry_epoch_is_next": self.get_leader_schedule_epoch(self.slot()) == self.epoch().saturating_add(1)},
++            "minimum_vote_account_balance": minimum, "vat_per_epoch": self.vat_to_burn_per_epoch(),
++            "cached_vote_count": cached.len(), "cached_total_stake": cached_total.to_string(),
++            "delegation_count": delegation_count, "filtered_top_vote_count": top.vote_accounts().len(),
++            "filtered_top_total_stake": top_total.to_string(), "votes": rows, "epoch_snapshots": epochs,
++            "eligible_202_inputs": eligible_report,
++            "prospective_202_consensus_outputs": prospective_report,
++            "leader_schedule_202_available": crate::leader_schedule_utils::leader_schedule(202, self).is_some(),
++            "pool": {"owner": pool.as_ref().map(|a| a.owner().to_string()),
++                "bytes": pool.as_ref().map(|a| a.data().len()), "decode_ok": pool_decode_ok,
++                "decode_error": decoded.as_ref().and_then(|result| result.as_ref().err()).map(|error| format!("{error:?}")),
++                "network": state.map(|state| state.network), "uses_slot_anchors": state.map(|state| state.uses_slot_anchors()),
++                "backing": state.map(|state| state.backing), "note_count": state.map(|state| state.note_count())},
++            "account_writes": false, "membership_changes": false, "vat_burns": false,
++            "transactions_submitted": 0, "keys_read": false,
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::genesis_utils::{
++        create_genesis_config_with_alpenglow_vote_accounts, ValidatorVoteKeypairs,
++    };
++    use solana_signer::Signer;
++
++    fn consensus_fixture() -> (solana_vote::vote_account::VoteAccounts, EpochSchedule) {
++        let keys = (0..3)
++            .map(|_| ValidatorVoteKeypairs::new_rand())
++            .collect::<Vec<_>>();
++        let genesis = create_genesis_config_with_alpenglow_vote_accounts(
++            1_000_000_000_000_000,
++            &keys,
++            vec![10_000_000_000; 3],
++        )
++        .genesis_config;
++        let bank = Bank::new_for_tests(&genesis);
++        (
++            solana_vote::vote_account::VoteAccounts::from(bank.vote_accounts()),
++            EpochSchedule::custom(2048, 2048, false),
++        )
++    }
++
++    #[test]
++    fn consensus_digest_binds_each_core_output_and_canonicalizes_object_keys() {
++        let (accounts, schedule) = consensus_fixture();
++        let outputs = prospective_consensus_outputs(&accounts, &schedule, 800_000_000, 0).unwrap();
++        assert_eq!(outputs["slot_leaders"].as_array().unwrap().len(), 2048);
++        assert_eq!(outputs["bls_ranks"].as_array().unwrap().len(), 3);
++        let expected = consensus_digest(&outputs);
++        // One mutation in every separately constructed consensus core field.
++        for key in [
++            "target_epoch",
++            "slots_per_epoch",
++            "repeat_slots",
++            "vat",
++            "minimum_vote_balance",
++            "total_stake",
++            "votes",
++            "node_vote_accounts",
++            "staked_nodes",
++            "authorized_voters",
++            "bls_total_stake",
++            "bls_ranks",
++            "slot_leaders",
++        ] {
++            let mut changed = outputs.clone();
++            changed[key] = Value::Null;
++            assert_ne!(consensus_digest(&changed), expected, "unbound field {key}");
++        }
++        let mut a = serde_json::Map::new();
++        a.insert("b".into(), json!(2));
++        a.insert("a".into(), json!(1));
++        let mut b = serde_json::Map::new();
++        b.insert("a".into(), json!(1));
++        b.insert("b".into(), json!(2));
++        assert_eq!(
++            consensus_digest(&Value::Object(a)),
++            consensus_digest(&Value::Object(b))
++        );
++        // Independent Python hashlib over domain+NUL || b'{"a":1,"b":2}'.
++        assert_eq!(
++            consensus_digest(&json!({"a":1,"b":2})),
++            "efe7c75854986dd0ca26c2a62d643b55e7aa17182a8ddf6ef2d29d84a0be5ebb"
++        );
++    }
++
++    #[test]
++    fn rolling_vote_history_changes_raw_binding_but_not_consensus_outputs() {
++        use solana_vote_interface::state::{VoteStateV4, VoteStateVersions};
++        let (accounts, schedule) = consensus_fixture();
++        let before = prospective_consensus_outputs(&accounts, &schedule, 800_000_000, 0).unwrap();
++        let (&vote, original) = accounts.iter().next().unwrap();
++        let mut state = VoteStateV4::deserialize(original.account().data(), &vote).unwrap();
++        state.last_timestamp.slot = state.last_timestamp.slot.saturating_add(1);
++        state.last_timestamp.timestamp = state.last_timestamp.timestamp.saturating_add(1);
++        state.root_slot = Some(77);
++        state.epoch_credits.push((201, 17, 3));
++        let mut actual = original.account().clone();
++        actual.set_data_from_slice(&wincode::serialize(&VoteStateVersions::new_v4(state)).unwrap());
++        let changed = VoteAccount::try_from(actual).unwrap();
++        assert_ne!(
++            solana_sha256_hasher::hash(original.account().data()),
++            solana_sha256_hasher::hash(changed.account().data())
++        );
++        let original_decoded = decoded_vote_state(&vote, original);
++        let changed_decoded = decoded_vote_state(&vote, &changed);
++        assert_ne!(original_decoded, changed_decoded);
++        assert_eq!(
++            original_decoded["nonrolling_configuration_sha256"],
++            changed_decoded["nonrolling_configuration_sha256"]
++        );
++        let mut map = accounts.as_ref().clone();
++        map.get_mut(&vote).unwrap().1 = changed;
++        let changed_accounts = solana_vote::vote_account::VoteAccounts::from(Arc::new(map));
++        let after =
++            prospective_consensus_outputs(&changed_accounts, &schedule, 800_000_000, 0).unwrap();
++        assert_eq!(before, after);
++        assert_eq!(consensus_digest(&before), consensus_digest(&after));
++        // Full VersionedEpochStakes/VoteAccount equality is deliberately NOT claimed.
++    }
++
++    #[test]
++    fn prospective_outputs_bind_real_node_authority_bls_weight_and_policy_inputs() {
++        use solana_vote_interface::state::{VoteStateV4, VoteStateVersions};
++        let (accounts, schedule) = consensus_fixture();
++        let original = prospective_consensus_outputs(&accounts, &schedule, 800_000_000, 0).unwrap();
++        let digest = consensus_digest(&original);
++        let (&vote, account) = accounts.iter().next().unwrap();
++        for field in ["node", "authorized202", "bls", "weight"] {
++            let mut map = accounts.as_ref().clone();
++            if field == "weight" {
++                map.get_mut(&vote).unwrap().0 += 1;
++            } else {
++                let mut state = VoteStateV4::deserialize(account.account().data(), &vote).unwrap();
++                match field {
++                    "node" => state.node_pubkey = Pubkey::new_unique(),
++                    "authorized202" => {
++                        state.authorized_voters.insert(202, Pubkey::new_unique());
++                    }
++                    _ => state.bls_pubkey_compressed = None,
++                }
++                let mut changed = account.account().clone();
++                changed.set_data_from_slice(
++                    &wincode::serialize(&VoteStateVersions::new_v4(state)).unwrap(),
++                );
++                map.get_mut(&vote).unwrap().1 = VoteAccount::try_from(changed).unwrap();
++            }
++            let changed = solana_vote::vote_account::VoteAccounts::from(Arc::new(map));
++            let output = prospective_consensus_outputs(&changed, &schedule, 800_000_000, 0);
++            if field == "bls" {
++                assert!(output.is_none());
++            } else {
++                assert_ne!(
++                    consensus_digest(&output.unwrap()),
++                    digest,
++                    "unbound actual {field}"
++                );
++            }
++        }
++        assert_ne!(
++            consensus_digest(
++                &prospective_consensus_outputs(&accounts, &schedule, 800_000_001, 0).unwrap()
++            ),
++            digest
++        );
++        assert_ne!(
++            consensus_digest(
++                &prospective_consensus_outputs(&accounts, &schedule, 800_000_000, 1).unwrap()
++            ),
++            digest
++        );
++        assert!(
++            prospective_consensus_outputs(&accounts, &schedule, 800_000_000, u64::MAX).is_none()
++        );
++        assert!(prospective_consensus_outputs(
++            &accounts,
++            &EpochSchedule::custom(4096, 4096, false),
++            800_000_000,
++            0
++        )
++        .is_none());
++    }
++
++    fn digest_fixture() -> Vec<EligibleInput> {
++        [1u8, 2, 3]
++            .map(|n| EligibleInput {
++                vote: Pubkey::new_from_array([n; 32]),
++                delegated_weight: u64::from(n) * 11,
++                actual_lamports: u64::from(n) * 101,
++                owner: Pubkey::new_from_array([10 - n; 32]),
++                vote_data_sha256: [n + 3; 32],
++            })
++            .to_vec()
++    }
++
++    #[test]
++    fn eligible_digest_matches_independent_frozen_wire_vector_and_raw_sort() {
++        // Reference: Python hashlib over the documented 442-byte fixed encoding,
++        // using struct.pack('<QQQQI',201,202,800000000,800000000,3).
++        let expected = "bab5ae1c585eca452cb674329e6683d2c8ef433b3340344cf2dcb4d7bdf734d5";
++        let mut entries = digest_fixture();
++        assert_eq!(
++            eligible_digest(&entries, 800_000_000, 800_000_000).as_deref(),
++            Some(expected)
++        );
++        entries.reverse();
++        assert_eq!(
++            eligible_digest(&entries, 800_000_000, 800_000_000).as_deref(),
++            Some(expected)
++        );
++    }
++
++    #[test]
++    fn eligible_digest_rejects_bad_cardinality_duplicates_and_binds_fields() {
++        let entries = digest_fixture();
++        let expected = eligible_digest(&entries, 800_000_000, 800_000_000);
++        assert_eq!(
++            eligible_digest(&entries[..2], 800_000_000, 800_000_000),
++            None
++        );
++        let mut duplicate = entries.clone();
++        duplicate[1].vote = duplicate[0].vote;
++        assert_eq!(eligible_digest(&duplicate, 800_000_000, 800_000_000), None);
++        assert_ne!(
++            eligible_digest(&entries, 800_000_001, 800_000_000),
++            expected
++        );
++        assert_ne!(
++            eligible_digest(&entries, 800_000_000, 800_000_001),
++            expected
++        );
++        for field in 0..5 {
++            let mut changed = entries.clone();
++            match field {
++                0 => changed[0].vote = Pubkey::new_from_array([11; 32]),
++                1 => changed[0].delegated_weight += 1,
++                2 => changed[0].actual_lamports += 1,
++                3 => changed[0].owner = Pubkey::new_from_array([12; 32]),
++                _ => changed[0].vote_data_sha256[0] ^= 1,
++            }
++            assert_ne!(
++                eligible_digest(&changed, 800_000_000, 800_000_000),
++                expected
++            );
++        }
++    }
++
++    #[test]
++    fn public_diagnostic_matches_vote_cache_without_account_or_membership_changes() {
++        let keys = (0..3)
++            .map(|_| ValidatorVoteKeypairs::new_rand())
++            .collect::<Vec<_>>();
++        let genesis = create_genesis_config_with_alpenglow_vote_accounts(
++            1_000_000_000_000_000,
++            &keys,
++            vec![10_000_000_000; 3],
++        )
++        .genesis_config;
++        let bank = Bank::new_for_tests(&genesis);
++        let votes = std::array::from_fn(|index| keys[index].vote_keypair.pubkey());
++        let before = (
++            bank.capitalization(),
++            votes.map(|vote| bank.get_balance(&vote)),
++            bank.epoch_stakes_map().clone(),
++        );
++        let report = bank.pilot_vat_diagnostic(votes);
++        assert_eq!(
++            report["format"],
++            "zolana085-offline-public-bank-diagnostic-v1"
++        );
++        assert_eq!(report["votes"].as_array().unwrap().len(), 3);
++        for row in report["votes"].as_array().unwrap() {
++            assert_eq!(row["cached_account_equals_accounts_db"], true);
++            assert_eq!(row["cached_bls_present"], true);
++            assert!(row["cached_stake"].as_u64().unwrap() > 0);
++        }
++        assert_eq!(report["gate"]["epoch_is_201"], false);
++        assert_eq!(report["gate"]["pool_present"], false);
++        assert_eq!(
++            report["eligible_202_inputs"]["preconditions_satisfied"],
++            false
++        );
++        assert!(report["eligible_202_inputs"]["digest_sha256"].is_null());
++        assert_eq!(
++            before,
++            (
++                bank.capitalization(),
++                votes.map(|vote| bank.get_balance(&vote)),
++                bank.epoch_stakes_map().clone()
++            )
++        );
++    }
++
++    #[test]
++    fn missing_public_vote_accounts_and_pool_are_reported_without_substitutes() {
++        let genesis = crate::genesis_utils::create_genesis_config(1).genesis_config;
++        let bank = Bank::new_for_tests(&genesis);
++        let report = bank.pilot_vat_diagnostic(std::array::from_fn(|_| Pubkey::new_unique()));
++        for row in report["votes"].as_array().unwrap() {
++            assert_eq!(row["cached_present"], false);
++            assert_eq!(row["accounts_db_present"], false);
++            assert_eq!(row["cached_stake"], 0);
++        }
++        assert_eq!(report["pool"]["decode_ok"], false);
++        assert_eq!(report["gate"]["runtime_gate_active"], false);
++        assert_eq!(
++            report["eligible_202_inputs"]["preconditions"]["expected_three_vote_set"],
++            false
++        );
++        assert!(report["eligible_202_inputs"]["digest_sha256"].is_null());
++    }
++}
+diff --git a/runtime/src/bank/pilot_vat_recovery_tests.rs b/runtime/src/bank/pilot_vat_recovery_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/bank/pilot_vat_recovery_tests.rs
+@@ -0,0 +1,202 @@
++//! Synthetic public fixtures only. No live ledgers, accounts or operator keys.
++use {
++    super::*,
++    crate::bank_forks::BankForks,
++    crate::genesis_utils::{
++        ValidatorVoteKeypairs, create_genesis_config_with_alpenglow_vote_accounts,
++    },
++    solana_account::{AccountSharedData, ReadableAccount},
++    solana_epoch_schedule::EpochSchedule,
++    solana_inflation::Inflation,
++    solana_instruction::Instruction,
++    solana_keypair::Keypair,
++    solana_signer::Signer,
++    solana_system_interface::instruction::transfer,
++    solana_transaction::Transaction,
++    std::sync::{Arc, RwLock},
++};
++
++const VAT: u64 = 800_000_000;
++const GRANT: u64 = 20_000_000_000;
++const REMAINDER: u64 = 27_074_400;
++
++struct Fixture {
++    genesis: GenesisConfig,
++    mint: Keypair,
++    validators: Vec<ValidatorVoteKeypairs>,
++}
++impl Fixture {
++    fn new(network: [u8; 32]) -> Self {
++        let validators = (0..3)
++            .map(|_| ValidatorVoteKeypairs::new_rand())
++            .collect::<Vec<_>>();
++        let info = create_genesis_config_with_alpenglow_vote_accounts(
++            1_000_000_000_000_000,
++            &validators,
++            vec![10_000_000_000; 3],
++        );
++        let mut genesis = info.genesis_config;
++        genesis.epoch_schedule = EpochSchedule::custom(2048, 2048, false);
++        genesis.inflation = Inflation::new_disabled();
++        let state = native_payments::state::PoolState::new_slot_anchored(network, 1).unwrap();
++        let mut pool =
++            AccountSharedData::new(1, state.encode().len(), &native_payment_program::id());
++        pool.set_data_from_slice(&state.encode());
++        genesis
++            .accounts
++            .insert(native_payment_program::pool_address(), pool.into());
++        Self {
++            genesis,
++            mint: info.mint_keypair,
++            validators,
++        }
++    }
++    fn leader(&self) -> SlotLeader {
++        SlotLeader {
++            id: self.validators[0].node_keypair.pubkey(),
++            vote_address: self.validators[0].vote_keypair.pubkey(),
++        }
++    }
++    fn child(&self, forks: &RwLock<BankForks>, parent: Arc<Bank>, slot: Slot) -> Arc<Bank> {
++        Bank::new_from_parent_with_bank_forks(forks, parent, self.leader(), slot)
++    }
++    fn expire(&self) -> (Arc<Bank>, Arc<RwLock<BankForks>>) {
++        let (mut bank, forks) = Bank::new_with_bank_forks_for_tests(&self.genesis);
++        assert_eq!(bank.vat_to_burn_per_epoch(), DEFAULT_VAT_TO_BURN_PER_EPOCH);
++        assert!(!bank.pilot_empty_future_stakes_recovery_active());
++        // Use real epoch transitions and normal VAT burns, never mutate balances
++        // or manufacture the empty map. Only empty slot intervals are skipped.
++        for epoch in 1..=200 {
++            bank = self.child(&forks, bank, epoch * 2048);
++            assert_eq!(bank.vat_to_burn_per_epoch(), VAT);
++        }
++        bank = self.child(&forks, bank, 411_647);
++        for key in &self.validators {
++            assert_eq!(bank.get_balance(&key.vote_keypair.pubkey()), REMAINDER);
++        }
++        assert!(bank.epoch_stakes(201).unwrap().total_stake() > 0);
++        assert!(!bank.pilot_empty_future_stakes_recovery_active());
++        (bank, forks)
++    }
++    fn grant(&self, bank: &Bank) -> Transaction {
++        let instructions: Vec<Instruction> = self
++            .validators
++            .iter()
++            .map(|key| transfer(&self.mint.pubkey(), &key.vote_keypair.pubkey(), GRANT))
++            .collect();
++        Transaction::new_signed_with_payer(
++            &instructions,
++            Some(&self.mint.pubkey()),
++            &[&self.mint],
++            bank.last_blockhash(),
++        )
++    }
++}
++
++#[test]
++fn pilot_vat_recovery_real_epochs_signed_atomic_funding_and_replay() {
++    let fixture = Fixture::new([67; 32]);
++    let mut expected = None;
++    for _replay in 0..2 {
++        let (expired, forks) = fixture.expire();
++        let bank = fixture.child(&forks, expired, 411_648);
++        assert_eq!(bank.epoch(), 201);
++        assert!(bank.pilot_empty_future_stakes_recovery_active());
++        assert_eq!(bank.epoch_stakes(202).unwrap().total_stake(), 0);
++        assert!(crate::leader_schedule_utils::leader_schedule(202, &bank).is_none());
++        assert!(crate::leader_schedule_utils::leader_schedule(201, &bank).is_some());
++        let current = bank.epoch_stakes(201).unwrap().total_stake();
++        assert!(current > 0);
++        let no_funds = fixture.child(&forks, bank, 411_649);
++        assert_eq!(no_funds.epoch_stakes(202).unwrap().total_stake(), 0);
++        for key in &fixture.validators {
++            assert_eq!(no_funds.get_balance(&key.vote_keypair.pubkey()), REMAINDER);
++        }
++        let tx = fixture.grant(&no_funds);
++        tx.verify().unwrap();
++        let treasury = no_funds.get_balance(&fixture.mint.pubkey());
++        let capital_before_funding = no_funds.capitalization();
++        no_funds.process_transaction(&tx).unwrap();
++        assert_eq!(
++            no_funds.get_balance(&fixture.mint.pubkey()),
++            treasury - 3 * GRANT
++        );
++        assert_eq!(no_funds.capitalization(), capital_before_funding);
++        // Normal signed funding alone cannot mutate the already empty snapshot.
++        assert_eq!(no_funds.epoch_stakes(202).unwrap().total_stake(), 0);
++        let funded = fixture.child(&forks, no_funds, 411_650);
++        assert_eq!(funded.epoch_stakes(202).unwrap().total_stake(), current);
++        assert!(!funded.pilot_empty_future_stakes_recovery_active());
++        let schedule202 = crate::leader_schedule_utils::leader_schedule(202, &funded).unwrap();
++        assert_eq!(schedule202.get_slot_leaders().count(), 2048);
++        for key in &fixture.validators {
++            assert_eq!(
++                funded.get_balance(&key.vote_keypair.pubkey()),
++                REMAINDER + GRANT - VAT
++            );
++        }
++        assert_eq!(
++            funded.get_balance(&solana_sdk_ids::incinerator::id()),
++            3 * VAT
++        );
++        funded.freeze();
++        assert_eq!(funded.capitalization(), capital_before_funding - 3 * VAT);
++        let same_epoch = fixture.child(&forks, funded, 411_651);
++        for key in &fixture.validators {
++            assert_eq!(
++                same_epoch.get_balance(&key.vote_keypair.pubkey()),
++                REMAINDER + GRANT - VAT
++            );
++        }
++        let epoch202 = fixture.child(&forks, same_epoch, 202 * 2048);
++        assert!(epoch202.epoch_stakes(202).unwrap().total_stake() > 0);
++        assert!(epoch202.epoch_stakes(203).unwrap().total_stake() > 0);
++        let epoch203 = fixture.child(&forks, epoch202, 203 * 2048);
++        assert!(epoch203.epoch_stakes(203).unwrap().total_stake() > 0);
++        assert!(epoch203.epoch_stakes(204).unwrap().total_stake() > 0);
++        assert!(!epoch203.pilot_empty_future_stakes_recovery_active());
++        epoch203.freeze();
++        let result = (
++            epoch203.hash(),
++            epoch203.capitalization(),
++            fixture
++                .validators
++                .iter()
++                .map(|key| epoch203.get_balance(&key.vote_keypair.pubkey()))
++                .collect::<Vec<_>>(),
++            native_payments::state::PoolState::decode(
++                epoch203
++                    .get_account(&native_payment_program::pool_address())
++                    .unwrap()
++                    .data(),
++            )
++            .unwrap()
++            .encode(),
++        );
++        if let Some(first) = &expected {
++            assert_eq!(first, &result);
++        } else {
++            expected = Some(result);
++        }
++    }
++}
++
++#[test]
++fn pilot_vat_recovery_wrong_domain_keeps_empty_snapshot_immutable() {
++    let fixture = Fixture::new([68; 32]);
++    let (expired, forks) = fixture.expire();
++    let bank = fixture.child(&forks, expired, 411_648);
++    assert!(!bank.pilot_empty_future_stakes_recovery_active());
++    assert_eq!(bank.epoch_stakes(202).unwrap().total_stake(), 0);
++    let tx = fixture.grant(&bank);
++    bank.process_transaction(&tx).unwrap();
++    let next = fixture.child(&forks, bank, 411_649);
++    assert_eq!(next.epoch_stakes(202).unwrap().total_stake(), 0);
++    for key in &fixture.validators {
++        assert_eq!(
++            next.get_balance(&key.vote_keypair.pubkey()),
++            REMAINDER + GRANT
++        );
++    }
++    assert!(crate::leader_schedule_utils::leader_schedule(202, &next).is_none());
++}
+diff --git a/runtime/src/leader_schedule_utils.rs b/runtime/src/leader_schedule_utils.rs
+--- a/runtime/src/leader_schedule_utils.rs
++++ b/runtime/src/leader_schedule_utils.rs
+@@ -25,6 +25,11 @@
+     epoch_schedule: &EpochSchedule,
+     epoch_vote_accounts: &VoteAccountsHashMap,
+ ) -> Option<LeaderSchedule> {
++    // The Option API must not panic while an explicitly empty future epoch
++    // awaits eligible validators. There are no substitute or fallback leaders.
++    if !epoch_vote_accounts.values().any(|(stake, _)| *stake > 0) {
++        return None;
++    }
+     Some(LeaderSchedule::new(
+         epoch_vote_accounts,
+         epoch,
+@@ -107,6 +112,24 @@
+     };
+ 
+     #[test]
++    fn pilot_vat_empty_and_zero_stake_have_no_fallback_schedule() {
++        let epoch = EpochSchedule::custom(2048, 2048, false);
++        assert!(leader_schedule_from_vote_accounts(202, &epoch, &Default::default()).is_none());
++        let address = Pubkey::new_unique();
++        let vote = solana_vote::vote_account::VoteAccount::new_random();
++        let zero = [(address, (0, vote.clone()))].into_iter().collect();
++        assert!(leader_schedule_from_vote_accounts(202, &epoch, &zero).is_none());
++        let positive = [(address, (1, vote))].into_iter().collect();
++        let schedule = leader_schedule_from_vote_accounts(202, &epoch, &positive).unwrap();
++        assert_eq!(schedule.get_slot_leaders().count(), 2048);
++        assert!(
++            schedule
++                .get_slot_leaders()
++                .all(|leader| leader.vote_address == address)
++        );
++    }
++
++    #[test]
+     fn test_leader_schedule_via_bank() {
+         let pubkey = solana_pubkey::new_rand();
+         let genesis_config =
+diff --git a/votor/Cargo.toml b/votor/Cargo.toml
+--- a/votor/Cargo.toml
++++ b/votor/Cargo.toml
+@@ -16,6 +16,10 @@
+ rustdoc-args = ["--cfg=docsrs"]
+ 
+ [features]
++# Explicit pilot features; neither is enabled by default. The runtime refuses
++# builds that enable both. The new egress policy never uses the old retry gate.
++zolana-pilot-vat-recovery = ["solana-runtime/zolana-pilot-vat-recovery"]
++zolana-pilot-202-recovery = ["solana-runtime/zolana-pilot-202-recovery"]
+ agave-unstable-api = []
+ dev-context-only-utils = [
+     "agave-bls-sigverify/dev-context-only-utils",
+diff --git a/votor/src/consensus_pool_service.rs b/votor/src/consensus_pool_service.rs
+--- a/votor/src/consensus_pool_service.rs
++++ b/votor/src/consensus_pool_service.rs
+@@ -15,6 +15,7 @@
+             parent_ready_tracker::{BlockProductionParent, ParentReady},
+         },
+         event::{LeaderWindowInfo, RepairEvent, RepairEventSender, VotorEvent, VotorEventSender},
++        pilot_epoch202_egress::CertificateEgressPolicy,
+         voting_service::BLSOp,
+         votor::ExitOnDrop,
+     },
+@@ -226,22 +227,25 @@
+         if num_certs == 0 {
+             return Ok(());
+         }
+-        // If we are not a staked identity (hot spare / RPC / new validator / failed VAT)
+-        // we should not send out the certificate. A2A quic only accepts connections
+-        // from staked identities
+-        if !Self::is_current_identity_staked(ctx) {
+-            stats.certificates_skipped_unstaked += num_certs;
++        let root = ctx.sharable_banks.root();
++        let policy = CertificateEgressPolicy::from_bank(&root, &ctx.cluster_info.id());
++        Self::send_certificates_with_policy(ctx, op, stats, &policy)
++    }
++
++    fn send_certificates_with_policy(
++        ctx: &ConsensusPoolContext,
++        op: BLSOp,
++        stats: &mut ConsensusPoolServiceStats,
++        policy: &CertificateEgressPolicy<'_>,
++    ) -> Result<(), &'static str> {
++        // A mixed batch never inherits admission from one eligible 202 item.
++        // Retain the existing raw/current policy for every other target epoch.
++        let (op, skipped) = policy.filter(op);
++        stats.certificates_skipped_unstaked += skipped;
++        if Self::num_certificates(&op) == 0 {
+             return Ok(());
+         }
+         Self::enqueue_certificates(ctx, op, stats)
+-    }
+-
+-    fn is_current_identity_staked(ctx: &ConsensusPoolContext) -> bool {
+-        ctx.sharable_banks
+-            .root()
+-            .current_epoch_staked_nodes()
+-            .get(&ctx.cluster_info.id())
+-            .is_some_and(|stake| *stake > 0)
+     }
+ 
+     fn num_certificates(op: &BLSOp) -> usize {
+@@ -1480,4 +1484,5 @@
+         let received = ctx.bls_receiver.try_recv();
+         assert!(received.is_ok());
+     }
++    include!("consensus_pool_service/pilot_epoch202_egress_tests.rs");
+ }
+diff --git a/votor/src/consensus_pool_service/pilot_epoch202_egress_tests.rs b/votor/src/consensus_pool_service/pilot_epoch202_egress_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/votor/src/consensus_pool_service/pilot_epoch202_egress_tests.rs
+@@ -0,0 +1,216 @@
++// Consumer-only fixtures: real ordinary genesis stake maps stand in for a
++// validated runtime view. These tests do not claim exact695 anchor acceptance
++// or cryptographic certificate verification; existing pool/verifier tests own
++// verification. We test the actual filtering, enqueue and accounting path.
++
++fn pilot_epoch202_batch() -> Vec<Arc<Certificate>> {
++    [
++        CertificateType::Skip(201 * 2048 + 17),
++        CertificateType::Notarize(Block {
++            slot: 202 * 2048,
++            block_id: Hash::new_unique(),
++        }),
++        CertificateType::Finalize(203 * 2048),
++        CertificateType::FinalizeFast(Block {
++            slot: 202 * 2048 + 1,
++            block_id: Hash::new_unique(),
++        }),
++    ]
++    .into_iter()
++    .enumerate()
++    .map(|(index, cert_type)| {
++        Arc::new(Certificate {
++            cert_type,
++            signature: BLSSignature([0; BLS_SIGNATURE_AFFINE_SIZE]),
++            bitmap: vec![index as u8 + 1],
++        })
++    })
++    .collect()
++}
++
++fn pilot_epoch202_assert_payloads(op: BLSOp, refresh: bool, expected: &[Arc<Certificate>]) {
++    let (was_refresh, actual) = match op {
++        BLSOp::PushCertificates { certificates } => (false, certificates),
++        BLSOp::RefreshCertificates { certificates } => (true, certificates),
++        _ => panic!("certificate operation changed into a vote"),
++    };
++    assert_eq!(was_refresh, refresh);
++    assert_eq!(actual.len(), expected.len());
++    for (actual, expected) in actual.iter().zip(expected) {
++        assert!(Arc::ptr_eq(actual, expected));
++        assert_eq!(actual.as_ref(), expected.as_ref());
++    }
++}
++
++#[test]
++fn pilot_epoch202_egress_mixed_push_keeps_only_eligible202_and_exact_payloads() {
++    let ctx = TestContext::default();
++    let schedule = solana_epoch_schedule::EpochSchedule::custom(2048, 2048, false);
++    let root = ctx.ctx.sharable_banks.root();
++    let nodes = root.current_epoch_staked_nodes();
++    let identity = ctx.ctx.cluster_info.id();
++    assert!(nodes[&identity] > 0);
++    let raw_empty = std::collections::HashMap::new();
++    let policy = CertificateEgressPolicy::from_test_memberships(
++        &schedule,
++        &identity,
++        &raw_empty,
++        Some(&nodes),
++    );
++    let batch = pilot_epoch202_batch();
++    let expected = [batch[1].clone(), batch[3].clone()];
++    let mut stats = ConsensusPoolServiceStats::new();
++    ConsensusPoolService::send_certificates_with_policy(
++        &ctx.ctx,
++        BLSOp::PushCertificates {
++            certificates: batch,
++        },
++        &mut stats,
++        &policy,
++    )
++    .unwrap();
++    pilot_epoch202_assert_payloads(ctx.bls_receiver.try_recv().unwrap(), false, &expected);
++    assert!(ctx.bls_receiver.try_recv().is_err());
++    assert_eq!(stats.certificates_skipped_unstaked.0, 2);
++    assert_eq!(stats.certificates_sent.0, 2);
++    assert_eq!(stats.certificates_dropped.0, 0);
++}
++
++#[test]
++fn pilot_epoch202_egress_mixed_refresh_preserves_other_epochs_raw_policy() {
++    let ctx = TestContext::default();
++    let schedule = solana_epoch_schedule::EpochSchedule::custom(2048, 2048, false);
++    let root = ctx.ctx.sharable_banks.root();
++    let nodes = root.current_epoch_staked_nodes();
++    let identity = ctx.ctx.cluster_info.id();
++    let not_in_projected_view = std::collections::HashMap::new();
++    let policy = CertificateEgressPolicy::from_test_memberships(
++        &schedule,
++        &identity,
++        &nodes,
++        Some(&not_in_projected_view),
++    );
++    let batch = pilot_epoch202_batch();
++    let expected = [batch[0].clone(), batch[2].clone()];
++    let mut stats = ConsensusPoolServiceStats::new();
++    ConsensusPoolService::send_certificates_with_policy(
++        &ctx.ctx,
++        BLSOp::RefreshCertificates {
++            certificates: batch,
++        },
++        &mut stats,
++        &policy,
++    )
++    .unwrap();
++    pilot_epoch202_assert_payloads(ctx.bls_receiver.try_recv().unwrap(), true, &expected);
++    assert_eq!(stats.certificates_skipped_unstaked.0, 2);
++    assert_eq!(stats.certificates_sent.0, 2);
++}
++
++#[test]
++fn pilot_epoch202_egress_missing_view_preserves_existing_normal_admission() {
++    let ctx = TestContext::default();
++    let schedule = solana_epoch_schedule::EpochSchedule::custom(2048, 2048, false);
++    let root = ctx.ctx.sharable_banks.root();
++    let nodes = root.current_epoch_staked_nodes();
++    let policy = CertificateEgressPolicy::from_test_memberships(
++        &schedule,
++        &ctx.ctx.cluster_info.id(),
++        &nodes,
++        None,
++    );
++    let batch = pilot_epoch202_batch();
++    let mut stats = ConsensusPoolServiceStats::new();
++    ConsensusPoolService::send_certificates_with_policy(
++        &ctx.ctx,
++        BLSOp::PushCertificates {
++            certificates: batch.clone(),
++        },
++        &mut stats,
++        &policy,
++    )
++    .unwrap();
++    pilot_epoch202_assert_payloads(ctx.bls_receiver.try_recv().unwrap(), false, &batch);
++    assert_eq!(stats.certificates_skipped_unstaked.0, 0);
++    assert_eq!(stats.certificates_sent.0, 4);
++}
++
++#[test]
++fn pilot_epoch202_egress_actual_unpinned_bank_cannot_admit_unstaked_identity() {
++    let mut ctx = TestContext::default();
++    let root = ctx.ctx.sharable_banks.root();
++    assert!(root.pilot_epoch202_recovery_view().is_none());
++    ctx.ctx.cluster_info = get_cluster_info(Keypair::new());
++    let mut stats = ConsensusPoolServiceStats::new();
++    ConsensusPoolService::send_certificates(
++        &ctx.ctx,
++        BLSOp::RefreshCertificates {
++            certificates: pilot_epoch202_batch(),
++        },
++        &mut stats,
++    )
++    .unwrap();
++    assert!(ctx.bls_receiver.try_recv().is_err());
++    assert_eq!(stats.certificates_skipped_unstaked.0, 4);
++    assert_eq!(stats.certificates_sent.0, 0);
++    assert_eq!(stats.certificates_dropped.0, 0);
++}
++
++#[test]
++fn pilot_epoch202_egress_full_channel_counts_only_admitted_certificates_as_dropped() {
++    let mut ctx = TestContext::default();
++    let (sender, _held_receiver) = bounded(0);
++    ctx.ctx.bls_sender = sender;
++    let schedule = solana_epoch_schedule::EpochSchedule::custom(2048, 2048, false);
++    let root = ctx.ctx.sharable_banks.root();
++    let nodes = root.current_epoch_staked_nodes();
++    let raw_empty = std::collections::HashMap::new();
++    let policy = CertificateEgressPolicy::from_test_memberships(
++        &schedule,
++        &ctx.ctx.cluster_info.id(),
++        &raw_empty,
++        Some(&nodes),
++    );
++    let mut stats = ConsensusPoolServiceStats::new();
++    ConsensusPoolService::send_certificates_with_policy(
++        &ctx.ctx,
++        BLSOp::PushCertificates {
++            certificates: pilot_epoch202_batch(),
++        },
++        &mut stats,
++        &policy,
++    )
++    .unwrap();
++    assert_eq!(stats.certificates_skipped_unstaked.0, 2);
++    assert_eq!(stats.certificates_sent.0, 0);
++    assert_eq!(stats.certificates_dropped.0, 2);
++}
++
++#[test]
++fn pilot_epoch202_egress_disconnected_channel_retains_existing_failure() {
++    let ctx = TestContext::default();
++    drop(ctx.bls_receiver);
++    let schedule = solana_epoch_schedule::EpochSchedule::custom(2048, 2048, false);
++    let root = ctx.ctx.sharable_banks.root();
++    let nodes = root.current_epoch_staked_nodes();
++    let raw_empty = std::collections::HashMap::new();
++    let policy = CertificateEgressPolicy::from_test_memberships(
++        &schedule,
++        &ctx.ctx.cluster_info.id(),
++        &raw_empty,
++        Some(&nodes),
++    );
++    let mut stats = ConsensusPoolServiceStats::new();
++    let result = ConsensusPoolService::send_certificates_with_policy(
++        &ctx.ctx,
++        BLSOp::RefreshCertificates {
++            certificates: pilot_epoch202_batch(),
++        },
++        &mut stats,
++        &policy,
++    );
++    assert_eq!(result, Err("bls_sender"));
++    assert_eq!(stats.certificates_skipped_unstaked.0, 2);
++    assert_eq!(stats.certificates_sent.0, 0);
++    assert_eq!(stats.certificates_dropped.0, 0);
++}
+diff --git a/votor/src/lib.rs b/votor/src/lib.rs
+--- a/votor/src/lib.rs
++++ b/votor/src/lib.rs
+@@ -13,6 +13,8 @@
+ pub mod event;
+ mod event_handler;
+ pub mod peer_list_updater;
++mod pilot_epoch202_egress;
++pub use pilot_epoch202_egress::pilot_epoch202_build_info_v1;
+ pub mod root_utils;
+ pub mod slot_clock;
+ mod timer_manager;
+diff --git a/votor/src/pilot_epoch202_egress.rs b/votor/src/pilot_epoch202_egress.rs
+new file mode 100644
+--- /dev/null
++++ b/votor/src/pilot_epoch202_egress.rs
+@@ -0,0 +1,90 @@
++//! Per-certificate egress admission for the explicitly enabled, pinned 202 view.
++//! Runtime owns anchor/eligibility validation. This consumer never constructs
++//! membership, changes quorum, mutates a Bank, or changes current/raw stake APIs.
++use {
++    crate::voting_service::BLSOp, solana_epoch_schedule::EpochSchedule, solana_pubkey::Pubkey,
++    solana_runtime::bank::Bank, std::collections::HashMap,
++};
++
++/// Actual linked Votor feature/policy information, also available when OFF.
++/// JSON text avoids adding a serde_json dependency to Votor. The runner parses
++/// the returned library value; it must not substitute its own feature flag.
++pub fn pilot_epoch202_build_info_v1() -> &'static str {
++    if cfg!(feature = "zolana-pilot-202-recovery") {
++        r#"{"format":"zolana085-epoch202-votor-build-v1","crate_feature_enabled":true,"target_epoch":202,"activation_slot":413696,"per_certificate_policy":"requested-epoch202-sidecar-only-v1","runtime_view_api":"Bank::pilot_epoch202_recovery_view"}"#
++    } else {
++        r#"{"format":"zolana085-epoch202-votor-build-v1","crate_feature_enabled":false,"target_epoch":202,"activation_slot":413696,"per_certificate_policy":"requested-epoch202-sidecar-only-v1","runtime_view_api":"Bank::pilot_epoch202_recovery_view"}"#
++    }
++}
++
++/// One root snapshot supplies both decisions for the whole operation. The
++/// optional 202 decision exists only when runtime supplied its validated view.
++pub(crate) struct CertificateEgressPolicy<'a> {
++    schedule: &'a EpochSchedule,
++    current_identity_staked: bool,
++    projected_202_identity_staked: Option<bool>,
++}
++
++impl<'a> CertificateEgressPolicy<'a> {
++    pub(crate) fn from_bank(root: &'a Bank, identity: &Pubkey) -> Self {
++        let current = root.current_epoch_staked_nodes();
++        let projected = if cfg!(feature = "zolana-pilot-202-recovery") {
++            root.pilot_epoch202_recovery_view()
++                .map(|view| view.stakes().staked_nodes())
++        } else {
++            None
++        };
++        Self::from_memberships(
++            root.epoch_schedule(),
++            identity,
++            &current,
++            projected.as_deref(),
++        )
++    }
++
++    fn from_memberships(
++        schedule: &'a EpochSchedule,
++        identity: &Pubkey,
++        current: &HashMap<Pubkey, u64>,
++        projected: Option<&HashMap<Pubkey, u64>>,
++    ) -> Self {
++        let positive =
++            |nodes: &HashMap<Pubkey, u64>| nodes.get(identity).is_some_and(|stake| *stake > 0);
++        Self {
++            schedule,
++            current_identity_staked: positive(current),
++            projected_202_identity_staked: projected.map(positive),
++        }
++    }
++
++    pub(crate) fn filter(&self, mut op: BLSOp) -> (BLSOp, usize) {
++        let certificates = match &mut op {
++            BLSOp::PushCertificates { certificates }
++            | BLSOp::RefreshCertificates { certificates } => certificates,
++            _ => unreachable!("expected a certificate BLSOp"),
++        };
++        let before = certificates.len();
++        certificates.retain(|cert| {
++            if self.schedule.get_epoch(cert.cert_type.slot()) == 202 {
++                self.projected_202_identity_staked
++                    .unwrap_or(self.current_identity_staked)
++            } else {
++                self.current_identity_staked
++            }
++        });
++        let skipped = before - certificates.len();
++        (op, skipped)
++    }
++
++    /// Consumer fixtures use real ordinary stake maps but cannot stand in for
++    /// runtime's separate exact-anchor validation. Not available in production.
++    #[cfg(test)]
++    pub(crate) fn from_test_memberships(
++        schedule: &'a EpochSchedule,
++        identity: &Pubkey,
++        current: &HashMap<Pubkey, u64>,
++        projected: Option<&HashMap<Pubkey, u64>>,
++    ) -> Self {
++        Self::from_memberships(schedule, identity, current, projected)
++    }
++}
+diff --git a/zolana-fast-check/Cargo.toml b/zolana-fast-check/Cargo.toml
+--- a/zolana-fast-check/Cargo.toml
++++ b/zolana-fast-check/Cargo.toml
+@@ -5,6 +5,13 @@
+ rust-version = { workspace = true }
+ license = { workspace = true }
+ publish = false
++
++[features]
++default = []
++zolana-pilot-202-recovery = [
++    "solana-runtime/zolana-pilot-202-recovery",
++    "agave-votor/zolana-pilot-202-recovery",
++]
+ 
+ [dependencies]
+ serde = { workspace = true, features = ["derive"] }
+@@ -41,5 +48,9 @@
+ solana-transaction-status-client-types = { workspace = true }
+ wincode = { workspace = true }
+ 
++solana-shred-version = { workspace = true }
++solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
++solana-unified-scheduler-pool = { workspace = true, features = ["dev-context-only-utils"] }
++
+ [lints]
+ workspace = true
+diff --git a/zolana-fast-check/src/ancestry.rs b/zolana-fast-check/src/ancestry.rs
+--- a/zolana-fast-check/src/ancestry.rs
++++ b/zolana-fast-check/src/ancestry.rs
+@@ -3,7 +3,17 @@
+ //! never count as verified. Strictly decreasing parent slots prevent cycles.
+ use {
+     solana_ledger::blockstore::Blockstore,
+-    std::{fmt, thread, time::Instant},
++    std::{
++        fmt,
++        panic::{AssertUnwindSafe, catch_unwind},
++        sync::{
++            Arc,
++            atomic::{AtomicBool, Ordering},
++            mpsc,
++        },
++        thread,
++        time::{Duration, Instant},
++    },
+ };
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -18,6 +28,7 @@
+ pub(super) enum AncestryError {
+     Cancelled,
+     Deadline,
++    WorkerPanic { index: usize },
+     Invalid { slot: u64, reason: String },
+ }
+ 
+@@ -28,6 +39,10 @@
+             Self::Deadline => {
+                 formatter.write_str("original-root ancestry verification deadline exceeded")
+             }
++            Self::WorkerPanic { index } => write!(
++                formatter,
++                "original-root ancestry worker {index} panicked; no paths accepted"
++            ),
+             Self::Invalid { slot, reason } => write!(
+                 formatter,
+                 "invalid original-root ancestry at slot {slot}: {reason}"
+@@ -56,7 +71,25 @@
+     start_slot: u64,
+     target_slot: u64,
+     deadline: Instant,
++    cancelled: impl FnMut() -> bool,
++) -> Result<AncestryReport, AncestryError> {
++    verify_path_observed(
++        blockstore,
++        start_slot,
++        target_slot,
++        deadline,
++        cancelled,
++        |_, _| {},
++    )
++}
++
++fn verify_path_observed(
++    blockstore: &Blockstore,
++    start_slot: u64,
++    target_slot: u64,
++    deadline: Instant,
+     mut cancelled: impl FnMut() -> bool,
++    mut observed: impl FnMut(u64, u64),
+ ) -> Result<AncestryReport, AncestryError> {
+     let mut slot = start_slot;
+     let mut entries = 0u64;
+@@ -82,6 +115,7 @@
+         entries = entries
+             .checked_add(1)
+             .ok_or_else(|| invalid("ancestry counter overflow".into()))?;
++        observed(slot, entries);
+         if slot == target_slot {
+             // The checkpoint's own parent can legitimately have been pruned.
+             // Its retained certified hash is independently checked by resume.
+@@ -112,3 +146,150 @@
+         }
+     }
+ }
++
++pub(super) struct PathTask {
++    pub identity: String,
++    pub blockstore: Arc<Blockstore>,
++    pub start_slot: u64,
++    pub target_slot: u64,
++}
++
++#[derive(Debug)]
++pub(super) struct TimedAncestryReport {
++    pub report: AncestryReport,
++    pub elapsed: Duration,
++}
++
++/// Independent read-only paths share ONE deadline. The caller's cancellation
++/// callback stays on the caller thread; worker threads receive only an abort
++/// flag. Every worker is joined before returning, including on error or panic.
++/// No partial set of verified peers is ever returned as success.
++fn run_parallel<T: Send>(
++    jobs: Vec<T>,
++    deadline: Instant,
++    mut cancelled: impl FnMut() -> bool,
++    work: impl Fn(T, Instant, &AtomicBool) -> Result<AncestryReport, AncestryError> + Sync,
++) -> Result<Vec<TimedAncestryReport>, AncestryError> {
++    check_budget(deadline, &mut cancelled)?;
++    if !(1..=3).contains(&jobs.len()) {
++        return Err(AncestryError::Invalid {
++            slot: 0,
++            reason: "parallel ancestry requires one to three pinned peers".into(),
++        });
++    }
++    let abort = AtomicBool::new(false);
++    thread::scope(|scope| {
++        let (sender, receiver) = mpsc::channel();
++        let mut handles = Vec::with_capacity(jobs.len());
++        for (index, job) in jobs.into_iter().enumerate() {
++            let sender = sender.clone();
++            let work = &work;
++            let abort = &abort;
++            handles.push(scope.spawn(move || {
++                let began = Instant::now();
++                let result = catch_unwind(AssertUnwindSafe(|| work(job, deadline, abort)))
++                    .unwrap_or(Err(AncestryError::WorkerPanic { index }));
++                let _ = sender.send((index, began.elapsed(), result));
++            }));
++        }
++        drop(sender);
++        let mut reports: Vec<_> = (0..handles.len()).map(|_| None).collect();
++        let mut remaining = handles.len();
++        let mut failure = None;
++        while remaining > 0 {
++            if failure.is_none() {
++                if let Err(error) = check_budget(deadline, &mut cancelled) {
++                    failure = Some(error);
++                    abort.store(true, Ordering::Release);
++                }
++            }
++            // A blocking RocksDB read cannot be interrupted midway; workers
++            // recheck the same deadline/abort flag immediately after each full
++            // fallible metadata read. Join them rather than detach stale work.
++            match receiver.recv_timeout(Duration::from_millis(5)) {
++                Ok((index, elapsed, result)) => {
++                    remaining -= 1;
++                    match result {
++                        Ok(report) => {
++                            reports[index] = Some(TimedAncestryReport { report, elapsed })
++                        }
++                        Err(error) => {
++                            if failure.is_none() {
++                                failure = Some(error);
++                            }
++                            abort.store(true, Ordering::Release);
++                        }
++                    }
++                }
++                Err(mpsc::RecvTimeoutError::Timeout) => {}
++                Err(mpsc::RecvTimeoutError::Disconnected) => {
++                    if failure.is_none() {
++                        failure = Some(AncestryError::WorkerPanic {
++                            index: reports.len(),
++                        });
++                    }
++                    abort.store(true, Ordering::Release);
++                    break;
++                }
++            }
++        }
++        for (index, handle) in handles.into_iter().enumerate() {
++            if handle.join().is_err() && failure.is_none() {
++                failure = Some(AncestryError::WorkerPanic { index });
++                abort.store(true, Ordering::Release);
++            }
++        }
++        if let Some(error) = failure {
++            return Err(error);
++        }
++        check_budget(deadline, &mut cancelled)?;
++        reports
++            .into_iter()
++            .map(|report| {
++                report.ok_or(AncestryError::Invalid {
++                    slot: 0,
++                    reason: "joined worker did not produce a complete ancestry report".into(),
++                })
++            })
++            .collect()
++    })
++}
++
++pub(super) fn verify_paths(
++    tasks: Vec<PathTask>,
++    deadline: Instant,
++    cancelled: impl FnMut() -> bool,
++) -> Result<Vec<TimedAncestryReport>, AncestryError> {
++    run_parallel(tasks, deadline, cancelled, |task, deadline, abort| {
++        let began = Instant::now();
++        let mut entries = 0;
++        let mut last_slot = task.start_slot;
++        let result = verify_path_observed(
++            &task.blockstore,
++            task.start_slot,
++            task.target_slot,
++            deadline,
++            || abort.load(Ordering::Acquire),
++            |slot, count| {
++                last_slot = slot;
++                entries = count;
++            },
++        );
++        let count = entries;
++        eprintln!(
++            "{}",
++            serde_json::json!({"event": "parallel_original_ancestry_walk",
++            "identity": task.identity, "start_slot": task.start_slot, "target_slot": task.target_slot,
++            "entries": count, "parent_links": count.saturating_sub(1),
++            "last_validated_slot": last_slot,
++            "elapsed_ms": began.elapsed().as_secs_f64() * 1000.0,
++            "verified": result.is_ok(), "error": result.as_ref().err().map(ToString::to_string),
++            "full_fallible_metadata": true, "shared_deadline": true})
++        );
++        result
++    })
++}
++
++#[cfg(test)]
++#[path = "ancestry_parallel_tests.rs"]
++mod parallel_tests;
+diff --git a/zolana-fast-check/src/ancestry_parallel_tests.rs b/zolana-fast-check/src/ancestry_parallel_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_parallel_tests.rs
+@@ -0,0 +1,293 @@
++//! Coordinator fault tests use disposable synthetic jobs. Real Blockstore paths
++//! additionally exercise the unchanged full metadata decoder below and in the
++//! original ancestry_tests module. No validator, key or network is involved.
++use {
++    super::*,
++    solana_ledger::blockstore_meta::SlotMeta,
++    std::{
++        cell::Cell,
++        rc::Rc,
++        sync::{Mutex, atomic::AtomicUsize},
++    },
++};
++
++fn budget() -> Instant {
++    Instant::now() + Duration::from_secs(2)
++}
++fn report(index: usize) -> AncestryReport {
++    AncestryReport {
++        start_slot: 100 + index as u64,
++        target_slot: 1,
++        entries: 10 + index as u64,
++    }
++}
++fn rendezvous(
++    started: &AtomicUsize,
++    deadline: Instant,
++    abort: &AtomicBool,
++) -> Result<(), AncestryError> {
++    started.fetch_add(1, Ordering::SeqCst);
++    while started.load(Ordering::SeqCst) != 3 {
++        check_budget(deadline, &mut || abort.load(Ordering::Acquire))?;
++        thread::sleep(Duration::from_millis(1));
++    }
++    Ok(())
++}
++struct Active<'a>(&'a AtomicUsize);
++impl Drop for Active<'_> {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, Ordering::SeqCst);
++    }
++}
++fn active(count: &AtomicUsize) -> Active<'_> {
++    count.fetch_add(1, Ordering::SeqCst);
++    Active(count)
++}
++
++#[test]
++fn ancestry_parallel_overlaps_three_walks_and_preserves_input_order() {
++    let started = AtomicUsize::new(0);
++    let threads = Mutex::new(std::collections::HashSet::new());
++    let expected_deadline = budget();
++    let result = run_parallel(
++        vec![0, 1, 2],
++        expected_deadline,
++        || false,
++        |index, deadline, abort| {
++            assert_eq!(deadline, expected_deadline);
++            threads.lock().unwrap().insert(thread::current().id());
++            rendezvous(&started, deadline, abort)?;
++            thread::sleep(Duration::from_millis((2 - index) as u64 * 5));
++            Ok(report(index))
++        },
++    )
++    .unwrap();
++    assert_eq!(threads.into_inner().unwrap().len(), 3);
++    assert_eq!(
++        result.iter().map(|r| r.report.entries).collect::<Vec<_>>(),
++        vec![10, 11, 12]
++    );
++    assert!(result.iter().all(|r| r.elapsed > Duration::ZERO));
++}
++
++#[test]
++fn ancestry_parallel_one_shared_deadline_joins_every_worker_without_partial_success() {
++    let active_count = AtomicUsize::new(0);
++    let ended = AtomicUsize::new(0);
++    let began = Instant::now();
++    let expected_deadline = began + Duration::from_millis(40);
++    let result = run_parallel(
++        vec![0, 1, 2],
++        expected_deadline,
++        || false,
++        |_, deadline, abort| {
++            let _active = active(&active_count);
++            assert_eq!(deadline, expected_deadline);
++            let result = loop {
++                if let Err(error) = check_budget(deadline, &mut || abort.load(Ordering::Acquire)) {
++                    break Err(error);
++                }
++                thread::sleep(Duration::from_millis(1));
++            };
++            ended.fetch_add(1, Ordering::SeqCst);
++            result
++        },
++    );
++    assert!(matches!(result, Err(AncestryError::Deadline)));
++    assert_eq!(active_count.load(Ordering::SeqCst), 0);
++    assert_eq!(ended.load(Ordering::SeqCst), 3);
++    assert!(began.elapsed() < Duration::from_secs(2));
++}
++
++#[test]
++fn ancestry_parallel_external_non_send_cancellation_stops_and_joins_all_walks() {
++    let started = AtomicUsize::new(0);
++    let ended = AtomicUsize::new(0);
++    let caller_checks = Rc::new(Cell::new(0)); // FnMut need not be Send or Sync.
++    let result = run_parallel(
++        vec![0, 1, 2],
++        budget(),
++        || {
++            caller_checks.set(caller_checks.get() + 1);
++            started.load(Ordering::SeqCst) == 3
++        },
++        |_, deadline, abort| {
++            started.fetch_add(1, Ordering::SeqCst);
++            let result = loop {
++                if let Err(error) = check_budget(deadline, &mut || abort.load(Ordering::Acquire)) {
++                    break Err(error);
++                }
++                thread::sleep(Duration::from_millis(1));
++            };
++            ended.fetch_add(1, Ordering::SeqCst);
++            result
++        },
++    );
++    assert!(matches!(result, Err(AncestryError::Cancelled)));
++    assert_eq!(ended.load(Ordering::SeqCst), 3);
++    assert!(caller_checks.get() >= 2);
++}
++
++#[test]
++fn ancestry_parallel_one_invalid_path_aborts_siblings_and_retains_the_original_error() {
++    let started = AtomicUsize::new(0);
++    let stopped = AtomicUsize::new(0);
++    let result = run_parallel(
++        vec![0, 1, 2],
++        budget(),
++        || false,
++        |index, deadline, abort| {
++            rendezvous(&started, deadline, abort)?;
++            if index == 1 {
++                return Err(AncestryError::Invalid {
++                    slot: 91,
++                    reason: "corrupt full metadata".into(),
++                });
++            }
++            while !abort.load(Ordering::Acquire) {
++                check_budget(deadline, &mut || false)?;
++                thread::sleep(Duration::from_millis(1));
++            }
++            stopped.fetch_add(1, Ordering::SeqCst);
++            Err(AncestryError::Cancelled)
++        },
++    );
++    assert!(matches!(
++        result,
++        Err(AncestryError::Invalid { slot: 91, .. })
++    ));
++    assert_eq!(stopped.load(Ordering::SeqCst), 2);
++}
++
++#[test]
++fn ancestry_parallel_worker_panic_is_fail_closed_and_siblings_are_joined() {
++    let started = AtomicUsize::new(0);
++    let stopped = AtomicUsize::new(0);
++    let result = run_parallel(
++        vec![0, 1, 2],
++        budget(),
++        || false,
++        |index, deadline, abort| {
++            rendezvous(&started, deadline, abort)?;
++            if index == 1 {
++                panic!("intentional synthetic worker failure");
++            }
++            while !abort.load(Ordering::Acquire) {
++                check_budget(deadline, &mut || false)?;
++                thread::sleep(Duration::from_millis(1));
++            }
++            stopped.fetch_add(1, Ordering::SeqCst);
++            Err(AncestryError::Cancelled)
++        },
++    );
++    assert!(matches!(
++        result,
++        Err(AncestryError::WorkerPanic { index: 1 })
++    ));
++    assert_eq!(stopped.load(Ordering::SeqCst), 2);
++}
++
++#[test]
++fn ancestry_parallel_late_worker_success_cannot_override_deadline_and_is_joined() {
++    let finished = AtomicBool::new(false);
++    let result = run_parallel(
++        vec![0],
++        Instant::now() + Duration::from_millis(15),
++        || false,
++        |index, _, _| {
++            thread::sleep(Duration::from_millis(45));
++            finished.store(true, Ordering::SeqCst);
++            Ok(report(index))
++        },
++    );
++    assert!(matches!(result, Err(AncestryError::Deadline)));
++    assert!(finished.load(Ordering::SeqCst));
++}
++
++#[test]
++fn ancestry_parallel_invalid_peer_count_and_pre_cancel_never_start_workers() {
++    let called = AtomicBool::new(false);
++    for jobs in [vec![], vec![0, 1, 2, 3]] {
++        assert!(matches!(
++            run_parallel(
++                jobs,
++                budget(),
++                || false,
++                |_, _, _| {
++                    called.store(true, Ordering::SeqCst);
++                    Ok(report(0))
++                }
++            ),
++            Err(AncestryError::Invalid { .. })
++        ));
++    }
++    assert!(matches!(
++        run_parallel(
++            vec![0],
++            budget(),
++            || true,
++            |_, _, _| {
++                called.store(true, Ordering::SeqCst);
++                Ok(report(0))
++            }
++        ),
++        Err(AncestryError::Cancelled)
++    ));
++    assert!(!called.load(Ordering::SeqCst));
++}
++
++#[test]
++fn ancestry_parallel_real_full_metadata_paths_and_corrupt_peer_fail_closed() {
++    let directories: Vec<_> = (0..3)
++        .map(|_| solana_ledger::get_tmp_ledger_path_auto_delete!())
++        .collect();
++    let stores: Vec<_> = directories
++        .iter()
++        .map(|dir| Arc::new(Blockstore::open(dir.path()).unwrap()))
++        .collect();
++    for store in &stores {
++        for slot in 1..=32 {
++            store
++                .put_meta(
++                    slot,
++                    &SlotMeta {
++                        slot,
++                        parent_slot: (slot > 1).then_some(slot - 1),
++                        ..SlotMeta::default()
++                    },
++                )
++                .unwrap();
++        }
++    }
++    let tasks = || {
++        stores
++            .iter()
++            .enumerate()
++            .map(|(index, store)| PathTask {
++                identity: format!("synthetic-peer-{index}"),
++                blockstore: Arc::clone(store),
++                start_slot: 32,
++                target_slot: 1,
++            })
++            .collect()
++    };
++    let result = verify_paths(tasks(), budget(), || false).unwrap();
++    assert_eq!(result.len(), 3);
++    assert!(
++        result.iter().all(|r| r.report.entries == 32
++            && r.report.start_slot == 32
++            && r.report.target_slot == 1)
++    );
++    // The production full metadata decoder must reject this malformed record.
++    // This fixture does not separately distinguish it from a prefix parser.
++    let mut truncated = Vec::new();
++    truncated.extend_from_slice(&16u64.to_le_bytes());
++    truncated.extend_from_slice(&0u64.to_le_bytes());
++    stores[1].put_meta_bytes(16, &truncated).unwrap();
++    assert!(stores[1].meta(16).is_err());
++    assert!(matches!(
++        verify_paths(tasks(), budget(), || false),
++        Err(AncestryError::Invalid { slot: 16, .. })
++    ));
++    assert!(stores[1].meta(16).is_err());
++}
+diff --git a/zolana-fast-check/src/build_info.rs b/zolana-fast-check/src/build_info.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/build_info.rs
+@@ -0,0 +1,90 @@
++//! Fixed public linkage probe. This path never opens a fixture, ledger or key.
++use {
++    anyhow::{Context, Result, ensure},
++    serde_json::{Value, json},
++    solana_runtime::bank::Bank,
++    std::{env, io::{Write, stdout}},
++};
++
++fn requested(args: &[String]) -> Result<bool> {
++    if !args.iter().any(|arg| arg == "--build-info") { return Ok(false); }
++    ensure!(args.len() == 1, "--build-info takes no other arguments");
++    Ok(true)
++}
++
++pub(crate) fn linked() -> Result<Value> {
++    // These are UNIQUE new library APIs. An old cached runtime/Votor cannot
++    // satisfy this binding merely because the runner's own cfg says enabled.
++    let runtime = Bank::pilot_epoch202_build_info_v1();
++    let votor_wire = agave_votor::pilot_epoch202_build_info_v1();
++    ensure!(votor_wire.len() <= 4096, "bounded public Votor build info required");
++    let votor: Value = serde_json::from_str(votor_wire).context("actual Votor build info JSON")?;
++    let enabled = cfg!(feature = "zolana-pilot-202-recovery");
++    ensure!(runtime["format"] == "zolana085-epoch202-runtime-build-v1"
++        && runtime["compiled_new_feature"] == enabled
++        && runtime["compiled_old_retry_feature"] == false,
++        "actual linked runtime feature/policy mismatch");
++    ensure!(runtime["historical201_policy"] == "existing-entry-preserved-v1"
++        && runtime["activation_first_slot"] == 413696 && runtime["target_epoch"] == 202,
++        "actual runtime historical/activation policy differs");
++    ensure!(runtime["genesis_hash"] == "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p"
++        && runtime["network"] == serde_json::to_value([67u8; 32])?, "actual runtime domain differs");
++    ensure!(runtime["root_anchor"] == json!({"slot":413694,
++        "bank_hash":"BYnRBCtGoKuEqWz36fwqYn6uBe1yY5ftp5oW9qs22Gdz",
++        "raw_input_sha256":"6e56d2954b6e1ea6afdcd14e9688fca011bae4c9b357cf8d904fe9669e7b038e"}),
++        "actual runtime root694 anchor differs");
++    ensure!(runtime["signed_parent"] == json!({"slot":413695,
++        "bank_hash":"HXxWUSa9AoiyFJ7BEsVHNXLVNziD64zayM5592axQAsh",
++        "block_id":"FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu",
++        "raw_input_sha256":"f98785132ad63e75b9cdc21622992fc825d796ae9ef3c7f21fa45099cb87c2c9"}),
++        "actual runtime signed695 anchor differs");
++    ensure!(runtime["consensus_output_sha256"] == "fe6f03c9cd7ed3d9774f71acd97f0f16b5dda937fcfcca483e66d6b1e0352e30",
++        "actual runtime complete consensus output pin differs");
++    ensure!(votor["format"] == "zolana085-epoch202-votor-build-v1"
++        && votor["crate_feature_enabled"] == enabled
++        && votor["target_epoch"] == 202 && votor["activation_slot"] == 413696
++        && votor["per_certificate_policy"] == "requested-epoch202-sidecar-only-v1"
++        && votor["runtime_view_api"] == "Bank::pilot_epoch202_recovery_view",
++        "actual linked Votor feature/policy mismatch");
++    Ok(json!({"format":"zolana085-epoch202-runner-build-v1",
++        "runner_compiled_new_feature":enabled,"runtime":runtime,"votor":votor,
++        "mode":"public-linkage-probe","validators_started":false,
++        "ledgers_opened":false,"keys_read":false,"financial_operations":0}))
++}
++
++pub(crate) fn maybe_print() -> Result<bool> {
++    if !requested(&env::args().skip(1).collect::<Vec<_>>())? { return Ok(false); }
++    let info = linked()?;
++    let mut out = stdout().lock();
++    serde_json::to_writer(&mut out, &info)?;
++    out.write_all(b"\n")?; out.flush()?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn build_info_rejects_runtime_arguments_before_opening_anything() {
++        let args = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
++        assert!(requested(&args(&["--build-info"])).unwrap());
++        for items in [vec!["--build-info","--service"],
++            vec!["--resume-root","/does/not/exist","--build-info"],
++            vec!["--build-info","--build-info"]] {
++            assert!(requested(&args(&items)).is_err());
++        }
++        assert!(!requested(&args(&["--resume-root","/does/not/exist","--service"])).unwrap());
++    }
++    #[test]
++    fn build_info_reports_both_actual_dependency_functions() {
++        let info = linked().unwrap();
++        assert_eq!(info["runner_compiled_new_feature"], cfg!(feature="zolana-pilot-202-recovery"));
++        assert_eq!(info["runtime"], Bank::pilot_epoch202_build_info_v1());
++        let actual: Value = serde_json::from_str(agave_votor::pilot_epoch202_build_info_v1()).unwrap();
++        assert_eq!(info["votor"], actual);
++        assert_eq!(info["runtime"]["compiled_old_retry_feature"], false);
++        assert_eq!(info["validators_started"], false);
++        assert_eq!(info["ledgers_opened"], false);
++        assert_eq!(info["keys_read"], false);
++    }
++}
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -4,6 +4,8 @@
+ //! Neither mode claims production validator independence or durable Mac readiness.
+ //! Every ledger and key belongs to a fresh owner-only invocation directory.
+ 
++mod build_info;
++mod offline_probe;
+ mod ancestry;
+ #[cfg(test)]
+ mod ancestry_tests;
+@@ -83,8 +85,10 @@
+         let mut resume = false;
+         let mut service = false;
+         let mut benchmark_option = false;
++        let mut explicit_nodes = false;
+         let (mut mac_relay, mut hold_seconds) = (None, 0u64);
+         while let Some(arg) = args.next() {
++            explicit_nodes |= arg == "--nodes";
+             benchmark_option |= matches!(arg.as_str(), "--nodes" | "--samples" | "--restart-one"
+                 | "--quorum-loss-rejoin" | "--private" | "--slot-anchors" | "--mac-relay" | "--hold-seconds");
+             match arg.as_str() {
+@@ -132,8 +136,10 @@
+             "hold duration exceeds the ten-minute development bound"
+         );
+         if resume {
+-            ensure!(nodes == 1 && !restart_one && !quorum_loss_rejoin && !private && !slot_anchors && mac_relay.is_none(),
++            ensure!(nodes == 1 && !restart_one && !private && !slot_anchors && mac_relay.is_none(),
+                 "resume restores topology/network/profile from its original metadata; omit genesis options");
++            ensure!(!quorum_loss_rejoin || (!explicit_nodes && hold_seconds == 0),
++                "resumed quorum acceptance restores exactly its original topology and cannot rewrite metadata via a hold");
+         }
+         if let Some(relay) = mac_relay {
+             ensure!(
+@@ -143,7 +149,7 @@
+         }
+         ensure!((1..=5).contains(&samples), "one to five samples required");
+         ensure!(
+-            !(restart_one || quorum_loss_rejoin) || nodes == 3,
++            !(restart_one || quorum_loss_rejoin) || nodes == 3 || (resume && quorum_loss_rejoin),
+             "restart/quorum acceptance requires three equal-stake validators"
+         );
+         Ok(Self {
+@@ -756,7 +762,13 @@
+         "threshold_overrides": false, "quorum_loss_rejoin_requested": args.quorum_loss_rejoin}),
+     )?;
+     let mut cluster = if let Some(manifest) = resume_manifest {
+-        manifest.start(&args.root)?
++        // Bounded copied-history quorum tests need the same snapshot bootstrap
++        // as the long-lived service. Ordinary baseline resumes stay unchanged.
++        if args.resume && args.quorum_loss_rejoin {
++            manifest.start_snapshot_backed(&args.root)?
++        } else {
++            manifest.start(&args.root)?
++        }
+     } else {
+         let validator_config = pilot_validator_config(true);
+         let node_keys: Vec<_> = (0..args.nodes)
+@@ -945,11 +957,15 @@
+ }
+ 
+ fn main() -> Result<()> {
++    if build_info::maybe_print()? { return Ok(()); }
++    if offline_probe::maybe_run()? { return Ok(()); }
+     let mut args = Args::parse()?;
+     let mut evidence = prepare_root(&args)?;
+     let resume_manifest = if args.resume {
+         let manifest = resume::Manifest::load(&args.root)?;
+         manifest.apply_profile(&mut args)?;
++        ensure!(!args.quorum_loss_rejoin || args.nodes == 3,
++            "resumed quorum acceptance requires exactly three original validators");
+         Some(manifest)
+     } else { None };
+     configure_environment(&args);
+diff --git a/zolana-fast-check/src/offline_probe.rs b/zolana-fast-check/src/offline_probe.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/offline_probe.rs
+@@ -0,0 +1,388 @@
++//! Fixed-three-peer offline probe; read-only authority inputs, fresh derived AccountsDb.
++use {
++    agave_snapshots::snapshot_config::SnapshotConfig,
++    anyhow::{Context, Result, ensure},
++    serde_json::json,
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        bank_forks_utils::try_load_bank_forks_from_snapshot,
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++        blockstore_processor::{ProcessOptions, process_blockstore_from_root},
++        leader_schedule_cache::LeaderScheduleCache,
++        use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
++    },
++    solana_pubkey::Pubkey,
++    solana_runtime::bank::Bank,
++    solana_account::ReadableAccount,
++    agave_votor::vote_history_storage::{FileVoteHistoryStorage, VoteHistoryStorage},
++    solana_shred_version::compute_shred_version,
++    solana_unified_scheduler_pool::DefaultSchedulerPool,
++    std::{fs, os::unix::fs::{MetadataExt, PermissionsExt}, path::PathBuf,
++        str::FromStr, sync::{Arc, Mutex, atomic::AtomicBool}},
++};
++const NETWORK: &str = "/var/lib/zolana-vat-085-r1/network";
++const LEDGERS: [&str; 3] = [
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-HjbHskvn6Tos8quAv6VjvCwxFDykuBF7KiPYvmmnbaWU",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-A52FF9Tk89Fx9E2NYqvtGBr7SE9gVMPWgWLzjf6i5WxD",
++];
++const IDENTITIES: [&str; 3] = [
++    "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
++    "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
++    "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
++];
++const HISTORY_SHA: [&str; 3] = [
++    "c0a91c106cab1edfbe1523d3360eddd8ee9abb138665c9959441427836557c1e",
++    "b679d20f9fb20892a8f24f9e630dcf559f3cba8c51e6e1ae3c584f91a75185bb",
++    "2fbf7f96df5ccf3e49fec536c39f4168bea24ef54254df470349ad31944ce985",
++];
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++fn emit(value: serde_json::Value) { println!("{}", value); }
++fn run(node: usize) -> Result<()> {
++    let build_info = super::build_info::linked()?;
++    ensure!(build_info["runner_compiled_new_feature"] == true, "offline202probe requires the new feature");
++    emit(json!({"event":"candidate_linked_build_verified","build_info":build_info}));
++    ensure!(unsafe { libc::geteuid() } == 995, "isolated original validator uid required");
++    let network = PathBuf::from(NETWORK);
++    ensure!(sha256_hex(&fs::read(network.join("resume.json"))?) == "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a", "copied resume identity pin differs");
++    let ledger = network.join(LEDGERS[node]);
++    ensure!(ledger.canonicalize()? == ledger, "ledger path changed");
++    let work = PathBuf::from(format!("/var/lib/zolana-vat-085-epoch202-probe-r1/node{node}/work"));
++    let meta = fs::symlink_metadata(&work)?;
++    ensure!(meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == 995
++        && meta.permissions().mode() & 0o777 == 0o700 && work.canonicalize()? == work,
++        "fresh private non-authoritative workdir required");
++    ensure!(fs::read_dir(&work)?.next().is_none(), "diagnostic output must be new and empty");
++    let identity = Pubkey::from_str(IDENTITIES[node])?;
++    let storage = FileVoteHistoryStorage::new(ledger.clone());
++    let history_path = storage.filename(&identity);
++    let history_meta = fs::symlink_metadata(&history_path)?;
++    ensure!(history_meta.is_file() && !history_meta.file_type().is_symlink()
++        && history_meta.uid() == 995 && history_meta.nlink() == 1 && history_meta.len() <= 1024
++        && history_path.canonicalize()? == history_path, "exact private-owner public signed-history file required");
++    let history_bytes = fs::read(&history_path)?;
++    ensure!(history_bytes.len() <= 1024 && sha256_hex(&history_bytes) == HISTORY_SHA[node], "signed-history public container pin differs");
++    let history = storage.load(&identity)?;
++    let retained = history.votes_cast_since(413_694);
++    ensure!(history.root() == 413_694 && retained.iter().map(|vote| vote.slot()).max() == Some(413_695)
++        && retained.iter().any(|vote| vote.slot() == 413_695 && vote.block_id().is_some_and(|id|id.to_string() == "FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu")),
++        "exact authenticated retained signed695 history required");
++    let genesis = GenesisConfig::load(&ledger)?;
++    ensure!(genesis.hash().to_string() == GENESIS, "original genesis pin differs");
++    let blockstore = Blockstore::open_with_options(&ledger, BlockstoreOptions {
++        access_type: AccessType::ReadOnly, ..BlockstoreOptions::default()
++    })?;
++    ensure!(!blockstore.is_primary_access(), "ledger must be read-only");
++    let target = blockstore.max_root();
++    ensure!(target == 413_694, "exact certified funded root required");
++    const SIGNED_SLOT: u64 = 413_695;
++    const SIGNED_BLOCK_ID: &str = "FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu";
++    let (certified_hash, certified_time) = blockstore.get_optimistic_slot(target)?
++        .context("latest rooted slot lacks original Alpenglow certified bank hash")?;
++    ensure!(blockstore.is_root(target) && certified_hash.to_string() == "BYnRBCtGoKuEqWz36fwqYn6uBe1yY5ftp5oW9qs22Gdz", "exact original certified root hash required");
++    ensure!(!blockstore.is_root(SIGNED_SLOT) && blockstore.meta(SIGNED_SLOT)?.is_some_and(|meta| meta.is_full()), "exact retained complete unrooted signed tail required");
++    if let Some(hash) = blockstore.get_bank_hash(target) {
++        ensure!(hash == certified_hash, "replay and certified hashes conflict");
++    }
++    let votes = [
++        "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++        "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++        "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++    ].map(|v| Pubkey::from_str(v).unwrap());
++    let mut snapshots = SnapshotConfig::new_load_only();
++    snapshots.full_snapshot_archives_dir = ledger.join("native-snapshots/full");
++    snapshots.incremental_snapshot_archives_dir = ledger.join("native-snapshots/incremental");
++    snapshots.bank_snapshots_dir = work.join("bank");
++    snapshots.use_direct_io = false;
++    snapshots.use_registered_io_uring_buffers = false;
++    ensure!(fs::read_dir(&snapshots.incremental_snapshot_archives_dir)?.next().is_none(),
++        "unexpected incremental snapshot input");
++    let accounts = work.join("accounts"); fs::create_dir(&accounts)?;
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let capture = Arc::clone(&records);
++    let options = ProcessOptions {
++        run_verification: true, skip_inter_slot_verification: false,
++        halt_at_slot: Some(SIGNED_SLOT), abort_on_invalid_block: true,
++        use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::Always,
++        slot_callback: Some(Arc::new(move |bank| {
++            if bank.slot() == target || bank.slot() == SIGNED_SLOT {
++                let report = bank.pilot_vat_diagnostic(votes);
++                capture.lock().unwrap().push(json!({"slot":bank.slot(),
++                    "bank_hash":bank.hash().to_string(),
++                    "raw_input_digest":report["eligible_202_inputs"]["digest_sha256"],
++                    "consensus_output_digest":report["prospective_202_consensus_outputs"]["digest_sha256"]}));
++            }
++        })),
++        ..ProcessOptions::default()
++    };
++    let exit = Arc::new(AtomicBool::new(false));
++    let (forks, hashes) = try_load_bank_forks_from_snapshot(&genesis, &[accounts], &snapshots,
++        &options, None, exit)?.context("trusted existing snapshot archive required; no genesis fallback")?;
++    let start = forks.read().unwrap().root_bank();
++    ensure!(start.slot() <= target, "snapshot newer than target");
++    ensure!(start.pilot_vat_diagnostic(votes)["gate"]["compiled_pilot_feature"] == false, "linked runtime must preserve legacy201 with pilot retry feature OFF");
++    emit(json!({"event":"offline_snapshot_loaded", "read_only_ledger":true,
++        "work_non_authoritative":true, "snapshot_hashes":format!("{hashes:?}"),
++        "snapshot_slot":start.slot(), "target_slot":target,
++        "target_certified_hash":certified_hash.to_string(),"target_certified_time":certified_time,
++        "snapshot_diagnostic":start.pilot_vat_diagnostic(votes)}));
++    let cache = LeaderScheduleCache::new_from_bank(&start);
++    drop(start);
++    forks.write().unwrap().install_scheduler_pool(DefaultSchedulerPool::new_for_verification(
++        Some(2), None, None, None, None));
++    if let Err(error) = process_blockstore_from_root(&blockstore, &forks,
++        compute_shred_version(&genesis.hash(), None), &cache, &options, None, None, None) {
++        let partial_root = forks.read().unwrap().root_bank();
++        emit(json!({"event":"offline_replay_failure_diagnostics", "full_target_verified":false,
++            "canonical_repair_accepted":false, "error":error.to_string(),
++            "last_replayed_root_computed_diagnostic":partial_root.pilot_vat_diagnostic(votes),
++            "selected_replay_computed_diagnostics":*records.lock().unwrap()}));
++        return Err(error.into());
++    }
++    let bank = forks.read().unwrap().root_bank();
++    ensure!(bank.slot() == target && bank.hash() == certified_hash,
++        "offline replay must match exact original funded certified root");
++    let signed = forks.read().unwrap().get(SIGNED_SLOT).context("retained signed Bank695 missing")?;
++    ensure!(signed.slot() == SIGNED_SLOT && signed.is_frozen()
++        && signed.hash().to_string() == "HXxWUSa9AoiyFJ7BEsVHNXLVNziD64zayM5592axQAsh"
++        && signed.block_id().is_some_and(|id| id.to_string() == SIGNED_BLOCK_ID),
++        "full verified signed-tail Bank must match existing ledger block-ID helper and authenticated notarization");
++    let root_diagnostic = bank.pilot_vat_diagnostic(votes);
++    let signed_diagnostic = signed.pilot_vat_diagnostic(votes);
++    for report in [&root_diagnostic, &signed_diagnostic] {
++        ensure!(report["gate"]["compiled_pilot_feature"] == false,
++            "legacy201 linked-runtime feature unexpectedly active");
++        ensure!(report["eligible_202_inputs"]["preconditions_satisfied"] == true,
++            "real eligible membership inputs failed preconditions");
++    }
++    ensure!(root_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == "6e56d2954b6e1ea6afdcd14e9688fca011bae4c9b357cf8d904fe9669e7b038e",
++        "root694 full raw vote input pin differs");
++    ensure!(signed_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == "f98785132ad63e75b9cdc21622992fc825d796ae9ef3c7f21fa45099cb87c2c9",
++        "signed695 full raw vote input pin differs");
++    let equal = root_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == signed_diagnostic["eligible_202_inputs"]["digest_sha256"];
++    ensure!(!equal, "previously observed distinct full raw inputs must remain distinct");
++    for report in [&root_diagnostic, &signed_diagnostic] {
++        ensure!(report["prospective_202_consensus_outputs"]["format"] == "zolana085-epoch202-consensus-comparison-v1"
++            && report["prospective_202_consensus_outputs"]["preconditions_satisfied"] == true,
++            "complete real future-consensus diagnostic preconditions required");
++        let digest = report["prospective_202_consensus_outputs"]["digest_sha256"].as_str()
++            .context("future consensus output digest missing")?;
++        ensure!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
++            "exact lowercase digest required");
++    }
++    let consensus_equal = root_diagnostic["prospective_202_consensus_outputs"]
++        == signed_diagnostic["prospective_202_consensus_outputs"];
++    ensure!(consensus_equal, "complete frozen-anchor consensus outputs differ");
++    let root_before = immutable_state(&bank, votes)?;
++    let signed_before = immutable_state(&signed, votes)?;
++    for parent in [&bank, &signed] {
++        ensure!(parent.epoch_stakes_map().get(&202).is_some_and(|stakes|stakes.total_stake() == 0)
++            && parent.get_current_epoch_total_stake() == 0, "historical raw/current202 must stay empty");
++        verify_actual_view(parent, votes)?;
++        verify_actual_view(parent, votes)?;
++    }
++    ensure!(root_before == immutable_state(&bank,votes)? && signed_before == immutable_state(&signed,votes)?,
++        "pure view mutated an authenticated parent");
++    let schedule = solana_runtime::leader_schedule_utils::leader_schedule(202, &signed)
++        .context("actual202leader schedule missing")?;
++    let child_leader = schedule[0u64];
++    let child = Bank::new_from_parent_with_bank_forks(&forks, Arc::clone(&signed), child_leader, 413_696);
++    ensure!(child.slot() == 413_696 && child.parent_slot() == 413_695 && child.epoch() == 202,
++        "exact unsigned derived child boundary required");
++    ensure!(child.epoch_stakes_map().get(&202).is_some_and(|stakes|stakes.total_stake() == 1_990_506_797_722)
++        && child.epoch_stakes_map().get(&203).is_some_and(|stakes|stakes.total_stake() > 0),
++        "deferred202 and normal203 membership missing");
++    let all_rewards = child.rewards.read().unwrap().clone();
++    let vat_rows = all_rewards.iter().filter(|(_,info)|format!("{:?}",info.reward_type) == "VATDebit")
++        .map(|(vote,info)|json!({"vote":vote.to_string(),"lamports":info.lamports,"post_balance":info.post_balance})).collect::<Vec<_>>();
++    ensure!(vat_rows.len() == 6, "two distinct ordinary VAT charges for each original vote required");
++    let mut vote_accounting = Vec::new();
++    for vote in votes {
++        let before = signed.get_balance(&vote);
++        let rows = all_rewards.iter().filter(|(key,info)|*key == vote && format!("{:?}",info.reward_type) == "VATDebit")
++            .map(|(_,info)|info).collect::<Vec<_>>();
++        ensure!(rows.len() == 2 && rows.iter().all(|row|row.lamports == -800_000_000i64)
++            && rows[0].post_balance == before.checked_sub(800_000_000).context("202 VAT balance")?
++            && rows[1].post_balance == before.checked_sub(1_600_000_000).context("203 VAT balance")?,
++            "exact ordinary202 then203 balance debit order required");
++        let total_delta = all_rewards.iter().filter(|(key,_)|*key == vote)
++            .map(|(_,info)|i128::from(info.lamports)).sum::<i128>();
++        let after = child.get_balance(&vote);
++        ensure!(i128::from(after) == i128::from(before) + total_delta,
++            "actual vote balance does not reconcile all matching reward records");
++        vote_accounting.push(json!({"vote":vote.to_string(),"parent_balance":before,"actual_child_balance":after,
++            "all_reward_delta":total_delta.to_string(),"deferred202_post":rows[0].post_balance,
++            "normal203_post":rows[1].post_balance}));
++    }
++    let incinerator = solana_sdk_ids::incinerator::id();
++    let incinerator_other_rewards = all_rewards.iter().filter(|(key,_)|*key == incinerator)
++        .map(|(_,info)|i128::from(info.lamports)).sum::<i128>();
++    ensure!(i128::from(child.get_balance(&incinerator)) == i128::from(signed.get_balance(&incinerator))
++        + 4_800_000_000i128 + incinerator_other_rewards,
++        "actual prefreeze incinerator does not reconcile VAT plus ordinary collector credits");
++    let mut changed = child.get_all_accounts_modified_since_parent();
++    changed.sort_unstable_by_key(|(key,_)|key.to_bytes());
++    ensure!(changed.windows(2).all(|rows|rows[0].0 != rows[1].0), "latest modified accounts must be unique");
++    let mut actual_account_delta = 0i128;
++    let changed_rows = changed.iter().map(|(key,account)| {
++        let parent_account = signed.get_account_with_fixed_root_no_cache(key);
++        let before = parent_account.as_ref().map(ReadableAccount::lamports).unwrap_or(0);
++        actual_account_delta += i128::from(account.lamports()) - i128::from(before);
++        json!({"pubkey":key.to_string(),"parent_lamports":before,"child_lamports":account.lamports(),
++            "owner":account.owner().to_string(),"data_sha256":sha256_hex(account.data())})
++    }).collect::<Vec<_>>();
++    let capitalization_delta = i128::from(child.capitalization()) - i128::from(signed.capitalization());
++    ensure!(actual_account_delta == capitalization_delta,
++        "full actual modified-account delta does not match capitalization including ordinary issuance/rent");
++    let child_state = immutable_state(&child,votes)?;
++    ensure!(child_state["pool"] == signed_before["pool"],
++        "unsigned unfrozen child changed private-pool bytes/economics");
++    ensure!(root_before == immutable_state(&bank,votes)? && signed_before == immutable_state(&signed,votes)?,
++        "unsigned child changed an authenticated parent");
++    ensure!(blockstore.max_root() == 413_694 && !blockstore.is_root(413_695), "read-only rooted history changed");
++    emit(json!({"event":"offline_candidate_epoch202_probe_passed","node":node,"identity":IDENTITIES[node],
++        "retained_history_sha256":HISTORY_SHA[node],"certified_root":root_before,"signed_parent":signed_before,
++        "root_raw_input_sha256":root_diagnostic["eligible_202_inputs"]["digest_sha256"],
++        "signed_raw_input_sha256":signed_diagnostic["eligible_202_inputs"]["digest_sha256"],
++        "common_consensus_sha256":"fe6f03c9cd7ed3d9774f71acd97f0f16b5dda937fcfcca483e66d6b1e0352e30",
++        "raw_parent_maps_unchanged":true,"current_stake_apis_unchanged":true,
++        "derived_child":{"slot":child.slot(),"parent_slot":child.parent_slot(),"epoch":child.epoch(),
++            "leader":{"id":child_leader.id.to_string(),"vote_address":child_leader.vote_address.to_string()},
++            "unsigned":true,"not_finalized":true,"footer_not_invented":true,
++            "state":child_state,"vat_rows":vat_rows,"vote_accounting":vote_accounting,
++            "incinerator_other_rewards":incinerator_other_rewards.to_string(),
++            "actual_account_delta":actual_account_delta.to_string(),
++            "capitalization_delta":capitalization_delta.to_string(),"modified_accounts":changed_rows},
++        "authoritative_ledger_read_only":true,"new_derived_accounts_only":true,
++        "network_financial_operations":0,"validators_started":false,"keys_read":false,
++        "live_recovery_accepted":false}));
++    Ok(())
++}
++fn sha256_hex(bytes: &[u8]) -> String {
++    solana_sha256_hasher::hash(bytes).to_bytes().iter().map(|byte|format!("{byte:02x}")).collect()
++}
++
++fn immutable_state(bank: &Bank, votes: [Pubkey; 3]) -> Result<serde_json::Value> {
++    let raw_map = wincode::serialize(bank.epoch_stakes_map()).context("serialize raw epoch map")?;
++    let calculated_capitalization = bank.calculate_capitalization_for_tests();
++    ensure!(calculated_capitalization == bank.capitalization(),
++        "recorded capitalization does not equal independently scanned account balances");
++    let accounts = votes.iter().map(|vote| {
++        let account = bank.get_account(vote).context("original vote missing")?;
++        Ok(json!({"vote":vote.to_string(),"balance":account.lamports(),"owner":account.owner().to_string(),
++            "data_sha256":sha256_hex(account.data())}))
++    }).collect::<Result<Vec<_>>>()?;
++    let rewards = bank.rewards.read().unwrap().iter().map(|(key,info)|json!({
++        "pubkey":key.to_string(),"kind":format!("{:?}",info.reward_type),
++        "lamports":info.lamports,"post_balance":info.post_balance,"commission_bps":info.commission_bps,
++    })).collect::<Vec<_>>();
++    let pool = bank.get_account(&native_payment_program::pool_address()).context("original pool missing")?;
++    let pool_state = native_payments::state::PoolState::decode(pool.data())
++        .map_err(|error|anyhow::anyhow!("public pool decode failed: {error:?}"))?;
++    ensure!(pool.owner() == &native_payment_program::id() && pool_state.network == [67;32]
++        && pool_state.uses_slot_anchors() && pool.data().len() >= 1088, "original pool domain/header required");
++    Ok(json!({"slot":bank.slot(),"bank_hash":bank.hash().to_string(),"frozen":bank.is_frozen(),
++        "capitalization":bank.capitalization(),"independent_account_sum":calculated_capitalization,
++        "raw_epoch_map_sha256":sha256_hex(&raw_map),
++        "raw202_total":bank.epoch_stakes_map().get(&202).map(|stakes|stakes.total_stake()),
++        "raw203_total":bank.epoch_stakes_map().get(&203).map(|stakes|stakes.total_stake()),
++        "raw_current_total":bank.get_current_epoch_total_stake(),"votes":accounts,"rewards":rewards,
++        "pool":{"lamports":pool.lamports(),"owner":pool.owner().to_string(),"data_sha256":sha256_hex(pool.data()),
++            "prefix1088_sha256":sha256_hex(&pool.data()[..1088]),"backing":pool_state.backing,"note_count":pool_state.note_count()},
++        "incinerator_lamports":bank.get_balance(&solana_sdk_ids::incinerator::id())}))
++}
++
++fn verify_actual_view(bank: &Bank, votes: [Pubkey; 3]) -> Result<()> {
++    let view = bank.pilot_epoch202_recovery_view().context("actual future202 sidecar unavailable")?;
++    let diagnostic = bank.pilot_vat_diagnostic(votes);
++    let raw_expected = if bank.slot() == 413_694 {
++        "6e56d2954b6e1ea6afdcd14e9688fca011bae4c9b357cf8d904fe9669e7b038e"
++    } else {
++        ensure!(bank.slot() == 413_695,"view probe only accepts original two anchors");
++        "f98785132ad63e75b9cdc21622992fc825d796ae9ef3c7f21fa45099cb87c2c9"
++    };
++    ensure!(diagnostic["eligible_202_inputs"]["digest_sha256"] == raw_expected,
++        "sidecar read changed pinned real vote inputs");
++    let future = &diagnostic["prospective_202_consensus_outputs"];
++    ensure!(future["preconditions_satisfied"] == true
++        && future["digest_sha256"] == "fe6f03c9cd7ed3d9774f71acd97f0f16b5dda937fcfcca483e66d6b1e0352e30",
++        "ordinary full consensus output differs from accepted real inputs");
++    let expected = &future["outputs"];
++    let accounts = view.stakes().vote_accounts();
++    ensure!(accounts.len() == 3 && view.total_stake() == 1_990_506_797_722
++        && bank.epoch_total_stake(202) == Some(view.total_stake()), "actual view total/getter differs");
++    for row in expected["votes"].as_array().context("expected vote rows")? {
++        let vote = Pubkey::from_str(row["vote"].as_str().context("expected vote key")?)?;
++        let account = accounts.get(&vote).context("expected actual view voter missing")?;
++        let epoch_account = bank.epoch_vote_accounts(202).and_then(|map|map.get(&vote))
++            .context("actual epoch_vote_accounts route missing")?;
++        ensure!(Some(accounts.get_delegated_stake(&vote)) == row["delegated_weight"].as_u64()
++            && epoch_account.0 == accounts.get_delegated_stake(&vote)
++            && epoch_account.1.account() == account.account(),"actual view voter stake/route differs");
++        ensure!(row["node"] == account.node_pubkey().to_string()
++            && view.epoch_authorized_voters().get(&vote).is_some_and(|key|row["authorized_voter_202"] == key.to_string()),
++            "actual view node/authorized voter differs");
++        let actual_key = account.vote_state_view().bls_pubkey_compressed().context("actual view BLS missing")?
++            .iter().map(|byte|format!("{byte:02x}")).collect::<String>();
++        ensure!(row["bls_pubkey_compressed_hex"] == actual_key,"actual view BLS key differs");
++    }
++    let nodes = bank.epoch_staked_nodes(202).context("actual explicit202 node route missing")?;
++    ensure!(nodes.len() == 3,"actual explicit202 node count differs");
++    for row in expected["staked_nodes"].as_array().context("expected staked node rows")? {
++        let node = Pubkey::from_str(row["node"].as_str().context("node key")?)?;
++        ensure!(nodes.get(&node).copied() == row["stake"].as_u64()
++            && bank.epoch_node_id_to_stake(202,&node) == row["stake"].as_u64(),"actual explicit node stake differs");
++    }
++    let rank_map = bank.get_rank_map(413_696).context("actual certificate/rank route missing")?;
++    ensure!(rank_map.len() == 3 && rank_map.total_stake().get() == view.total_stake(),"actual BLS rank total differs");
++    for (rank,row) in expected["bls_ranks"].as_array().context("expected rank rows")?.iter().enumerate() {
++        let entry = rank_map.get_pubkey_stake_entry(rank).context("actual rank missing")?;
++        ensure!(row["rank"] == rank && row["vote"] == entry.vote_account_pubkey.to_string()
++            && row["node"] == entry.node_pubkey.to_string() && row["stake"] == entry.stake.get(),
++            "actual rank order/stake differs");
++    }
++    let leaders = solana_runtime::leader_schedule_utils::leader_schedule(202,bank).context("actual ordinary leader route missing")?;
++    let actual = leaders.get_slot_leaders().map(|leader|json!({"id":leader.id.to_string(),
++        "vote_address":leader.vote_address.to_string()})).collect::<Vec<_>>();
++    ensure!(actual.len() == 2048 && expected["slot_leaders"] == json!(actual),
++        "actual complete future202leader sequence differs");
++    Ok(())
++}
++
++fn requested(args: &[String]) -> Result<Option<usize>> {
++    if !args.iter().any(|arg|arg == "--offline-202-probe") { return Ok(None); }
++    ensure!(args.len() == 2 && args[0] == "--offline-202-probe", "--offline-202-probe takes only fixed peer index0|1|2");
++    let node: usize = args[1].parse().context("fixed peer index")?;
++    ensure!(node < 3 && args[1] == node.to_string(), "only fixed original peer0|1|2 allowed");
++    Ok(Some(node))
++}
++
++pub(crate) fn maybe_run() -> Result<bool> {
++    let Some(node) = requested(&std::env::args().skip(1).collect::<Vec<_>>())? else { return Ok(false); };
++    if let Err(error) = run(node) {
++        emit(json!({"event":"offline_candidate_epoch202_probe_failed","node":node,"error":format!("{error:#}"),
++            "live_recovery_accepted":false}));
++        return Err(error);
++    }
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn offline_probe_rejects_arbitrary_paths_or_runtime_options() {
++        let args = |values:&[&str]|values.iter().map(|value|value.to_string()).collect::<Vec<_>>();
++        for node in ["0","1","2"] { assert_eq!(requested(&args(&["--offline-202-probe",node])).unwrap(),node.parse::<usize>().ok()); }
++        for values in [vec!["--offline-202-probe"],vec!["--offline-202-probe","3"],
++            vec!["--offline-202-probe","00"],vec!["--offline-202-probe","/tmp/other"],
++            vec!["--offline-202-probe","0","--service"],vec!["--service","--offline-202-probe"]] {
++            assert!(requested(&args(&values)).is_err());
++        }
++        assert!(requested(&args(&["--service"])).unwrap().is_none());
++    }
++}
+diff --git a/zolana-fast-check/src/resume.rs b/zolana-fast-check/src/resume.rs
+--- a/zolana-fast-check/src/resume.rs
++++ b/zolana-fast-check/src/resume.rs
+@@ -224,6 +224,7 @@
+         loop {
+             if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
+             let mut peers = Vec::new();
++            let mut ancestry_tasks = Vec::new();
+             for expected in &self.nodes {
+                 let identity: Pubkey = expected.identity.parse()?;
+                 let node = cluster.validators.get(&identity).context("resumed identity missing")?;
+@@ -258,9 +259,6 @@
+                 } else {
+                     None
+                 };
+-                let ancestry = ancestry::verify_path(&validator.blockstore, bank.slot(),
+-                    expected.root_slot, deadline, &mut cancelled)
+-                    .with_context(|| format!("verify original checkpoint ancestry for validator {identity}"))?;
+                 if args.private {
+                     ensure!(zolana_native_check::native_features_for_profile(args.slot_anchors).iter()
+                         .all(|feature| bank.feature_set.is_active(feature)), "resumed native feature inactive");
+@@ -270,17 +268,32 @@
+                     ensure!(pool.network == args.network() && pool.uses_slot_anchors() == args.slot_anchors,
+                         "resumed native network/profile differs; refusing migration");
+                 }
++                ancestry_tasks.push(ancestry::PathTask { identity: expected.identity.clone(),
++                    blockstore: Arc::clone(&validator.blockstore), start_slot: bank.slot(),
++                    target_slot: expected.root_slot });
+                 peers.push(json!({"identity": expected.identity, "voter": expected.voter,
+                     "ledger": node.info.ledger_path, "original_root_slot": expected.root_slot,
+                     "original_root_bank_hash": expected.root_bank_hash, "resumed_root_slot": bank.slot(),
+-                    "original_signed_vote_history_required": true, "original_root_is_ancestor": true,
+-                    "original_ancestry_entries": ancestry.entries,
++                    "original_signed_vote_history_required": true,
+                     "retained_root_bank_hash_evidence": root_evidence,
+                     "current_root_certified_bank_hash_evidence": current_root_evidence}));
+             }
+             if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
+             if Instant::now() >= deadline { return Err(ancestry::AncestryError::Deadline.into()); }
+             if peers.len() == self.nodes.len() {
++                // All immutable peer roots, identity/profile checks and retained
++                // certificates are pinned before parallel I/O begins. No
++                // BankForks lock or mutable Bank enters a worker.
++                let checked = ancestry::verify_paths(ancestry_tasks, deadline, &mut cancelled)
++                    .context("verify every original checkpoint ancestry in parallel")?;
++                ensure!(checked.len() == peers.len(), "parallel ancestry peer count differs");
++                for (peer, checked) in peers.iter_mut().zip(checked) {
++                    peer["original_root_is_ancestor"] = json!(true);
++                    peer["original_ancestry_entries"] = json!(checked.report.entries);
++                    peer["original_ancestry_parent_links"] = json!(checked.report.entries.saturating_sub(1));
++                    peer["original_ancestry_elapsed_ms"] = json!(checked.elapsed.as_secs_f64() * 1000.0);
++                    peer["original_ancestry_parallel"] = json!(true);
++                }
+                 return Ok(json!({"same_genesis": true, "whole_process_resume": true, "new_ports_only": true,
+                     "new_ledger_created": false, "vote_history_reset": false, "peers": peers}));
+             }
+diff --git a/zolana-fast-check/src/service.rs b/zolana-fast-check/src/service.rs
+--- a/zolana-fast-check/src/service.rs
++++ b/zolana-fast-check/src/service.rs
+@@ -177,6 +177,16 @@
+         assert!(parse(&["--root", "/fresh", "--hold-seconds", "601"]).is_err());
+         let args = parse(&["--resume-root", "/original", "--hold-seconds", "600"]).unwrap();
+         assert!(args.resume && !args.service);
++        let args = parse(&["--resume-root", "/original", "--samples", "1", "--quorum-loss-rejoin"]).unwrap();
++        assert!(args.resume && args.quorum_loss_rejoin && !args.service);
++        assert_eq!(args.nodes, 1); // original manifest supplies and checks three before startup
++        assert_eq!(args.samples, 1);
++        for extra in [vec!["--nodes", "1"], vec!["--nodes", "3"], vec!["--restart-one"], vec!["--private"], vec!["--hold-seconds", "1"]] {
++            let mut arguments = vec!["--resume-root", "/original", "--quorum-loss-rejoin"];
++            arguments.extend(extra);
++            assert!(parse(&arguments).is_err());
++        }
++        assert!(parse(&["--root", "/fresh", "--nodes", "3", "--quorum-loss-rejoin"]).is_ok());
+     }
+ 
+     #[test]
+diff --git a/zolana-fast-check/src/bin/vat-public-inspect-consensus.rs b/zolana-fast-check/src/bin/vat-public-inspect-consensus.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/bin/vat-public-inspect-consensus.rs
+@@ -0,0 +1,162 @@
++//! One-peer, read-only ledger/archive replay into fresh, non-authoritative AccountsDb.
++use {
++    agave_snapshots::snapshot_config::SnapshotConfig,
++    anyhow::{Context, Result, ensure},
++    serde_json::json,
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        bank_forks_utils::try_load_bank_forks_from_snapshot,
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++        blockstore_processor::{ProcessOptions, process_blockstore_from_root},
++        leader_schedule_cache::LeaderScheduleCache,
++        use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
++    },
++    solana_pubkey::Pubkey,
++    solana_shred_version::compute_shred_version,
++    solana_unified_scheduler_pool::DefaultSchedulerPool,
++    std::{fs, os::unix::fs::{MetadataExt, PermissionsExt}, path::PathBuf,
++        str::FromStr, sync::{Arc, Mutex, atomic::AtomicBool}},
++};
++const LEDGER: &str = "/var/lib/zolana-vat-085-r1/network/ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711";
++const WORK: &str = "/var/lib/zolana-vat-085-diag-consensus-r1/work";
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++fn emit(value: serde_json::Value) { println!("{}", value); }
++fn run() -> Result<()> {
++    ensure!(std::env::args().len() == 1, "fixed diagnostic takes no arguments");
++    ensure!(unsafe { libc::geteuid() } == 995, "isolated original validator uid required");
++    let ledger = PathBuf::from(LEDGER);
++    ensure!(ledger.canonicalize()? == ledger, "ledger path changed");
++    let work = PathBuf::from(WORK);
++    let meta = fs::symlink_metadata(&work)?;
++    ensure!(meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == 995
++        && meta.permissions().mode() & 0o777 == 0o700 && work.canonicalize()? == work,
++        "fresh private non-authoritative workdir required");
++    ensure!(fs::read_dir(&work)?.next().is_none(), "diagnostic output must be new and empty");
++    let genesis = GenesisConfig::load(&ledger)?;
++    ensure!(genesis.hash().to_string() == GENESIS, "original genesis pin differs");
++    let blockstore = Blockstore::open_with_options(&ledger, BlockstoreOptions {
++        access_type: AccessType::ReadOnly, ..BlockstoreOptions::default()
++    })?;
++    ensure!(!blockstore.is_primary_access(), "ledger must be read-only");
++    let target = blockstore.max_root();
++    ensure!(target == 413_694, "exact certified funded root required");
++    const SIGNED_SLOT: u64 = 413_695;
++    const SIGNED_BLOCK_ID: &str = "FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu";
++    let (certified_hash, certified_time) = blockstore.get_optimistic_slot(target)?
++        .context("latest rooted slot lacks original Alpenglow certified bank hash")?;
++    ensure!(blockstore.is_root(target) && certified_hash.to_string() == "BYnRBCtGoKuEqWz36fwqYn6uBe1yY5ftp5oW9qs22Gdz", "exact original certified root hash required");
++    ensure!(!blockstore.is_root(SIGNED_SLOT) && blockstore.meta(SIGNED_SLOT)?.is_some_and(|meta| meta.is_full()), "exact retained complete unrooted signed tail required");
++    if let Some(hash) = blockstore.get_bank_hash(target) {
++        ensure!(hash == certified_hash, "replay and certified hashes conflict");
++    }
++    let votes = [
++        "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++        "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++        "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++    ].map(|v| Pubkey::from_str(v).unwrap());
++    let mut snapshots = SnapshotConfig::new_load_only();
++    snapshots.full_snapshot_archives_dir = ledger.join("native-snapshots/full");
++    snapshots.incremental_snapshot_archives_dir = ledger.join("native-snapshots/incremental");
++    snapshots.bank_snapshots_dir = work.join("bank");
++    snapshots.use_direct_io = false;
++    snapshots.use_registered_io_uring_buffers = false;
++    ensure!(fs::read_dir(&snapshots.incremental_snapshot_archives_dir)?.next().is_none(),
++        "unexpected incremental snapshot input");
++    let accounts = work.join("accounts"); fs::create_dir(&accounts)?;
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let capture = Arc::clone(&records);
++    let options = ProcessOptions {
++        run_verification: true, skip_inter_slot_verification: false,
++        halt_at_slot: Some(SIGNED_SLOT), abort_on_invalid_block: true,
++        use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::Always,
++        slot_callback: Some(Arc::new(move |bank| {
++            if bank.slot() == target || bank.slot() == SIGNED_SLOT {
++                let report = bank.pilot_vat_diagnostic(votes);
++                capture.lock().unwrap().push(json!({"slot":bank.slot(),
++                    "bank_hash":bank.hash().to_string(),
++                    "raw_input_digest":report["eligible_202_inputs"]["digest_sha256"],
++                    "consensus_output_digest":report["prospective_202_consensus_outputs"]["digest_sha256"]}));
++            }
++        })),
++        ..ProcessOptions::default()
++    };
++    let exit = Arc::new(AtomicBool::new(false));
++    let (forks, hashes) = try_load_bank_forks_from_snapshot(&genesis, &[accounts], &snapshots,
++        &options, None, exit)?.context("trusted existing snapshot archive required; no genesis fallback")?;
++    let start = forks.read().unwrap().root_bank();
++    ensure!(start.slot() <= target, "snapshot newer than target");
++    ensure!(start.pilot_vat_diagnostic(votes)["gate"]["compiled_pilot_feature"] == false, "linked runtime must preserve legacy201 with pilot retry feature OFF");
++    emit(json!({"event":"offline_snapshot_loaded", "read_only_ledger":true,
++        "work_non_authoritative":true, "snapshot_hashes":format!("{hashes:?}"),
++        "snapshot_slot":start.slot(), "target_slot":target,
++        "target_certified_hash":certified_hash.to_string(),"target_certified_time":certified_time,
++        "snapshot_diagnostic":start.pilot_vat_diagnostic(votes)}));
++    let cache = LeaderScheduleCache::new_from_bank(&start);
++    drop(start);
++    forks.write().unwrap().install_scheduler_pool(DefaultSchedulerPool::new_for_verification(
++        Some(2), None, None, None, None));
++    if let Err(error) = process_blockstore_from_root(&blockstore, &forks,
++        compute_shred_version(&genesis.hash(), None), &cache, &options, None, None, None) {
++        let partial_root = forks.read().unwrap().root_bank();
++        emit(json!({"event":"offline_replay_failure_diagnostics", "full_target_verified":false,
++            "canonical_repair_accepted":false, "error":error.to_string(),
++            "last_replayed_root_computed_diagnostic":partial_root.pilot_vat_diagnostic(votes),
++            "selected_replay_computed_diagnostics":*records.lock().unwrap()}));
++        return Err(error.into());
++    }
++    let bank = forks.read().unwrap().root_bank();
++    ensure!(bank.slot() == target && bank.hash() == certified_hash,
++        "offline replay must match exact original funded certified root");
++    let signed = forks.read().unwrap().get(SIGNED_SLOT).context("retained signed Bank695 missing")?;
++    ensure!(signed.slot() == SIGNED_SLOT && signed.is_frozen()
++        && signed.hash().to_string() == "HXxWUSa9AoiyFJ7BEsVHNXLVNziD64zayM5592axQAsh"
++        && signed.block_id().is_some_and(|id| id.to_string() == SIGNED_BLOCK_ID),
++        "full verified signed-tail Bank must match existing ledger block-ID helper and authenticated notarization");
++    let root_diagnostic = bank.pilot_vat_diagnostic(votes);
++    let signed_diagnostic = signed.pilot_vat_diagnostic(votes);
++    for report in [&root_diagnostic, &signed_diagnostic] {
++        ensure!(report["gate"]["compiled_pilot_feature"] == false,
++            "legacy201 linked-runtime feature unexpectedly active");
++        ensure!(report["eligible_202_inputs"]["preconditions_satisfied"] == true,
++            "real eligible membership inputs failed preconditions");
++    }
++    ensure!(root_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == "6e56d2954b6e1ea6afdcd14e9688fca011bae4c9b357cf8d904fe9669e7b038e",
++        "root694 full raw vote input pin differs");
++    ensure!(signed_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == "f98785132ad63e75b9cdc21622992fc825d796ae9ef3c7f21fa45099cb87c2c9",
++        "signed695 full raw vote input pin differs");
++    let equal = root_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == signed_diagnostic["eligible_202_inputs"]["digest_sha256"];
++    ensure!(!equal, "previously observed distinct full raw inputs must remain distinct");
++    for report in [&root_diagnostic, &signed_diagnostic] {
++        ensure!(report["prospective_202_consensus_outputs"]["format"] == "zolana085-epoch202-consensus-comparison-v1"
++            && report["prospective_202_consensus_outputs"]["preconditions_satisfied"] == true,
++            "complete real future-consensus diagnostic preconditions required");
++        let digest = report["prospective_202_consensus_outputs"]["digest_sha256"].as_str()
++            .context("future consensus output digest missing")?;
++        ensure!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
++            "exact lowercase digest required");
++    }
++    let consensus_equal = root_diagnostic["prospective_202_consensus_outputs"]
++        == signed_diagnostic["prospective_202_consensus_outputs"];
++    emit(json!({"event":"offline_legacy_consensus_comparison", "old201_retry_feature_active":false,
++        "certified_root_slot":bank.slot(), "certified_root_bank_hash":bank.hash().to_string(),
++        "certified_root_diagnostic":root_diagnostic,
++        "retained_signed_slot":signed.slot(), "retained_signed_bank_hash":signed.hash().to_string(),
++        "retained_signed_block_id":signed.block_id().map(|id|id.to_string()),
++        "retained_signed_diagnostic":signed_diagnostic,
++        "full_vote_inputs_equal":equal,
++        "prospective_consensus_outputs_equal":consensus_equal,
++        "runtime_repair_accepted":false,
++        "selected_replay_computed_diagnostics":*records.lock().unwrap(),
++        "validators_started":false,"keys_read":false,"financial_operations":0,
++        "copied_ledger_writable":false,"authoritative_accounts_writable":false,
++        "new202_projection_implemented":false,"new202_bank_created":false}));
++    ensure!(consensus_equal, "complete root694 and signed695 future consensus outputs differ; root review required");
++    Ok(())
++}
++fn main() {
++    if let Err(error) = run() { emit(json!({"event":"offline_diagnostic_failed","error":format!("{error:#}")})); std::process::exit(1); }
++}
+diff --git a/zolana-fast-check/src/bin/vat-public-inspect-legacy.rs b/zolana-fast-check/src/bin/vat-public-inspect-legacy.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/bin/vat-public-inspect-legacy.rs
+@@ -0,0 +1,137 @@
++//! One-peer, read-only ledger/archive replay into fresh, non-authoritative AccountsDb.
++use {
++    agave_snapshots::snapshot_config::SnapshotConfig,
++    anyhow::{Context, Result, ensure},
++    serde_json::json,
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        bank_forks_utils::try_load_bank_forks_from_snapshot,
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++        blockstore_processor::{ProcessOptions, process_blockstore_from_root},
++        leader_schedule_cache::LeaderScheduleCache,
++        use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
++    },
++    solana_pubkey::Pubkey,
++    solana_shred_version::compute_shred_version,
++    solana_unified_scheduler_pool::DefaultSchedulerPool,
++    std::{fs, os::unix::fs::{MetadataExt, PermissionsExt}, path::PathBuf,
++        str::FromStr, sync::{Arc, Mutex, atomic::AtomicBool}},
++};
++const LEDGER: &str = "/var/lib/zolana-vat-085-r1/network/ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711";
++const WORK: &str = "/var/lib/zolana-vat-085-diag-legacy-r1/work";
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++fn emit(value: serde_json::Value) { println!("{}", value); }
++fn run() -> Result<()> {
++    ensure!(std::env::args().len() == 1, "fixed diagnostic takes no arguments");
++    ensure!(unsafe { libc::geteuid() } == 995, "isolated original validator uid required");
++    let ledger = PathBuf::from(LEDGER);
++    ensure!(ledger.canonicalize()? == ledger, "ledger path changed");
++    let work = PathBuf::from(WORK);
++    let meta = fs::symlink_metadata(&work)?;
++    ensure!(meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == 995
++        && meta.permissions().mode() & 0o777 == 0o700 && work.canonicalize()? == work,
++        "fresh private non-authoritative workdir required");
++    ensure!(fs::read_dir(&work)?.next().is_none(), "diagnostic output must be new and empty");
++    let genesis = GenesisConfig::load(&ledger)?;
++    ensure!(genesis.hash().to_string() == GENESIS, "original genesis pin differs");
++    let blockstore = Blockstore::open_with_options(&ledger, BlockstoreOptions {
++        access_type: AccessType::ReadOnly, ..BlockstoreOptions::default()
++    })?;
++    ensure!(!blockstore.is_primary_access(), "ledger must be read-only");
++    let target = blockstore.max_root();
++    ensure!(target == 413_694, "exact certified funded root required");
++    const SIGNED_SLOT: u64 = 413_695;
++    const SIGNED_BLOCK_ID: &str = "FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu";
++    let (certified_hash, certified_time) = blockstore.get_optimistic_slot(target)?
++        .context("latest rooted slot lacks original Alpenglow certified bank hash")?;
++    ensure!(blockstore.is_root(target) && certified_hash.to_string() == "BYnRBCtGoKuEqWz36fwqYn6uBe1yY5ftp5oW9qs22Gdz", "exact original certified root hash required");
++    ensure!(!blockstore.is_root(SIGNED_SLOT) && blockstore.meta(SIGNED_SLOT)?.is_some_and(|meta| meta.is_full()), "exact retained complete unrooted signed tail required");
++    if let Some(hash) = blockstore.get_bank_hash(target) {
++        ensure!(hash == certified_hash, "replay and certified hashes conflict");
++    }
++    let votes = [
++        "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++        "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++        "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++    ].map(|v| Pubkey::from_str(v).unwrap());
++    let mut snapshots = SnapshotConfig::new_load_only();
++    snapshots.full_snapshot_archives_dir = ledger.join("native-snapshots/full");
++    snapshots.incremental_snapshot_archives_dir = ledger.join("native-snapshots/incremental");
++    snapshots.bank_snapshots_dir = work.join("bank");
++    snapshots.use_direct_io = false;
++    snapshots.use_registered_io_uring_buffers = false;
++    ensure!(fs::read_dir(&snapshots.incremental_snapshot_archives_dir)?.next().is_none(),
++        "unexpected incremental snapshot input");
++    let accounts = work.join("accounts"); fs::create_dir(&accounts)?;
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let capture = Arc::clone(&records);
++    let options = ProcessOptions {
++        run_verification: true, skip_inter_slot_verification: false,
++        halt_at_slot: Some(SIGNED_SLOT), abort_on_invalid_block: true,
++        use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::Always,
++        slot_callback: Some(Arc::new(move |bank| {
++            if (413_498..=413_504).contains(&bank.slot()) || bank.slot() >= target.saturating_sub(2) {
++                capture.lock().unwrap().push(bank.pilot_vat_diagnostic(votes));
++            }
++        })),
++        ..ProcessOptions::default()
++    };
++    let exit = Arc::new(AtomicBool::new(false));
++    let (forks, hashes) = try_load_bank_forks_from_snapshot(&genesis, &[accounts], &snapshots,
++        &options, None, exit)?.context("trusted existing snapshot archive required; no genesis fallback")?;
++    let start = forks.read().unwrap().root_bank();
++    ensure!(start.slot() <= target, "snapshot newer than target");
++    ensure!(start.pilot_vat_diagnostic(votes)["gate"]["compiled_pilot_feature"] == false, "linked runtime must preserve legacy201 with pilot retry feature OFF");
++    emit(json!({"event":"offline_snapshot_loaded", "read_only_ledger":true,
++        "work_non_authoritative":true, "snapshot_hashes":format!("{hashes:?}"),
++        "snapshot_slot":start.slot(), "target_slot":target,
++        "target_certified_hash":certified_hash.to_string(),"target_certified_time":certified_time,
++        "snapshot_diagnostic":start.pilot_vat_diagnostic(votes)}));
++    let cache = LeaderScheduleCache::new_from_bank(&start);
++    drop(start);
++    forks.write().unwrap().install_scheduler_pool(DefaultSchedulerPool::new_for_verification(
++        Some(2), None, None, None, None));
++    if let Err(error) = process_blockstore_from_root(&blockstore, &forks,
++        compute_shred_version(&genesis.hash(), None), &cache, &options, None, None, None) {
++        let partial_root = forks.read().unwrap().root_bank();
++        emit(json!({"event":"offline_replay_failure_diagnostics", "full_target_verified":false,
++            "canonical_repair_accepted":false, "error":error.to_string(),
++            "last_replayed_root_computed_diagnostic":partial_root.pilot_vat_diagnostic(votes),
++            "selected_replay_computed_diagnostics":*records.lock().unwrap()}));
++        return Err(error.into());
++    }
++    let bank = forks.read().unwrap().root_bank();
++    ensure!(bank.slot() == target && bank.hash() == certified_hash,
++        "offline replay must match exact original funded certified root");
++    let signed = forks.read().unwrap().get(SIGNED_SLOT).context("retained signed Bank695 missing")?;
++    ensure!(signed.slot() == SIGNED_SLOT && signed.is_frozen()
++        && signed.block_id().is_some_and(|id| id.to_string() == SIGNED_BLOCK_ID),
++        "full verified signed-tail Bank must match existing ledger block-ID helper and authenticated notarization");
++    let root_diagnostic = bank.pilot_vat_diagnostic(votes);
++    let signed_diagnostic = signed.pilot_vat_diagnostic(votes);
++    for report in [&root_diagnostic, &signed_diagnostic] {
++        ensure!(report["gate"]["compiled_pilot_feature"] == false,
++            "legacy201 linked-runtime feature unexpectedly active");
++        ensure!(report["eligible_202_inputs"]["preconditions_satisfied"] == true,
++            "real eligible membership inputs failed preconditions");
++    }
++    let equal = root_diagnostic["eligible_202_inputs"]["digest_sha256"]
++        == signed_diagnostic["eligible_202_inputs"]["digest_sha256"];
++    emit(json!({"event":"offline_legacy_history_verified", "old201_retry_feature_active":false,
++        "certified_root_slot":bank.slot(), "certified_root_bank_hash":bank.hash().to_string(),
++        "certified_root_diagnostic":root_diagnostic,
++        "retained_signed_slot":signed.slot(), "retained_signed_bank_hash":signed.hash().to_string(),
++        "retained_signed_block_id":signed.block_id().map(|id|id.to_string()),
++        "retained_signed_diagnostic":signed_diagnostic,
++        "membership_inputs_equal":equal,
++        "selected_replay_computed_diagnostics":*records.lock().unwrap(),
++        "validators_started":false,"keys_read":false,"financial_operations":0,
++        "copied_ledger_writable":false,"authoritative_accounts_writable":false,
++        "new202_projection_implemented":false,"new202_bank_created":false}));
++    ensure!(equal, "root694 and signed695 membership inputs differ; root review required");
++    Ok(())
++}
++fn main() {
++    if let Err(error) = run() { emit(json!({"event":"offline_diagnostic_failed","error":format!("{error:#}")})); std::process::exit(1); }
++}
+diff --git a/zolana-fast-check/src/bin/vat-public-inspect.rs b/zolana-fast-check/src/bin/vat-public-inspect.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/bin/vat-public-inspect.rs
+@@ -0,0 +1,112 @@
++//! One-peer, read-only ledger/archive replay into fresh, non-authoritative AccountsDb.
++use {
++    agave_snapshots::snapshot_config::SnapshotConfig,
++    anyhow::{Context, Result, ensure},
++    serde_json::json,
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        bank_forks_utils::try_load_bank_forks_from_snapshot,
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++        blockstore_processor::{ProcessOptions, process_blockstore_from_root},
++        leader_schedule_cache::LeaderScheduleCache,
++        use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
++    },
++    solana_pubkey::Pubkey,
++    solana_shred_version::compute_shred_version,
++    solana_unified_scheduler_pool::DefaultSchedulerPool,
++    std::{fs, os::unix::fs::{MetadataExt, PermissionsExt}, path::PathBuf,
++        str::FromStr, sync::{Arc, Mutex, atomic::AtomicBool}},
++};
++const LEDGER: &str = "/var/lib/zolana-vat-085-r1/network/ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711";
++const WORK: &str = "/var/lib/zolana-vat-085-diag-r1/work";
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++fn emit(value: serde_json::Value) { println!("{}", value); }
++fn run() -> Result<()> {
++    ensure!(std::env::args().len() == 1, "fixed diagnostic takes no arguments");
++    ensure!(unsafe { libc::geteuid() } == 995, "isolated original validator uid required");
++    let ledger = PathBuf::from(LEDGER);
++    ensure!(ledger.canonicalize()? == ledger, "ledger path changed");
++    let work = PathBuf::from(WORK);
++    let meta = fs::symlink_metadata(&work)?;
++    ensure!(meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == 995
++        && meta.permissions().mode() & 0o777 == 0o700 && work.canonicalize()? == work,
++        "fresh private non-authoritative workdir required");
++    ensure!(fs::read_dir(&work)?.next().is_none(), "diagnostic output must be new and empty");
++    let genesis = GenesisConfig::load(&ledger)?;
++    ensure!(genesis.hash().to_string() == GENESIS, "original genesis pin differs");
++    let blockstore = Blockstore::open_with_options(&ledger, BlockstoreOptions {
++        access_type: AccessType::ReadOnly, ..BlockstoreOptions::default()
++    })?;
++    ensure!(!blockstore.is_primary_access(), "ledger must be read-only");
++    let target = blockstore.max_root();
++    ensure!((413_500..413_696).contains(&target), "expected funded pre202 root only");
++    let (certified_hash, certified_time) = blockstore.get_optimistic_slot(target)?
++        .context("latest rooted slot lacks original Alpenglow certified bank hash")?;
++    ensure!(blockstore.is_root(target), "target must be rooted");
++    if let Some(hash) = blockstore.get_bank_hash(target) {
++        ensure!(hash == certified_hash, "replay and certified hashes conflict");
++    }
++    let votes = [
++        "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++        "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++        "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++    ].map(|v| Pubkey::from_str(v).unwrap());
++    let mut snapshots = SnapshotConfig::new_load_only();
++    snapshots.full_snapshot_archives_dir = ledger.join("native-snapshots/full");
++    snapshots.incremental_snapshot_archives_dir = ledger.join("native-snapshots/incremental");
++    snapshots.bank_snapshots_dir = work.join("bank");
++    snapshots.use_direct_io = false;
++    snapshots.use_registered_io_uring_buffers = false;
++    ensure!(fs::read_dir(&snapshots.incremental_snapshot_archives_dir)?.next().is_none(),
++        "unexpected incremental snapshot input");
++    let accounts = work.join("accounts"); fs::create_dir(&accounts)?;
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let capture = Arc::clone(&records);
++    let options = ProcessOptions {
++        run_verification: true, skip_inter_slot_verification: false,
++        halt_at_slot: Some(target), abort_on_invalid_block: true,
++        use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::Always,
++        slot_callback: Some(Arc::new(move |bank| {
++            if (413_498..=413_504).contains(&bank.slot()) || bank.slot() >= target.saturating_sub(2) {
++                capture.lock().unwrap().push(bank.pilot_vat_diagnostic(votes));
++            }
++        })),
++        ..ProcessOptions::default()
++    };
++    let exit = Arc::new(AtomicBool::new(false));
++    let (forks, hashes) = try_load_bank_forks_from_snapshot(&genesis, &[accounts], &snapshots,
++        &options, None, exit)?.context("trusted existing snapshot archive required; no genesis fallback")?;
++    let start = forks.read().unwrap().root_bank();
++    ensure!(start.slot() <= target, "snapshot newer than target");
++    emit(json!({"event":"offline_snapshot_loaded", "read_only_ledger":true,
++        "work_non_authoritative":true, "snapshot_hashes":format!("{hashes:?}"),
++        "snapshot_slot":start.slot(), "target_slot":target,
++        "target_certified_hash":certified_hash.to_string(),"target_certified_time":certified_time,
++        "snapshot_diagnostic":start.pilot_vat_diagnostic(votes)}));
++    let cache = LeaderScheduleCache::new_from_bank(&start);
++    drop(start);
++    forks.write().unwrap().install_scheduler_pool(DefaultSchedulerPool::new_for_verification(
++        Some(2), None, None, None, None));
++    if let Err(error) = process_blockstore_from_root(&blockstore, &forks,
++        compute_shred_version(&genesis.hash(), None), &cache, &options, None, None, None) {
++        let partial_root = forks.read().unwrap().root_bank();
++        emit(json!({"event":"offline_replay_failure_diagnostics", "full_target_verified":false,
++            "canonical_repair_accepted":false, "error":error.to_string(),
++            "last_replayed_root_computed_diagnostic":partial_root.pilot_vat_diagnostic(votes),
++            "selected_replay_computed_diagnostics":*records.lock().unwrap()}));
++        return Err(error.into());
++    }
++    let bank = forks.read().unwrap().root_bank();
++    ensure!(bank.slot() == target && bank.hash() == certified_hash,
++        "offline replay must match exact original funded certified root");
++    emit(json!({"event":"offline_funded_root_verified", "slot":bank.slot(),
++        "bank_hash":bank.hash().to_string(),"diagnostic":bank.pilot_vat_diagnostic(votes),
++        "selected_replay_diagnostics":*records.lock().unwrap(),
++        "validators_started":false,"keys_read":false,"financial_operations":0,
++        "copied_ledger_writable":false,"authoritative_accounts_writable":false}));
++    Ok(())
++}
++fn main() {
++    if let Err(error) = run() { emit(json!({"event":"offline_diagnostic_failed","error":format!("{error:#}")})); std::process::exit(1); }
++}
+diff --git a/zolana-fast-check/src/bin/vote-history-public-tail.rs b/zolana-fast-check/src/bin/vote-history-public-tail.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/bin/vote-history-public-tail.rs
+@@ -0,0 +1,58 @@
++//! Read-only LOCAL085 copied signed-history inspection, no keys or networking.
++use agave_votor::vote_history_storage::{FileVoteHistoryStorage, VoteHistoryStorage};
++use anyhow::{Result, ensure};
++use serde_json::{Value, json};
++use solana_pubkey::Pubkey;
++use solana_ledger::{blockstore::Blockstore, blockstore_options::{AccessType,BlockstoreOptions}};
++use std::{fs, os::unix::fs::MetadataExt, path::Path};
++
++fn main() -> Result<()> {
++    ensure!(std::env::args().len() == 1, "fixed copied-history inspection only");
++    let root = Path::new("/var/lib/zolana-vat-085-r1/network");
++    let manifest: Value = serde_json::from_slice(&fs::read(root.join("resume.json"))?)?;
++    ensure!(manifest["genesis_hash"] == "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p" && manifest["original_root"] == root.to_str().unwrap(), "copied history identity changed");
++    let nodes = manifest["nodes"].as_array().ok_or_else(|| anyhow::anyhow!("missing copied peers"))?;
++    ensure!(nodes.len() == 3, "three copied peers required");
++    let mut rows = Vec::new();
++    for node in nodes {
++        let identity: Pubkey = node["identity"].as_str().unwrap_or("").parse()?;
++        let ledger = root.join(node["ledger"].as_str().unwrap_or(""));
++        ensure!(ledger.canonicalize()? == ledger && ledger.starts_with(root.join("ledgers")), "unexpected copied ledger path");
++        let storage = FileVoteHistoryStorage::new(ledger);
++        let path = storage.filename(&identity);
++        let meta = fs::symlink_metadata(&path)?;
++        ensure!(meta.is_file() && meta.uid() == 995 && meta.len() <= 64 * 1024 * 1024 && path.canonicalize()? == path, "bounded original-owner signed history required");
++        // FileVoteHistoryStorage validates its signature and embedded public
++        // identity. Its existing-directory check executes under a read-only
++        // systemd mount; no store method is reachable here.
++        let history = storage.load(&identity)?;
++        let bytes = fs::read(&path)?;
++        let pin: String = solana_sha256_hasher::hash(&bytes).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
++        let mut votes = history.votes_cast_since(history.root().saturating_sub(1));
++        ensure!(votes.len() <= 1024, "unexpectedly large retained public signed tail");
++        votes.sort_by_key(|vote| (vote.slot(), vote.get_type()));
++        let tail = votes.iter().map(|vote| json!({"slot":vote.slot(),
++            "type":format!("{:?}",vote.get_type()),"block_id":vote.block_id().map(ToString::to_string)})).collect::<Vec<_>>();
++        let blockstore = Blockstore::open_with_options(&root.join(node["ledger"].as_str().unwrap()),
++            BlockstoreOptions { access_type:AccessType::ReadOnly, ..BlockstoreOptions::default() })?;
++        ensure!(!blockstore.is_primary_access(), "read-only certified-root inspection required");
++        let root_slot = blockstore.max_root();
++        let certified = blockstore.get_optimistic_slot(root_slot)?;
++        let replay_hash = blockstore.get_bank_hash(root_slot);
++        ensure!(blockstore.is_root(root_slot) && certified.is_some(), "latest rooted bank certificate missing");
++        if let Some(replayed) = replay_hash {
++            ensure!(Some(replayed) == certified.map(|(hash,_)| hash), "latest rooted bank hash conflicts");
++        }
++        rows.push(json!({"identity":identity.to_string(),"signed_history_root":history.root(),
++            "root_epoch":history.root()/2048,"highest_parent_ready_slot":history.highest_parent_ready_slot(),
++            "highest_parent_ready":history.highest_parent_ready().map(|(slot,parent)|json!({"slot":slot,"parent_slot":parent.slot,"parent_block_id":parent.block_id.to_string()})),
++            "latest_retained_vote_slot":votes.iter().map(|vote|vote.slot()).max(),
++            "retained_authenticated_vote_payloads":tail,
++            "blockstore_max_root":root_slot,"certified_bank_hash":certified.map(|(hash,_)|hash.to_string()),
++            "blockstore_replay_bank_hash":replay_hash.map(|hash|hash.to_string()),
++            "file_sha256":pin,"file_bytes":bytes.len(),"signature_and_embedded_identity_verified":true,
++            "retained_vote_hash_kind":"Alpenglow block ID, not Bank hash"}));
++    }
++    println!("{}", json!({"format":"zolana085-copied-signed-history-tail-observation-v1","genesis_hash":manifest["genesis_hash"],"peers":rows,"validator_started":false,"keys_read":false,"transactions_signed":false}));
++    Ok(())
++}
+diff --git a/zolana-fast-check/src/bin/vote-history-public.rs b/zolana-fast-check/src/bin/vote-history-public.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/bin/vote-history-public.rs
+@@ -0,0 +1,34 @@
++//! Read-only LOCAL085 copied signed-history inspection, no keys or networking.
++use agave_votor::vote_history_storage::{FileVoteHistoryStorage, VoteHistoryStorage};
++use anyhow::{Result, ensure};
++use serde_json::{Value, json};
++use solana_pubkey::Pubkey;
++use std::{fs, os::unix::fs::MetadataExt, path::Path};
++
++fn main() -> Result<()> {
++    ensure!(std::env::args().len() == 1, "fixed copied-history inspection only");
++    let root = Path::new("/var/lib/zolana-vat-085-r1/network");
++    let manifest: Value = serde_json::from_slice(&fs::read(root.join("resume.json"))?)?;
++    ensure!(manifest["genesis_hash"] == "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p" && manifest["original_root"] == root.to_str().unwrap(), "copied history identity changed");
++    let nodes = manifest["nodes"].as_array().ok_or_else(|| anyhow::anyhow!("missing copied peers"))?;
++    ensure!(nodes.len() == 3, "three copied peers required");
++    let mut rows = Vec::new();
++    for node in nodes {
++        let identity: Pubkey = node["identity"].as_str().unwrap_or("").parse()?;
++        let ledger = root.join(node["ledger"].as_str().unwrap_or(""));
++        ensure!(ledger.canonicalize()? == ledger && ledger.starts_with(root.join("ledgers")), "unexpected copied ledger path");
++        let storage = FileVoteHistoryStorage::new(ledger);
++        let path = storage.filename(&identity);
++        let meta = fs::symlink_metadata(&path)?;
++        ensure!(meta.is_file() && meta.uid() == 995 && meta.len() <= 64 * 1024 * 1024 && path.canonicalize()? == path, "bounded original-owner signed history required");
++        // FileVoteHistoryStorage validates its signature and embedded public
++        // identity. Its existing-directory check executes under a read-only
++        // systemd mount; no store method is reachable here.
++        let history = storage.load(&identity)?;
++        let bytes = fs::read(&path)?;
++        let pin: String = solana_sha256_hasher::hash(&bytes).to_bytes().iter().map(|b| format!("{b:02x}")).collect();
++        rows.push(json!({"identity":identity.to_string(),"signed_history_root":history.root(),"root_epoch":history.root()/2048,"highest_parent_ready_slot":history.highest_parent_ready_slot(),"file_sha256":pin,"file_bytes":bytes.len(),"signature_and_embedded_identity_verified":true}));
++    }
++    println!("{}", json!({"format":"zolana085-copied-signed-history-observation-v1","genesis_hash":manifest["genesis_hash"],"peers":rows,"validator_started":false,"keys_read":false,"transactions_signed":false}));
++    Ok(())
++}

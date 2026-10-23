@@ -1,0 +1,704 @@
+{
+  "actual_linux_evidence": {
+    "all_three_offline_snapshot_tail_probes": "Root accepted; exact evidence receipt added separately by root.",
+    "binary_sha256": "939ccf20bd67fd3d1276431e27a86ad4e1171cc290598af45e657fc865eda492",
+    "focused_runtime_votor_tests": 32,
+    "linked_new_runtime_votor_flags": true,
+    "linked_old_retry_flag": false,
+    "path": ".local/browser-cash-084/vat-recovery-r1/epoch202-recovery-r1/linux-runner-build-r1/result.json",
+    "quorum_diagnostic_label_limitation": "Current helper text says equal stake/one-third, while the actual three stake weights differ. Those strings are diagnostic only and are not proof of weighted thresholds. Actual explicit membership totals and 60/80-percent threshold acceptance must be recorded separately; no equal-weight claim.",
+    "runner_tests": 3,
+    "sha256": "ecc7b871527b8ae1cf9cffbc39d683f6825bf54e02c0cc5bfb5c13af39f4570f",
+    "source_tree_equivalence_to_this_export": "Verified exact file lengths/SHA256 for all1916 regular source-tree files and all4 symlink targets; source-preparation metadata separately identified."
+  },
+  "archive_sha256": "917912ac67fc0b6ffec94e33e1ce113db581e1f1706aa1ecbe4224b967b15f30",
+  "baseline_delta_manifest": "LOCAL-072-source.json",
+  "baseline_delta_manifest_sha256": "57a947addd2dff75665241af64a40be3ed9d07b9bd64e3e57cc94e2c37bb10d2",
+  "baseline_delta_patch": "agave-4.3.2-LOCAL-072.patch",
+  "baseline_delta_patch_sha256": "3081981628659772ccd92889348f8816a09105328036b83bbc797ab2c03370c3",
+  "baseline_revision": "LOCAL-072",
+  "candidate_status": "UNACCEPTED: source-inventory equivalence verified; guarded live recovery acceptance remains separate",
+  "canonical_promotion_performed": false,
+  "created_at": "2026-10-23T05:54:49.821138+00:00",
+  "cumulative_source_receipts": [
+    {
+      "path": ".local/browser-cash-084/vat-recovery-r1/candidate-source-r5.json",
+      "sha256": "a4221b2dfe769ee8eb9ab44159017c9c182b6c810c01c1edd4acba2bc398d75a"
+    },
+    {
+      "path": ".local/browser-cash-084/vat-recovery-r1/ancestry-parallel-r1/linux-evidence/source-input.json",
+      "sha256": "80be33cf3ebe8afbf4408cf8642f67d7fa7f6d6b9fd56d59a702b03425fa2818"
+    },
+    {
+      "path": ".local/browser-cash-084/vat-recovery-r1/quorum-runner-r1/build-source-input.json",
+      "sha256": "bde4cafda2633ada6dd6c0177739f2808651228eb6d0c58ac8296e79c893dbcc"
+    }
+  ],
+  "delta_patch": "agave-4.3.2-LOCAL-085.patch",
+  "delta_patch_sha256": "76ac5672649823ab10f6f4620fe4603fbb16f3b26ec3ac8dc0f495bbcf33998b",
+  "diagnostic_source_export": {
+    "files": [
+      "zolana-fast-check/src/bin/vat-public-inspect-consensus.rs",
+      "zolana-fast-check/src/bin/vat-public-inspect-legacy.rs",
+      "zolana-fast-check/src/bin/vat-public-inspect.rs",
+      "zolana-fast-check/src/bin/vote-history-public-tail.rs",
+      "zolana-fast-check/src/bin/vote-history-public.rs"
+    ],
+    "reason": "Standalone Cargo bin targets retained to reproduce full observed source inventory; the selected main.rs runner does not import them.",
+    "selected_runner_compiles_them": false,
+    "selected_runner_target": "--bin zolana-fast-check"
+  },
+  "features": {
+    "default": false,
+    "enabled_opt_in": "zolana-pilot-202-recovery",
+    "forbidden_together": "zolana-pilot-vat-recovery",
+    "historical201_policy": "existing-entry-preserved-v1"
+  },
+  "files": {
+    "Cargo.lock": {
+      "after_bytes": 337452,
+      "after_sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "before_bytes": 337374,
+      "before_sha256": "3a62fae3b20cdb482483d4ed76d9b577edcfc57b3908b4fca15f2e48e33c9532"
+    },
+    "runtime/Cargo.toml": {
+      "after_bytes": 9996,
+      "after_sha256": "52cdc72ed4530b5eeca0428a91c274a2543bc5325ea37fb43ccb9fbe96fd1f48",
+      "before_bytes": 9749,
+      "before_sha256": "098145fa8f366542bf322d2ff801523c5b73db30680d54d2c22396463840c7b5"
+    },
+    "runtime/src/bank.rs": {
+      "after_bytes": 300829,
+      "after_sha256": "3da891fd148e88c417ac9147060c80bcc901226eb7c11bb7c1dd221e4d0c8abc",
+      "before_bytes": 296849,
+      "before_sha256": "4f9ea98776c4c258ef17803b834aed6596bcdd37d2315a6ca3c3354726006e9a"
+    },
+    "runtime/src/bank/pilot_epoch202_recovery.rs": {
+      "after_bytes": 8804,
+      "after_sha256": "bd06d2f09e3dc6ce7e9334af9c644373bc889979bb0456dcf7f040db45170a12",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "runtime/src/bank/pilot_epoch202_recovery_tests.rs": {
+      "after_bytes": 7013,
+      "after_sha256": "1d326b39e529309b87a4e57708c9efdeb1a01acfa60af9eb8eaefd0d1f8d28d7",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "runtime/src/bank/pilot_epoch202_shared.rs": {
+      "after_bytes": 10363,
+      "after_sha256": "96ed5aa5d840012721de87b33d96d7636e5627d35eb7b09ec0d35c99fca1e985",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "runtime/src/bank/pilot_vat_diagnostic.rs": {
+      "after_bytes": 24803,
+      "after_sha256": "c33a91286edcdc0c50abfc819bbc34afa81e0a0b169a3efa119d7151a34ccdb2",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "runtime/src/bank/pilot_vat_recovery_tests.rs": {
+      "after_bytes": 8316,
+      "after_sha256": "c9c6fc544c4e8e2c634c3be3a7d9ffd044aa17b2adb220f79908125f94745b11",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "runtime/src/leader_schedule_utils.rs": {
+      "after_bytes": 7113,
+      "after_sha256": "2160828cbe2831e61c61cef302d228e1f16a9d74e7cc59e73a46a834e6314db3",
+      "before_bytes": 5972,
+      "before_sha256": "4540f675005638f3baa36d348795e8a7a1d1365c957fbd1fa865b660cb10dcc7"
+    },
+    "votor/Cargo.toml": {
+      "after_bytes": 3590,
+      "after_sha256": "96becd21262412cd222f3945807c4e468293ad6652f88095438784587a74f107",
+      "before_bytes": 3286,
+      "before_sha256": "3a8569f0ac84e0c00669aa81fc3debecba28ec9a6deb4eb5fb901edaa38cd560"
+    },
+    "votor/src/consensus_pool_service.rs": {
+      "after_bytes": 54560,
+      "after_sha256": "86a63a6ec82327c5909343a57544f54f9502d1e7cc588d8ed39190309c289ba9",
+      "before_bytes": 54271,
+      "before_sha256": "5a323b85926886714bc3866657ec9ca811179fff58401bab1b1f8d8520009eae"
+    },
+    "votor/src/consensus_pool_service/pilot_epoch202_egress_tests.rs": {
+      "after_bytes": 7842,
+      "after_sha256": "b23aee667ab16de6f2b004fe02dca6c7fe60e313198e8670dadeb8a6001c3eae",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "votor/src/lib.rs": {
+      "after_bytes": 1750,
+      "after_sha256": "e4157468a2b462d379b9d1cba603777e0f4429c23137f3fbfa5fdc8fc28051c7",
+      "before_bytes": 1662,
+      "before_sha256": "1fac7fc61e077ea01d6f2896d0d348dd679bf889e53fb5a0ed97cd53728e8e98"
+    },
+    "votor/src/pilot_epoch202_egress.rs": {
+      "after_bytes": 3858,
+      "after_sha256": "d9d855ae911397391fd14d9e2d51bd3d45d4cb2c3e2426d9aa465b76fdca7d4b",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/Cargo.toml": {
+      "after_bytes": 2028,
+      "after_sha256": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc",
+      "before_bytes": 1664,
+      "before_sha256": "9074cd903faa2d1fdd7699a4ba1dc320e3467503ba8a93bdf8c33483929d2f11"
+    },
+    "zolana-fast-check/src/ancestry.rs": {
+      "after_bytes": 10320,
+      "after_sha256": "38b8032cfeaea7ce5208fdf72c93883ffda1292d8502dbf47c1486da90ad2abb",
+      "before_bytes": 3826,
+      "before_sha256": "18ecd6f0c32c8dc2bddffa52a2c10914b9e57f2467c39eb702cfec7408fde8c1"
+    },
+    "zolana-fast-check/src/ancestry_parallel_tests.rs": {
+      "after_bytes": 9466,
+      "after_sha256": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/bin/vat-public-inspect-consensus.rs": {
+      "after_bytes": 10519,
+      "after_sha256": "5abdd5c27f50b805250b6c31969cf685aa7d2d3392c815d7e82bfad9ce53758a",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/bin/vat-public-inspect-legacy.rs": {
+      "after_bytes": 8707,
+      "after_sha256": "7cb0b8a1fc894f331503b11dc7ae4dc6a65fd45cccc7713b398f82860518adf1",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/bin/vat-public-inspect.rs": {
+      "after_bytes": 6644,
+      "after_sha256": "f67d1fe6aba35710f5670fe24a7461d46fb658792cf395af100dca73779b9e46",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/bin/vote-history-public-tail.rs": {
+      "after_bytes": 4417,
+      "after_sha256": "7a9b392821a6b9275ce65483530b4573b24e1e927a389655174e5e8c4fd5a7c2",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/bin/vote-history-public.rs": {
+      "after_bytes": 2511,
+      "after_sha256": "6b2187c3265eafe322366015eaf731073425b287248b552eb0c28adf50eccfac",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/build_info.rs": {
+      "after_bytes": 4753,
+      "after_sha256": "fbf591ef0217ab8914788bbd6b56c20090e6562492a1c13ad8c2fe16b25cb5ad",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after_bytes": 45576,
+      "after_sha256": "44bfc8858075f5efd317374d4e55d1e07428265cc723e9ab992fdd911dc078e9",
+      "before_bytes": 44683,
+      "before_sha256": "349440eb59da1642c9b21211f3ad5d1689a908f8b32b6cf0d6d70a1ec2170307"
+    },
+    "zolana-fast-check/src/offline_probe.rs": {
+      "after_bytes": 26441,
+      "after_sha256": "297e79fb7800787192d296d585046c7a54c6499f7d7e28db292d1d9f6651dc65",
+      "before_bytes": null,
+      "before_sha256": null
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "after_bytes": 21181,
+      "after_sha256": "9a746b879053151f174a5cf23f9e49bcf4405064268f8e437185554fe59120b2",
+      "before_bytes": 20227,
+      "before_sha256": "651a2b8f4c557b02f4734ca0dab22d118b2af5387c4d47039487b7b14e4bfc4e"
+    },
+    "zolana-fast-check/src/service.rs": {
+      "after_bytes": 7023,
+      "after_sha256": "34aeae6da81d79f8c66a9f8ad3c6d0f0a70171dba7ba4f0993678cf8289fe6f9",
+      "before_bytes": 6283,
+      "before_sha256": "b809ec34333cf98d5ca63c7fee1f592601205a4cefd042fa45f9b25036b99ce2"
+    }
+  },
+  "final_files": {
+    "Cargo.lock": {
+      "bytes": 337452,
+      "sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7"
+    },
+    "Cargo.toml": {
+      "bytes": 25279,
+      "sha256": "79af403c6c548193deb87fc3a2f445c626f76652b7f05a828e0a19df1ece63c8"
+    },
+    "builtins/Cargo.toml": {
+      "bytes": 1158,
+      "sha256": "1452d4e50ec74e3dc7e8c68c464940fecb6448008c4e2e367fae35515c0c7f6b"
+    },
+    "builtins/src/lib.rs": {
+      "bytes": 14863,
+      "sha256": "22aee3bbbf7ae17ce909fea7b291b501a0421d3ca3e4aacaa0558eb403944291"
+    },
+    "core/Cargo.toml": {
+      "bytes": 9738,
+      "sha256": "770d49c867db4e361cb75d4ed85e5b55382ae0632928e45f8745efb4bda636ab"
+    },
+    "core/src/banking_stage/transaction_scheduler/receive_and_buffer.rs": {
+      "bytes": 77248,
+      "sha256": "c44ae0c1a0308f1b47f2181794a84bea60221f1bee3581b35a082fb83822acb0"
+    },
+    "core/src/lib.rs": {
+      "bytes": 1854,
+      "sha256": "be837cfbbc4e2e26ddda3b77a980082f26bed45e8884d591a9ad933075d98423"
+    },
+    "core/src/native_payment_ingress.rs": {
+      "bytes": 11973,
+      "sha256": "68ca2aba7e86d5aa1e4c283cd3aba6f68b307ac919d608c18402a8bc82c79aa4"
+    },
+    "core/src/tpu.rs": {
+      "bytes": 17834,
+      "sha256": "7c16b1dfa8f720ee8c4360dea7ba27e63d595e3fa5798d32ea06c4aa48d68253"
+    },
+    "dev-bins/Cargo.lock": {
+      "bytes": 271450,
+      "sha256": "a7e3c3734a6ec7aaf4b7685e3e766380a690cce71359ee39743aaf8e0b9826ab"
+    },
+    "dev-bins/Cargo.toml": {
+      "bytes": 10058,
+      "sha256": "b1ae29fcc9b22a14cdca0f8e2443e795d8308bbd188f78d2f3a2ae52e269539a"
+    },
+    "feature-set/src/lib.rs": {
+      "bytes": 99054,
+      "sha256": "5fea8ee87c36e773c918bd59547eb1ffe6f8e22267f5239e2f69c5310082e3a8"
+    },
+    "ledger-tool/src/ledger_utils.rs": {
+      "bytes": 28508,
+      "sha256": "ebe7e3b955220dc9ddf2500b8b865e3a2c41001eb08b373e1fe0f79a13f76c36"
+    },
+    "ledger-tool/src/main.rs": {
+      "bytes": 159553,
+      "sha256": "cb729652b65d03400462227390b36ea7c36ad746151b2d89eec400804c8f0568"
+    },
+    "local-cluster/src/local_cluster.rs": {
+      "bytes": 52915,
+      "sha256": "d74ee91031dc01e455cb3c8e494a12093173b76a0a5dce4baba897e199f2d651"
+    },
+    "local-cluster/src/local_cluster/resume.rs": {
+      "bytes": 5184,
+      "sha256": "0bfbacb4428ba513ef3745bd22a06d9c86653eee49cd7a0f58be13b9243706d3"
+    },
+    "rpc/Cargo.toml": {
+      "bytes": 5948,
+      "sha256": "d000face0986bbbe78b912de7fa039ae0646a76d8cf6af2581bec7f835cacf1d"
+    },
+    "rpc/src/rpc.rs": {
+      "bytes": 388185,
+      "sha256": "f51afe1a27fe487faf4d96f08ac5f14a42eb57dc1cc0ce121444b0490956eacb"
+    },
+    "rpc/src/rpc/native_private_fee.rs": {
+      "bytes": 11255,
+      "sha256": "28a2752649ad34663cd6c597e5b12357d1e9c57ec38b0d4e508e2436dfb203ef"
+    },
+    "runtime/Cargo.toml": {
+      "bytes": 9996,
+      "sha256": "52cdc72ed4530b5eeca0428a91c274a2543bc5325ea37fb43ccb9fbe96fd1f48"
+    },
+    "runtime/src/bank.rs": {
+      "bytes": 300829,
+      "sha256": "3da891fd148e88c417ac9147060c80bcc901226eb7c11bb7c1dd221e4d0c8abc"
+    },
+    "runtime/src/bank/pilot_epoch202_recovery.rs": {
+      "bytes": 8804,
+      "sha256": "bd06d2f09e3dc6ce7e9334af9c644373bc889979bb0456dcf7f040db45170a12"
+    },
+    "runtime/src/bank/pilot_epoch202_recovery_tests.rs": {
+      "bytes": 7013,
+      "sha256": "1d326b39e529309b87a4e57708c9efdeb1a01acfa60af9eb8eaefd0d1f8d28d7"
+    },
+    "runtime/src/bank/pilot_epoch202_shared.rs": {
+      "bytes": 10363,
+      "sha256": "96ed5aa5d840012721de87b33d96d7636e5627d35eb7b09ec0d35c99fca1e985"
+    },
+    "runtime/src/bank/pilot_vat_diagnostic.rs": {
+      "bytes": 24803,
+      "sha256": "c33a91286edcdc0c50abfc819bbc34afa81e0a0b169a3efa119d7151a34ccdb2"
+    },
+    "runtime/src/bank/pilot_vat_recovery_tests.rs": {
+      "bytes": 8316,
+      "sha256": "c9c6fc544c4e8e2c634c3be3a7d9ffd044aa17b2adb220f79908125f94745b11"
+    },
+    "runtime/src/leader_schedule_utils.rs": {
+      "bytes": 7113,
+      "sha256": "2160828cbe2831e61c61cef302d228e1f16a9d74e7cc59e73a46a834e6314db3"
+    },
+    "runtime/src/lib.rs": {
+      "bytes": 1872,
+      "sha256": "187afb333b8d9876cb78dff7b4eb6fd7142af1a0080a7956d19bd8abfeb5ad95"
+    },
+    "runtime/src/native_payment_admission.rs": {
+      "bytes": 5790,
+      "sha256": "91a508d06fab904e6262aa4b880eccc904581726c32d42830d57f5e214b86c1c"
+    },
+    "svm-feature-set/src/lib.rs": {
+      "bytes": 5283,
+      "sha256": "0105a7532674385c7b118c875f061115da6b21fcd3a23f41e0fa6c033e6e09f7"
+    },
+    "votor/Cargo.toml": {
+      "bytes": 3590,
+      "sha256": "96becd21262412cd222f3945807c4e468293ad6652f88095438784587a74f107"
+    },
+    "votor/src/consensus_pool_service.rs": {
+      "bytes": 54560,
+      "sha256": "86a63a6ec82327c5909343a57544f54f9502d1e7cc588d8ed39190309c289ba9"
+    },
+    "votor/src/consensus_pool_service/pilot_epoch202_egress_tests.rs": {
+      "bytes": 7842,
+      "sha256": "b23aee667ab16de6f2b004fe02dca6c7fe60e313198e8670dadeb8a6001c3eae"
+    },
+    "votor/src/lib.rs": {
+      "bytes": 1750,
+      "sha256": "e4157468a2b462d379b9d1cba603777e0f4429c23137f3fbfa5fdc8fc28051c7"
+    },
+    "votor/src/pilot_epoch202_egress.rs": {
+      "bytes": 3858,
+      "sha256": "d9d855ae911397391fd14d9e2d51bd3d45d4cb2c3e2426d9aa465b76fdca7d4b"
+    },
+    "zolana-fast-check/Cargo.toml": {
+      "bytes": 2028,
+      "sha256": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc"
+    },
+    "zolana-fast-check/src/ancestry.rs": {
+      "bytes": 10320,
+      "sha256": "38b8032cfeaea7ce5208fdf72c93883ffda1292d8502dbf47c1486da90ad2abb"
+    },
+    "zolana-fast-check/src/ancestry_parallel_tests.rs": {
+      "bytes": 9466,
+      "sha256": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf"
+    },
+    "zolana-fast-check/src/ancestry_tests.rs": {
+      "bytes": 10471,
+      "sha256": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685"
+    },
+    "zolana-fast-check/src/bin/snapshot-provenance.rs": {
+      "bytes": 11449,
+      "sha256": "16331eac83b12fef994f40c2c0272a60f1897a6ea18caed6735b4f0e1e8f2954"
+    },
+    "zolana-fast-check/src/bin/vat-public-inspect-consensus.rs": {
+      "bytes": 10519,
+      "sha256": "5abdd5c27f50b805250b6c31969cf685aa7d2d3392c815d7e82bfad9ce53758a"
+    },
+    "zolana-fast-check/src/bin/vat-public-inspect-legacy.rs": {
+      "bytes": 8707,
+      "sha256": "7cb0b8a1fc894f331503b11dc7ae4dc6a65fd45cccc7713b398f82860518adf1"
+    },
+    "zolana-fast-check/src/bin/vat-public-inspect.rs": {
+      "bytes": 6644,
+      "sha256": "f67d1fe6aba35710f5670fe24a7461d46fb658792cf395af100dca73779b9e46"
+    },
+    "zolana-fast-check/src/bin/vote-history-public-tail.rs": {
+      "bytes": 4417,
+      "sha256": "7a9b392821a6b9275ce65483530b4573b24e1e927a389655174e5e8c4fd5a7c2"
+    },
+    "zolana-fast-check/src/bin/vote-history-public.rs": {
+      "bytes": 2511,
+      "sha256": "6b2187c3265eafe322366015eaf731073425b287248b552eb0c28adf50eccfac"
+    },
+    "zolana-fast-check/src/build_info.rs": {
+      "bytes": 4753,
+      "sha256": "fbf591ef0217ab8914788bbd6b56c20090e6562492a1c13ad8c2fe16b25cb5ad"
+    },
+    "zolana-fast-check/src/main.rs": {
+      "bytes": 45576,
+      "sha256": "44bfc8858075f5efd317374d4e55d1e07428265cc723e9ab992fdd911dc078e9"
+    },
+    "zolana-fast-check/src/offline_probe.rs": {
+      "bytes": 26441,
+      "sha256": "297e79fb7800787192d296d585046c7a54c6499f7d7e28db292d1d9f6651dc65"
+    },
+    "zolana-fast-check/src/restart_snapshots.rs": {
+      "bytes": 14380,
+      "sha256": "eb0c2afe2e111249c34d4506ba0941a655f431af5a5e0522112a66b2122e6b68"
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "bytes": 21181,
+      "sha256": "9a746b879053151f174a5cf23f9e49bcf4405064268f8e437185554fe59120b2"
+    },
+    "zolana-fast-check/src/service.rs": {
+      "bytes": 7023,
+      "sha256": "34aeae6da81d79f8c66a9f8ad3c6d0f0a70171dba7ba4f0993678cf8289fe6f9"
+    },
+    "zolana-native/adapter/Cargo.toml": {
+      "bytes": 513,
+      "sha256": "a87d8638a382ed6df5169f515a9bc272010ff360fd979eaa312345b7ff92976f"
+    },
+    "zolana-native/adapter/src/instructions.rs": {
+      "bytes": 4136,
+      "sha256": "3d93be209dc6ac1be1d39b4695fba66b7ba46d12f2e1afdea2ca68298a2f7291"
+    },
+    "zolana-native/adapter/src/lib.rs": {
+      "bytes": 2084,
+      "sha256": "ea8e5f094ae30696867b64fa0a0ea439e334f6dc15fce85ebcba330a67b9eb56"
+    },
+    "zolana-native/adapter/src/nullifiers.rs": {
+      "bytes": 610,
+      "sha256": "a98e176f28f60cf2534eb8fce4dd32772d9ebf98c6aef6ac80472a5eddc93584"
+    },
+    "zolana-native/adapter/src/processor.rs": {
+      "bytes": 15818,
+      "sha256": "ca53ad4140b57bb063a0f976ac7206d0a12f1ddc499c4383f83646f31fa4cef9"
+    },
+    "zolana-native/adapter/src/staging.rs": {
+      "bytes": 3683,
+      "sha256": "28d739526fc5959f873040df7e4b3e0b427dfd7dc23d1b2dee10d890c17df614"
+    },
+    "zolana-native/fixtures/Cargo.toml": {
+      "bytes": 267,
+      "sha256": "61b4bc614b926865b7f3978bc1518f4ff32876e57c73d78d91096c3aa31196f7"
+    },
+    "zolana-native/fixtures/src/admission_fixture.rs": {
+      "bytes": 1989,
+      "sha256": "81126219c9f953eec7c822e94ea07b58af9a12b92dbc797449bc4868d22c4491"
+    },
+    "zolana-native/fixtures/src/lib.rs": {
+      "bytes": 120,
+      "sha256": "f7bcb96484e807e8465790d211f6e21027bec96218baf7249f2b9e657118a3be"
+    },
+    "zolana-native/fixtures/src/main.rs": {
+      "bytes": 1241,
+      "sha256": "88b73576cae81f5f0f1dbd1bbc55c2ed535ae85aa6272fe1b5cf7ff8c6972d34"
+    },
+    "zolana-native/fixtures/src/proof_smoke.rs": {
+      "bytes": 17723,
+      "sha256": "799c1c10e6d6d37059fa62d4f0fa1db5d0ce28202cd212df310a8adda7dbee70"
+    },
+    "zolana-native/harness/Cargo.toml": {
+      "bytes": 1907,
+      "sha256": "9c08f40fce03215499b1490e30496e0f2767242ec8370889e908f4187c4aed51"
+    },
+    "zolana-native/harness/src/bin/native-rpc-smoke.rs": {
+      "bytes": 835,
+      "sha256": "5347bfd953335faed5c245f057635c6f77f86e5921bfabede3a47325b090e757"
+    },
+    "zolana-native/harness/src/bin/native-wire-check.rs": {
+      "bytes": 2670,
+      "sha256": "cf9de00db1b897b093665fa41feecd0e06f93447c89e2bd942dd5826763564b0"
+    },
+    "zolana-native/harness/src/lib.rs": {
+      "bytes": 2840,
+      "sha256": "422ce6585e8cfa34ede5093b6b331bb80cce92b7b0c01e36201289cffd218279"
+    },
+    "zolana-native/harness/src/rpc_smoke.rs": {
+      "bytes": 16757,
+      "sha256": "9a76caebe21cd973f830ed281ee6adfa43547146fbfd5ebe1cb195a30c3ef600"
+    },
+    "zolana-native/harness/tests/admission.rs": {
+      "bytes": 9345,
+      "sha256": "75d9b800c17a50b905ce6f141ec7b8a35b2f91e3d1614327f59a47b171005553"
+    },
+    "zolana-native/harness/tests/inline.rs": {
+      "bytes": 17485,
+      "sha256": "653176c3a13a2acf15b7c5ee0a435d69035fba027af05c9398eae88bfcf43728"
+    },
+    "zolana-native/harness/tests/slot_anchors.rs": {
+      "bytes": 4232,
+      "sha256": "ed961cac483074b5019ababaf85b2e58fc2f0f8b5de1d1847c51781bc7603323"
+    },
+    "zolana-native/harness/tests/snapshot_recovery.rs": {
+      "bytes": 17980,
+      "sha256": "6a8a4a80f86092f78b924f9a783e4ecbd23ad5b31cd300d42e3b39033bebfe58"
+    },
+    "zolana-native/harness/tests/support/snapshot_roundtrip.rs": {
+      "bytes": 2575,
+      "sha256": "52599ee7500b53f38f76c14b3374d0df51cd4409a6190729520347ff856958c1"
+    },
+    "zolana-native/protocol/Cargo.toml": {
+      "bytes": 285,
+      "sha256": "4dbfb32ea1cf2ba08389891a53bb36850b3a5b0d5aebb226df8d39775ca3aaf1"
+    },
+    "zolana-native/protocol/src/anchors.rs": {
+      "bytes": 15808,
+      "sha256": "9a55afb83211449bccff7a0fbe2bfd2f06e05cb0edadd8033566cd4ed6425370"
+    },
+    "zolana-native/protocol/src/envelope.rs": {
+      "bytes": 13810,
+      "sha256": "49b7c161fad70f6fb585c8fd1c29f2dc2960d0a56efc3bbba93e0a7a18d81c8b"
+    },
+    "zolana-native/protocol/src/lib.rs": {
+      "bytes": 1060,
+      "sha256": "cbf043455403fc9166110e54721c9d54a0f030f89af0532441fad9f0bd417bb3"
+    },
+    "zolana-native/protocol/src/staging.rs": {
+      "bytes": 4153,
+      "sha256": "6d5bbcbe3d305768ca9766c8d70f40dc9ef16f968c94054d742ff15a2c12fa8c"
+    },
+    "zolana-native/protocol/src/state.rs": {
+      "bytes": 17994,
+      "sha256": "3897cd6ca3a80e5ed767135f732c4697fde87fbd2bcdb8bf4940527ac659b81e"
+    },
+    "zolana-native/protocol/src/verification.rs": {
+      "bytes": 7198,
+      "sha256": "03fcf94f0699fa6acf75e29bb63f0cc9139369b9b10ebe5f75b19e31c02449a9"
+    },
+    "zolana-native/protocol/src/wire.rs": {
+      "bytes": 7915,
+      "sha256": "c46c58e302153ec016c774847dd3e6b485f24d60c80b3b301fe2a2606919ad23"
+    },
+    "zolana-native/vendor/agave-transaction-view/.cargo-ok": {
+      "bytes": 7,
+      "sha256": "afbf9d0f3560b0fd7795e81c42a0a79ee6b6fc67e064f77826aee642cad28d91"
+    },
+    "zolana-native/vendor/agave-transaction-view/.cargo_vcs_info.json": {
+      "bytes": 110,
+      "sha256": "2bf257ccf1050fa73afb2d26450ca07721ada8cdc415ecbc85eabf721fac7256"
+    },
+    "zolana-native/vendor/agave-transaction-view/Cargo.lock": {
+      "bytes": 42463,
+      "sha256": "e0e8ec1a85aa43ab75d9ee34805fd69ef19355599fa76483b5e9c3148908cd66"
+    },
+    "zolana-native/vendor/agave-transaction-view/Cargo.toml": {
+      "bytes": 2728,
+      "sha256": "86c02225e3cdf8e8d2597fb15548799c93fc6255b3ffcd3ead3b08d09ad82bb1"
+    },
+    "zolana-native/vendor/agave-transaction-view/Cargo.toml.orig": {
+      "bytes": 1589,
+      "sha256": "b51ea020bb6789367175bea01a1067869f7def351d035204c87c5362e7bc96fa"
+    },
+    "zolana-native/vendor/agave-transaction-view/ZOLANA-PROVENANCE.json": {
+      "bytes": 2875,
+      "sha256": "c46468c1e73af18259c3ca1952aba3107f2a4334af904cd6554b90f823fd1652"
+    },
+    "zolana-native/vendor/agave-transaction-view/benches/transaction_view.rs": {
+      "bytes": 8718,
+      "sha256": "b51d5ac738e3c750ea14b0bc8c0d43c65b9c888ba69e3d53edc8e0d768254690"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/address_table_lookup_frame.rs": {
+      "bytes": 12418,
+      "sha256": "5a398e77e59c9dabcf3d846a6933248eb781c7310f53295c8f4ba14db8dd5cf7"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/bytes.rs": {
+      "bytes": 15419,
+      "sha256": "237709d53034ce3dc3d2aa4e6522d2a2c3bd5b43d9def22d6caba9ef708d12ef"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/instructions_frame.rs": {
+      "bytes": 28620,
+      "sha256": "a791352486fff07907b628dcc155b60a16f495eebac3bac95bc16417f79a4f85"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/lib.rs": {
+      "bytes": 388,
+      "sha256": "c36a538c25998f73d9548da977230286a4dccbefce91f6dc8626723f555dbfdd"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/message_header_frame.rs": {
+      "bytes": 4105,
+      "sha256": "a66fa7bd26802d01af41031333ec75f91162f777ec14dd9965c959e03467d257"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/resolved_transaction_view.rs": {
+      "bytes": 25475,
+      "sha256": "ec40bd9e870c154918a2a859b96099ee97371f70aeec2f86d71ab479af78abba"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/result.rs": {
+      "bytes": 296,
+      "sha256": "54a97f0b416144e058f25d10da3b04d9094a44f65326ed69569c6c0c9cf4aba3"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/sanitize.rs": {
+      "bytes": 42496,
+      "sha256": "fe2e499e86b111742cc7bb5d496f32c570528b081b270c427e805344897e9777"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/signature_frame.rs": {
+      "bytes": 4369,
+      "sha256": "30e60729307cfaf0a52006b717627b0e71eaead793420a951af448c5879d8d4d"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/static_account_keys_frame.rs": {
+      "bytes": 3875,
+      "sha256": "b1e9193fdb67c279677acfbda7f8e71fd00c1cf5c983080c536363789995ce10"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/transaction_config_frame.rs": {
+      "bytes": 15041,
+      "sha256": "47e4cba703594ec1e336a9f692d0a82e20900290ab6f3f6312069d48ea63046f"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/transaction_data.rs": {
+      "bytes": 537,
+      "sha256": "157d5ead1c7f0fe35653cef96584dbdc0029e91abfa33ab44d9a1bcc89e0ee7a"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/transaction_frame.rs": {
+      "bytes": 37457,
+      "sha256": "e6c2444b4d3f3af50cf8934d0afc442c79a8c55e6ad4325f1dd086770d085cce"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/transaction_version.rs": {
+      "bytes": 549,
+      "sha256": "0a810bf9537099e6f88eaf9f1c379235004398062ebdb5d9e4bdf54b28f4d9bb"
+    },
+    "zolana-native/vendor/agave-transaction-view/src/transaction_view.rs": {
+      "bytes": 28021,
+      "sha256": "1c4922a837a00dec145a0b37be8eb3a54c2860d82ab33f7931e2fddf84d2f0a5"
+    },
+    "zolana-native/vendor/verify_transaction_view.py": {
+      "bytes": 974,
+      "sha256": "48a1934f0c0651d6b7c38d3843841a6c9df14906a81f54ad4f6929ab5352e4bd"
+    },
+    "zolana-native/wallet-core/Cargo.toml": {
+      "bytes": 864,
+      "sha256": "0ba69566ccbcc4343cbaefb46d93b3f2741aba1a57d7b21a8f98594d168e810b"
+    },
+    "zolana-native/wallet-core/src/history.rs": {
+      "bytes": 42363,
+      "sha256": "48de79cd19df8c1786d8ffd00d889214931ce817442344e83e3e5bf1caccf726"
+    },
+    "zolana-native/wallet-core/src/history/snapshot.rs": {
+      "bytes": 5856,
+      "sha256": "c6529164ab97f0d28318f8fc013e46daf2a65afd37e053afcfa37b0e9b21821d"
+    },
+    "zolana-native/wallet-core/src/keys.rs": {
+      "bytes": 14736,
+      "sha256": "78cfc039a75494266869f9b20468041af8395ea242d4fb36051c940b06dd3866"
+    },
+    "zolana-native/wallet-core/src/lib.rs": {
+      "bytes": 240,
+      "sha256": "4269016bc6156f5c519f4d401c9ec36395878affb908d2c206d19e08aedcec9b"
+    },
+    "zolana-native/wallet-core/src/payments.rs": {
+      "bytes": 20475,
+      "sha256": "037316172cebb7dabdca9fc2f32454ebd726ec6c5d7272034418eb0ccc56e2b0"
+    }
+  },
+  "format": "zolana-native-sdk4-delta-v1",
+  "frozen_incremental_input": {
+    "files": 15,
+    "path": ".local/browser-cash-084/vat-recovery-r1/epoch202-recovery-r1/source-input-runner-r1.json",
+    "sha256": "99c936bd90dab96b9788e7d573834f7801d99c2dfad527fd0cdd81a875a6b69f"
+  },
+  "limits": [
+    "Not an accepted runtime deployment or permission to start validators.",
+    "No keys, wallets, ledger/history, funding journal, service configuration or secrets are exported.",
+    "No node/agave or frozen LOCAL072 source/patch change.",
+    "The separate dev-bins lock remains the LOCAL072 pinned lock and is not resolved here.",
+    "Source inventory equivalence does not establish bit-identical binary rebuilding or live recovery acceptance."
+  ],
+  "lock": {
+    "after_sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+    "before_sha256": "3a62fae3b20cdb482483d4ed76d9b577edcfc57b3908b4fca15f2e48e33c9532",
+    "change": "Three direct dependencies added to existing zolana-fast-check package entry; no registry/git package version/checksum changes."
+  },
+  "revision": "LOCAL-085",
+  "revision_export": 2,
+  "scope": "Cumulative source-only LOCAL072 to LOCAL085 candidate: parallel original-checkpoint ancestry, existing quorum-runner selection, default-OFF exact epoch202 recovery, explicit202 Votor egress, linked build-info and bounded read-only copied-ledger probe.",
+  "source_reproduction": {
+    "actual_source_inventory": {
+      "path": "LOCAL-085-linux-source-inventory.json",
+      "sha256": "e78fff0241f87b9c85c6f8d07c3b4a227580e99ee97513fa36ee2b2e2bf11e75"
+    },
+    "baseline072_changed_file_inventory_verified": 90,
+    "bit_identical_binary_rebuild_claimed": false,
+    "comparison_receipt": {
+      "path": "LOCAL-085-reproduction.json",
+      "sha256": "7a5d4e6d5d3b7284b4fef2be9f24cb91fa1e9c25bce675819e3020fc3b7a6a76"
+    },
+    "full_actual_build_source_chain_inventory_verified": true,
+    "local_changed_file_after_hashes_verified": 27,
+    "local_delta_apply_check": true,
+    "regular_files_equal": 1916,
+    "separate_preparer_metadata": {
+      "zolana-candidate.json": {
+        "bytes": 16829,
+        "sha256": "d20a1d35b9c31360b00e62f0806f1470931fcefae092e4276a73d1f6d558526c"
+      }
+    },
+    "symlinks_equal": 4
+  },
+  "upstream_commit": "a203300045b405f86c9c84308b2eae76af69ac3b"
+}
