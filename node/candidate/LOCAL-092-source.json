@@ -1,0 +1,207 @@
+{
+  "actual_full_SlotMeta_source": {
+    "path": "ledger/src/blockstore_meta.rs",
+    "sha256": "5a96b5ca9258bda3942672011f3bb8c3f5dd1a8baad9fbe30fca9973d044f453",
+    "type": "SlotMeta = SlotMetaV3; full native type, not SlotMetaRepair or a local stub"
+  },
+  "application": {
+    "changed_or_added_files": 3,
+    "delta_patch": "agave-4.3.2-LOCAL-092.patch",
+    "delta_patch_sha256": "be27624c08d12df3135f512aaddbf1172b698863952206d90a63cc7179f93b0e",
+    "existing_preparer_changed": false,
+    "new_file_before_state": "must be absent",
+    "no_main_resume_Cargo_or_lock_changes": true,
+    "prepare_native_candidate_revision_supported": false,
+    "requires_independent_existing_exact_baseline_copy": true
+  },
+  "baseline": {
+    "d805_binary_sha256": "d8057e383babd37d24efd092f610595bc1dea9915aafc965c340bf9d17d97d53",
+    "kind": "exact observed inherited source",
+    "observed_inventory": {
+      "path": ".local/storage-recovery-092/actual-inventory-r1/result.json",
+      "sha256": "4c7afaabfd87f36436abae30bda967995384756d83d9cdf7ca11da5be552a45d"
+    },
+    "qualification": "These 18 original file pins are checked build prerequisites. They are not a complete inherited-source reproduction or retroactive d805 source-to-binary attestation.",
+    "required_original_file_sha256": {
+      ".cargo/config.toml": "edd80898ccf6f07afa276441a6c3a0e54770a1c77f1d5a5329a9d600f768ff99",
+      "Cargo.lock": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "Cargo.toml": "79af403c6c548193deb87fc3a2f445c626f76652b7f05a828e0a19df1ece63c8",
+      "core/src/validator.rs": "42bdecc0d3d6290119e8b567967fe9bd785df7b337324fcdb57aaf1792ebdfbe",
+      "ledger/src/blockstore.rs": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e",
+      "ledger/src/blockstore/blockstore_purge.rs": "4d1906aa1762307d2321275fcb9f6f29a9940f5b8035f6f3b0b5942035243f1a",
+      "ledger/src/blockstore/cleanup_service.rs": "e9fb44b78a8757d7f4e4001442719e40b5af52a5dbc9bc2b3012f57fdf854826",
+      "ledger/src/blockstore_meta.rs": "5a96b5ca9258bda3942672011f3bb8c3f5dd1a8baad9fbe30fca9973d044f453",
+      "ledger/src/blockstore_options.rs": "34a9be9a5f627b895c97b0359779712c148ae11b2872d845b319fad133ecd3d0",
+      "rust-toolchain.toml": "5d959dfcc98b53886ee772ba216c4f9a1b31f093b46b5b263c0d084af54e821d",
+      "zolana-fast-check/Cargo.toml": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc",
+      "zolana-fast-check/src/ancestry.rs": "38b8032cfeaea7ce5208fdf72c93883ffda1292d8502dbf47c1486da90ad2abb",
+      "zolana-fast-check/src/ancestry_parallel_tests.rs": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+      "zolana-fast-check/src/ancestry_tests.rs": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685",
+      "zolana-fast-check/src/main.rs": "44bfc8858075f5efd317374d4e55d1e07428265cc723e9ab992fdd911dc078e9",
+      "zolana-fast-check/src/restart_snapshots.rs": "eb0c2afe2e111249c34d4506ba0941a655f431af5a5e0522112a66b2122e6b68",
+      "zolana-fast-check/src/resume.rs": "9a746b879053151f174a5cf23f9e49bcf4405064268f8e437185554fe59120b2",
+      "zolana-fast-check/src/service.rs": "63a70881da25e871990c72e14cf8d309bec2067b6061e5f236ba59d7115343b0"
+    },
+    "source_input": {
+      "bytes": 2528,
+      "path": ".local/storage-recovery-092/native-build-r1/source-input.json",
+      "sha256": "fd7202a491ffd5c0207ab61bc428a20f2cf845024d026f5f03b22b336e60b0a7"
+    }
+  },
+  "candidate_status": "STAGED native metadata seam only; no deployed runtime, durable archive, resume integration or prune authorization",
+  "files": {
+    "zolana-fast-check/src/ancestry.rs": {
+      "after": {
+        "bytes": 11052,
+        "sha256": "f77e0f896f93d947e64b0b5b3b760ece7153316ecb6ff173843274d07d70848c"
+      },
+      "before": {
+        "bytes": 10320,
+        "sha256": "38b8032cfeaea7ce5208fdf72c93883ffda1292d8502dbf47c1486da90ad2abb"
+      }
+    },
+    "zolana-fast-check/src/ancestry_prefix.rs": {
+      "after": {
+        "bytes": 6075,
+        "sha256": "a8ea272566b1ef2d6c2e46e1411e532ad1983747c94848da674f13ae20acecc4"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/ancestry_prefix_tests.rs": {
+      "after": {
+        "bytes": 15558,
+        "sha256": "7df4f45666e7d8a7a3d07eb86ad75114c9f7ebf5d1957a6e3533ed5c9d877af1"
+      },
+      "before": null
+    }
+  },
+  "format": "zolana092-staged-native-ancestry-source-v1",
+  "implementation": {
+    "activation_or_prune_allowed": false,
+    "bounds": {
+      "decoder_sequence_preallocation_bytes": 65536,
+      "record_bytes": 65536,
+      "records": 4096,
+      "total_canonical_bytes": 33554432
+    },
+    "in_memory_prefix": "Private owned complete SlotMeta records; full canonical wincode roundtrip, exact/trailing-byte checks, bounded decoder allocation, all-field overlap equality, live errors fatal and missing-only approved-prefix fallback.",
+    "predicate": "Exact full metadata ancestry body extracted to verify_path_from; existing live public entry and entire parallel coordinator unchanged.",
+    "root_or_finality_evidence": "Not implemented or substituted by this prefix."
+  },
+  "permission": {
+    "cleanup_configuration_change": false,
+    "deployment": false,
+    "prune_or_delete": false,
+    "runtime_start": false,
+    "wallet_key_access": false
+  },
+  "remaining_gates": [
+    "durable full-metadata export and independently pinned domain/generation policy",
+    "original-root root/certified-hash evidence and resume integration",
+    "separate complete canonical full-transaction archive and old pending recovery",
+    "snapshot/export/prune cutoff protection and fsync publication protocol",
+    "actual snapshot-backed copy validator cold restart and crash tests",
+    "resource sizing and protected tail/headroom policy"
+  ],
+  "revision": "LOCAL-092",
+  "staged_receipts": {
+    "r1": {
+      "path": ".local/storage-recovery-092/native-seam-r1/preparation.json",
+      "sha256": "74f1b8b4331dbd2023cd6e5598698cf6ae45ed78f89910b651b61a1090dabcfd"
+    },
+    "r2": {
+      "path": ".local/storage-recovery-092/native-seam-r2/preparation.json",
+      "sha256": "783f286b5228ff420a704d7122b9e04cd7344b5da264f5feeac962e89f2cd195"
+    }
+  },
+  "unmodified_ancestry_tests": {
+    "zolana-fast-check/src/ancestry_parallel_tests.rs": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+    "zolana-fast-check/src/ancestry_tests.rs": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685"
+  },
+  "upstream_context": {
+    "commit": "a203300045b405f86c9c84308b2eae76af69ac3b",
+    "qualification": "Context of inherited source graph, not a claim this delta applies directly to pristine upstream or every earlier candidate.",
+    "version": "Agave 4.3.2"
+  },
+  "validation": {
+    "local_patch_application": {
+      "all_3_result_hashes_equal_staged_r2": true,
+      "baseline_before_hash_checked": true,
+      "check_and_apply": "git apply --no-index with Git discovery ceiling and explicit skipped-patch refusal",
+      "full_18_file_source_preparation_rehearsed": false,
+      "scope": "Disposable local three-file source delta, plus two untouched ancestry test support files; no Rust compilation.",
+      "status": "passed",
+      "unchanged_support_hashes_equal": true
+    },
+    "r1_actual_linux": {
+      "accepted_source_preserved": true,
+      "financial_operations": 0,
+      "new_prefix_tests": 12,
+      "real_dependencies": [
+        "solana-ledger",
+        "wincode 0.6.1"
+      ],
+      "result": {
+        "bytes": 6614,
+        "path": ".local/storage-recovery-092/native-build-r1/evidence/result.json",
+        "sha256": "a69140c7e4bf0e7add056e6cabad392427ae30146262504de8d12d822e21e18e"
+      },
+      "runtime_started": false,
+      "rustc": "1.97.1",
+      "status": "passed",
+      "storage": "isolated private RAM tmpfs",
+      "test_stdout": {
+        "bytes": 3903,
+        "path": ".local/storage-recovery-092/native-build-r1/evidence/tests.stdout",
+        "sha256": "f75ec92839b23575b497d8bc645dc2abae1786f84036b91691c5db0463d1b33f"
+      },
+      "tests_passed": 33,
+      "unchanged_existing_ancestry_tests": 21
+    },
+    "r2_native": {
+      "accepted_lock_sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "accepted_runtime_started": false,
+      "accepted_source_preserved": true,
+      "active_marker_absent": true,
+      "actors_before_and_after_off": true,
+      "bounded_controller_test_command_seconds": 2.0004851950216107,
+      "build_flags": [
+        "--offline",
+        "--locked",
+        "-j6",
+        "-p",
+        "zolana-fast-check",
+        "--bin",
+        "zolana-fast-check",
+        "--features",
+        "zolana-pilot-202-recovery"
+      ],
+      "collection": {
+        "bytes": 4321,
+        "path": ".local/storage-recovery-092/native-build-r2/collection.json",
+        "sha256": "55f48948e69af76b59a580b5c0d339e4cf67c3766ae40efc49c91114c4fd86ae"
+      },
+      "compile_seconds": 3.000571532000322,
+      "executed_or_passed_claim": true,
+      "harness_reported_seconds": 1.44,
+      "new_prefix_tests": 13,
+      "new_test": "ancestry::prefix::tests::standard_purge_then_reopen_preserves_merged_metadata_ancestry_only",
+      "qualification": "Actual standard purge and DB close/reopen on disposable metadata/evidence rows with SAME process-local in-memory prefix. No persistent archive reload, snapshot or validator restart, payload/transaction coverage, real ledger pruning or disk-reclamation claim.",
+      "result": {
+        "bytes": 6709,
+        "path": ".local/storage-recovery-092/native-build-r2/evidence/result.json",
+        "sha256": "3c35575a1ec327c560364a2da0526461b912abdedbbc0ab2ebed8230bb128d3e"
+      },
+      "rustc": "1.97.1",
+      "status": "passed",
+      "test_binary_sha256": "549fc55e03fa079f5498f6b201bc11c3f8722e92db2adaa357381a8ba8f83fc0",
+      "test_stdout": {
+        "bytes": 4007,
+        "path": ".local/storage-recovery-092/native-build-r2/evidence/tests.stdout",
+        "sha256": "3781e29ca1e65565dd58db04e2538866b4046cbd7cea638c9d0e66d561da3599"
+      },
+      "tests_passed": 34,
+      "unchanged_existing_ancestry_tests": 21
+    }
+  }
+}

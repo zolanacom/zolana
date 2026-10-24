@@ -1,0 +1,674 @@
+diff --git a/zolana-fast-check/src/ancestry.rs b/zolana-fast-check/src/ancestry.rs
+--- a/zolana-fast-check/src/ancestry.rs
++++ b/zolana-fast-check/src/ancestry.rs
+@@ -2,7 +2,7 @@
+ //! Each metadata read is fallible; incomplete, cancelled and timed-out paths
+ //! never count as verified. Strictly decreasing parent slots prevent cycles.
+ use {
+-    solana_ledger::blockstore::Blockstore,
++    solana_ledger::{blockstore::Blockstore, blockstore_meta::SlotMeta},
+     std::{
+         fmt,
+         panic::{AssertUnwindSafe, catch_unwind},
+@@ -88,6 +88,26 @@
+     start_slot: u64,
+     target_slot: u64,
+     deadline: Instant,
++    cancelled: impl FnMut() -> bool,
++    observed: impl FnMut(u64, u64),
++) -> Result<AncestryReport, AncestryError> {
++    verify_path_from(
++        |slot| blockstore.meta(slot),
++        start_slot,
++        target_slot,
++        deadline,
++        cancelled,
++        observed,
++    )
++}
++
++/// Same complete metadata predicate for a fallible FULL SlotMeta reader.
++/// Callers do not replace missing records with parent-slot projections.
++fn verify_path_from<E: fmt::Display>(
++    mut read_meta: impl FnMut(u64) -> Result<Option<SlotMeta>, E>,
++    start_slot: u64,
++    target_slot: u64,
++    deadline: Instant,
+     mut cancelled: impl FnMut() -> bool,
+     mut observed: impl FnMut(u64, u64),
+ ) -> Result<AncestryReport, AncestryError> {
+@@ -99,8 +119,7 @@
+         if slot < target_slot {
+             return Err(invalid("path passed below the original checkpoint".into()));
+         }
+-        let meta = blockstore
+-            .meta(slot)
++        let meta = read_meta(slot)
+             .map_err(|error| invalid(format!("cannot read metadata: {error}")))?
+             .ok_or_else(|| {
+                 invalid("metadata missing before reaching the original checkpoint".into())
+@@ -293,3 +312,7 @@
+ #[cfg(test)]
+ #[path = "ancestry_parallel_tests.rs"]
+ mod parallel_tests;
++
++// In-memory native seam only; no durable archive or resume caller is wired.
++#[path = "ancestry_prefix.rs"]
++mod prefix;
+diff --git a/zolana-fast-check/src/ancestry_prefix.rs b/zolana-fast-check/src/ancestry_prefix.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_prefix.rs
+@@ -0,0 +1,163 @@
++//! Bounded in-memory FULL SlotMeta prefix, not durable archive authorization.
++//! No root/certificate evidence, domain binding, export publication, snapshot
++//! validation or resume integration is implemented by this native test slice.
++use {
++    super::{AncestryError, AncestryReport, check_budget, verify_path_from},
++    solana_ledger::{blockstore::Blockstore, blockstore_meta::SlotMeta},
++    std::{collections::BTreeMap, fmt, time::Instant},
++};
++
++// Deliberately small first native slice, not the larger durable-export caps.
++const MAX_RECORDS: usize = 4096;
++const MAX_META_BYTES: usize = 64 * 1024;
++const MAX_PREFIX_BYTES: u64 = 32 * 1024 * 1024;
++
++fn invalid(slot: u64, reason: impl Into<String>) -> AncestryError {
++    AncestryError::Invalid {
++        slot,
++        reason: reason.into(),
++    }
++}
++
++fn encode_full_meta(meta: &SlotMeta) -> Result<Vec<u8>, AncestryError> {
++    let size = wincode::serialized_size(meta)
++        .map_err(|e| invalid(meta.slot, format!("cannot size full metadata: {e}")))?;
++    if size == 0 || size > MAX_META_BYTES as u64 {
++        return Err(invalid(meta.slot, "full metadata exceeds record bound"));
++    }
++    wincode::serialize(meta)
++        .map_err(|e| invalid(meta.slot, format!("cannot encode full metadata: {e}")))
++}
++
++fn decode_full_meta(slot: u64, raw: &[u8]) -> Result<SlotMeta, AncestryError> {
++    if raw.is_empty() || raw.len() > MAX_META_BYTES {
++        return Err(invalid(slot, "full metadata exceeds record bound"));
++    }
++    let config =
++        wincode::config::Configuration::default().with_preallocation_size_limit::<MAX_META_BYTES>();
++    let meta: SlotMeta = wincode::config::deserialize_exact(raw, config)
++        .map_err(|e| invalid(slot, format!("cannot decode full metadata: {e}")))?;
++    // Exports must contain canonical FULL V3 records. Legacy DB encodings are
++    // normalized through Blockstore::meta before export, not accepted as an
++    // abbreviated/prefix archive representation.
++    if meta.slot != slot || encode_full_meta(&meta)? != raw {
++        return Err(invalid(
++            slot,
++            "full metadata slot or canonical bytes differ",
++        ));
++    }
++    Ok(meta)
++}
++
++/// Private owned records cannot be replaced after full native validation.
++/// "Validated" means metadata/path/size only, never finality or export trust.
++pub(super) struct ValidatedPrefix {
++    original_slot: u64,
++    prune_through: u64,
++    records: BTreeMap<u64, SlotMeta>,
++}
++
++impl ValidatedPrefix {
++    pub(super) fn try_from_metadata(
++        original_slot: u64,
++        head_slot: u64,
++        prune_through: u64,
++        records: Vec<(u64, SlotMeta)>,
++        deadline: Instant,
++        mut cancelled: impl FnMut() -> bool,
++    ) -> Result<Self, AncestryError> {
++        check_budget(deadline, &mut cancelled)?;
++        if !(original_slot <= prune_through && prune_through < head_slot)
++            || records.is_empty()
++            || records.len() > MAX_RECORDS
++        {
++            return Err(invalid(
++                original_slot,
++                "invalid bounded prefix range or count",
++            ));
++        }
++        let mut total = 0u64;
++        let mut owned = BTreeMap::new();
++        for (slot, meta) in records {
++            check_budget(deadline, &mut cancelled)?;
++            if slot < original_slot || slot > head_slot || meta.slot != slot {
++                return Err(invalid(slot, "prefix metadata slot or range differs"));
++            }
++            let raw = encode_full_meta(&meta)?;
++            total = total
++                .checked_add(raw.len() as u64)
++                .ok_or_else(|| invalid(slot, "prefix byte counter overflow"))?;
++            if total > MAX_PREFIX_BYTES {
++                return Err(invalid(slot, "prefix exceeds total byte bound"));
++            }
++            let decoded = decode_full_meta(slot, &raw)?;
++            if decoded != meta {
++                return Err(invalid(slot, "full metadata roundtrip differs"));
++            }
++            check_budget(deadline, &mut cancelled)?;
++            if owned.insert(slot, decoded).is_some() {
++                return Err(invalid(slot, "duplicate prefix metadata slot"));
++            }
++        }
++        let report = verify_path_from(
++            |slot| Ok::<_, String>(owned.get(&slot).cloned()),
++            head_slot,
++            original_slot,
++            deadline,
++            &mut cancelled,
++            |_, _| {},
++        )?;
++        if report.entries != owned.len() as u64 {
++            return Err(invalid(
++                head_slot,
++                "prefix contains records outside its ancestry path",
++            ));
++        }
++        Ok(Self {
++            original_slot,
++            prune_through,
++            records: owned,
++        })
++    }
++
++    fn read_from<E: fmt::Display>(
++        &self,
++        slot: u64,
++        mut read_live: impl FnMut(u64) -> Result<Option<SlotMeta>, E>,
++    ) -> Result<Option<SlotMeta>, String> {
++        // Live decoding/storage errors are NOT a missing/pruned record.
++        let live = read_live(slot).map_err(|e| e.to_string())?;
++        let old = self.records.get(&slot);
++        match (live, old) {
++            (Some(live), Some(old)) if &live != old => {
++                Err("live/archive full metadata conflicts".into())
++            }
++            (Some(live), _) => Ok(Some(live)),
++            (None, Some(old)) if slot <= self.prune_through => Ok(Some(old.clone())),
++            // Even a complete archived record cannot fill a missing live tail
++            // above the explicitly approved prune boundary.
++            (None, _) => Ok(None),
++        }
++    }
++
++    pub(super) fn verify(
++        &self,
++        blockstore: &Blockstore,
++        start_slot: u64,
++        deadline: Instant,
++        cancelled: impl FnMut() -> bool,
++    ) -> Result<AncestryReport, AncestryError> {
++        verify_path_from(
++            |slot| self.read_from(slot, |slot| blockstore.meta(slot)),
++            start_slot,
++            self.original_slot,
++            deadline,
++            cancelled,
++            |_, _| {},
++        )
++    }
++}
++
++#[cfg(test)]
++#[path = "ancestry_prefix_tests.rs"]
++mod tests;
+diff --git a/zolana-fast-check/src/ancestry_prefix_tests.rs b/zolana-fast-check/src/ancestry_prefix_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_prefix_tests.rs
+@@ -0,0 +1,444 @@
++//! Real SlotMeta/wincode plus disposable RocksDB fixtures; no consensus, keys,
++//! snapshots, durable archive authority or actual prune is exercised here.
++use {
++    super::*,
++    crate::ancestry::verify_path,
++    std::{cell::Cell, time::Duration},
++};
++
++fn budget() -> Instant {
++    Instant::now() + Duration::from_secs(5)
++}
++
++fn meta(slot: u64, parent_slot: Option<u64>) -> SlotMeta {
++    let mut value = SlotMeta {
++        slot,
++        parent_slot,
++        consumed: 4,
++        received: 4,
++        first_shred_timestamp: 123,
++        last_index: Some(3),
++        replay_fec_set_index: 2,
++        parent_block_id: solana_sha256_hasher::hash(&slot.to_le_bytes()),
++        ..SlotMeta::default()
++    };
++    value.next_slots.push(slot + 2);
++    value.completed_data_indexes.insert(3);
++    value
++}
++
++fn records() -> Vec<(u64, SlotMeta)> {
++    vec![
++        (9, meta(9, Some(7))),
++        (7, meta(7, Some(3))),
++        (3, meta(3, None)),
++    ]
++}
++
++fn prefix() -> ValidatedPrefix {
++    ValidatedPrefix::try_from_metadata(3, 9, 7, records(), budget(), || false).unwrap()
++}
++
++fn assert_invalid<T>(result: Result<T, AncestryError>, slot: u64) {
++    assert!(matches!(result, Err(AncestryError::Invalid { slot: s, .. }) if s == slot));
++}
++
++#[test]
++fn native_full_metadata_roundtrip_rejects_wrong_slot_truncation_and_trailing() {
++    let expected = meta(9, Some(7));
++    let raw = encode_full_meta(&expected).unwrap();
++    assert_eq!(decode_full_meta(9, &raw).unwrap(), expected);
++    assert_invalid(decode_full_meta(8, &raw), 8);
++    for length in [0, 7, raw.len() - 1] {
++        assert_invalid(decode_full_meta(9, &raw[..length]), 9);
++    }
++    let mut trailing = raw.clone();
++    trailing.push(0);
++    assert_invalid(decode_full_meta(9, &trailing), 9);
++    assert_invalid(decode_full_meta(9, &vec![0; MAX_META_BYTES + 1]), 9);
++}
++
++#[test]
++fn native_decoder_bounds_hostile_sequence_length_and_encoder_bounds_full_record() {
++    let mut empty = meta(9, Some(7));
++    empty.next_slots.clear();
++    let empty_raw = encode_full_meta(&empty).unwrap();
++    let mut one = empty.clone();
++    one.next_slots.push(11);
++    let one_raw = encode_full_meta(&one).unwrap();
++    // Locate the real wincode sequence length by the first difference between
++    // two otherwise identical native values; no hand-copied SlotMeta layout.
++    let length_offset = empty_raw
++        .iter()
++        .zip(&one_raw)
++        .position(|(a, b)| a != b)
++        .unwrap();
++    assert_eq!(
++        &empty_raw[length_offset..length_offset + 8],
++        &0u64.to_le_bytes()
++    );
++    assert_eq!(
++        &one_raw[length_offset..length_offset + 8],
++        &1u64.to_le_bytes()
++    );
++    for count in [u64::MAX, (MAX_META_BYTES as u64 / 8) + 1] {
++        let mut hostile = empty_raw.clone();
++        hostile[length_offset..length_offset + 8].copy_from_slice(&count.to_le_bytes());
++        assert_invalid(decode_full_meta(9, &hostile), 9);
++    }
++    let mut huge = empty;
++    huge.next_slots
++        .extend(std::iter::repeat_n(11, MAX_META_BYTES / 8));
++    assert_invalid(encode_full_meta(&huge), 9);
++}
++
++#[test]
++fn unchanged_live_reader_and_merged_prefix_give_identical_real_blockstore_reports() {
++    let full_dir = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let tail_dir = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let full = Blockstore::open(full_dir.path()).unwrap();
++    let tail = Blockstore::open(tail_dir.path()).unwrap();
++    for (slot, value) in records()
++        .into_iter()
++        .chain([(12, meta(12, Some(9))), (15, meta(15, Some(12)))])
++    {
++        full.put_meta(slot, &value).unwrap();
++        if slot > 7 {
++            tail.put_meta(slot, &value).unwrap();
++        }
++    }
++    let expected = verify_path(&full, 15, 3, budget(), || false).unwrap();
++    let prefix = prefix();
++    assert_eq!(
++        prefix.verify(&full, 15, budget(), || false).unwrap(),
++        expected
++    );
++    assert_eq!(
++        prefix.verify(&tail, 15, budget(), || false).unwrap(),
++        expected
++    );
++    assert_invalid(verify_path(&tail, 15, 3, budget(), || false), 7);
++    assert_eq!(full.meta(7).unwrap().unwrap(), meta(7, Some(3)));
++    assert!(tail.meta(7).unwrap().is_none());
++}
++
++#[test]
++fn full_overlap_conflicts_include_fields_beyond_parent_and_slot() {
++    let prefix = prefix();
++    let expected = meta(7, Some(3));
++    let mut conflicts = Vec::new();
++    let mut value = expected.clone();
++    value.consumed += 1;
++    conflicts.push(value);
++    let mut value = expected.clone();
++    value.next_slots.push(99);
++    conflicts.push(value);
++    let mut value = expected.clone();
++    value.completed_data_indexes.insert(2);
++    conflicts.push(value);
++    let mut value = expected.clone();
++    value.replay_fec_set_index += 1;
++    conflicts.push(value);
++    let mut value = expected.clone();
++    value.parent_block_id = Default::default();
++    conflicts.push(value);
++    for value in conflicts {
++        assert_eq!(value.parent_slot, expected.parent_slot);
++        assert!(
++            prefix
++                .read_from(7, |_| Ok::<_, String>(Some(value.clone())))
++                .is_err()
++        );
++    }
++    assert_eq!(
++        prefix
++            .read_from(7, |_| Ok::<_, String>(Some(expected.clone())))
++            .unwrap(),
++        Some(expected)
++    );
++}
++
++#[test]
++fn corrupt_live_full_metadata_is_fatal_instead_of_using_archived_replacement() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    store.put_meta(9, &meta(9, Some(7))).unwrap();
++    store.put_meta_bytes(7, b"corrupt").unwrap();
++    let before = store.meta(7).unwrap_err().to_string();
++    assert_invalid(prefix().verify(&store, 9, budget(), || false), 7);
++    assert_eq!(store.meta(7).unwrap_err().to_string(), before);
++    let error = prefix()
++        .read_from(7, |_| Err::<Option<SlotMeta>, _>("live read failed"))
++        .unwrap_err();
++    assert_eq!(error, "live read failed");
++}
++
++#[test]
++fn archive_can_fill_only_missing_records_in_approved_prefix_never_missing_tail() {
++    let prefix = prefix();
++    assert_eq!(
++        prefix.read_from(7, |_| Ok::<_, String>(None)).unwrap(),
++        Some(meta(7, Some(3)))
++    );
++    assert!(
++        prefix
++            .read_from(9, |_| Ok::<_, String>(None))
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        prefix
++            .read_from(2, |_| Ok::<_, String>(None))
++            .unwrap()
++            .is_none()
++    );
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    assert_invalid(prefix.verify(&store, 9, budget(), || false), 9);
++}
++
++#[test]
++fn prefix_rejects_bad_lookup_slot_missing_or_invalid_parent_and_extra_branch() {
++    let mut cases = Vec::new();
++    let mut values = records();
++    values[0].1.slot = 8;
++    cases.push(values);
++    let mut values = records();
++    values.remove(1);
++    cases.push(values);
++    for parent in [None, Some(9), Some(10), Some(2)] {
++        let mut values = records();
++        values[0].1.parent_slot = parent;
++        cases.push(values);
++    }
++    let mut values = records();
++    values.push((8, meta(8, Some(3))));
++    cases.push(values);
++    let mut values = records();
++    values.push((7, meta(7, Some(3))));
++    cases.push(values);
++    for values in cases {
++        assert!(matches!(
++            ValidatedPrefix::try_from_metadata(3, 9, 7, values, budget(), || false),
++            Err(AncestryError::Invalid { .. })
++        ));
++    }
++}
++
++#[test]
++fn target_metadata_is_required_but_original_targets_own_parent_is_not_walked() {
++    let mut values = records();
++    values[2].1.parent_slot = Some(3);
++    let prefix = ValidatedPrefix::try_from_metadata(3, 9, 7, values, budget(), || false).unwrap();
++    assert_eq!(
++        prefix
++            .read_from(3, |_| Ok::<_, String>(None))
++            .unwrap()
++            .unwrap()
++            .parent_slot,
++        Some(3)
++    );
++    let mut values = records();
++    values.pop();
++    assert_invalid(
++        ValidatedPrefix::try_from_metadata(3, 9, 7, values, budget(), || false),
++        3,
++    );
++}
++
++#[test]
++fn callback_predicate_matches_live_error_and_invalid_parent_outcomes() {
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    store.put_meta(3, &meta(3, None)).unwrap();
++    for value in [
++        meta(9, None),
++        meta(9, Some(9)),
++        meta(9, Some(10)),
++        meta(9, Some(2)),
++    ] {
++        store.put_meta(9, &value).unwrap();
++        let live = verify_path(&store, 9, 3, budget(), || false).unwrap_err();
++        let callback =
++            verify_path_from(|s| store.meta(s), 9, 3, budget(), || false, |_, _| {}).unwrap_err();
++        assert_eq!(live.to_string(), callback.to_string());
++    }
++    store.put_meta_bytes(9, b"corrupt").unwrap();
++    let live = verify_path(&store, 9, 3, budget(), || false).unwrap_err();
++    let callback =
++        verify_path_from(|s| store.meta(s), 9, 3, budget(), || false, |_, _| {}).unwrap_err();
++    assert_eq!(live.to_string(), callback.to_string());
++}
++
++#[test]
++fn callback_checks_deadline_and_cancel_before_and_after_full_read() {
++    let called = Cell::new(false);
++    let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
++    let result = verify_path_from(
++        |_| {
++            called.set(true);
++            Ok::<_, String>(Some(meta(3, None)))
++        },
++        3,
++        3,
++        expired,
++        || false,
++        |_, _| {},
++    );
++    assert!(matches!(result, Err(AncestryError::Deadline)));
++    assert!(!called.get());
++    let result = verify_path_from(
++        |_| {
++            called.set(true);
++            Ok::<_, String>(Some(meta(3, None)))
++        },
++        3,
++        3,
++        budget(),
++        || true,
++        |_, _| {},
++    );
++    assert!(matches!(result, Err(AncestryError::Cancelled)));
++    assert!(!called.get());
++    let result = verify_path_from(
++        |_| {
++            std::thread::sleep(Duration::from_millis(40));
++            Ok::<_, String>(Some(meta(3, None)))
++        },
++        3,
++        3,
++        Instant::now() + Duration::from_millis(10),
++        || false,
++        |_, _| {},
++    );
++    assert!(matches!(result, Err(AncestryError::Deadline)));
++    let read = Cell::new(false);
++    let result = verify_path_from(
++        |_| {
++            read.set(true);
++            Ok::<_, String>(Some(meta(3, None)))
++        },
++        3,
++        3,
++        budget(),
++        || read.get(),
++        |_, _| {},
++    );
++    assert!(matches!(result, Err(AncestryError::Cancelled)));
++}
++
++#[test]
++fn prefix_total_encoded_bytes_are_bounded_before_path_acceptance() {
++    let mut values = Vec::new();
++    for slot in 1000..1600 {
++        let mut value = meta(slot, Some(slot - 1));
++        let base = wincode::serialized_size(&value).unwrap() as usize;
++        let extra = (MAX_META_BYTES - base - 16) / 8;
++        value.next_slots.extend(std::iter::repeat_n(11, extra));
++        assert!(wincode::serialized_size(&value).unwrap() <= MAX_META_BYTES as u64);
++        values.push((slot, value));
++    }
++    let error = match ValidatedPrefix::try_from_metadata(3, 2000, 999, values, budget(), || false) {
++        Err(error) => error,
++        Ok(_) => panic!("oversized prefix was accepted"),
++    };
++    assert!(
++        matches!(error, AncestryError::Invalid { ref reason, .. } if reason == "prefix exceeds total byte bound")
++    );
++}
++
++#[test]
++fn prefix_range_count_and_preparation_budget_are_bounded() {
++    for (original, head, cutoff) in [(3, 9, 2), (3, 9, 9), (10, 9, 7)] {
++        assert!(
++            ValidatedPrefix::try_from_metadata(original, head, cutoff, records(), budget(), || {
++                false
++            })
++            .is_err()
++        );
++    }
++    assert!(ValidatedPrefix::try_from_metadata(3, 9, 7, vec![], budget(), || false).is_err());
++    let many = std::iter::repeat_with(|| (3, meta(3, None)))
++        .take(MAX_RECORDS + 1)
++        .collect();
++    assert!(ValidatedPrefix::try_from_metadata(3, 9, 7, many, budget(), || false).is_err());
++    assert!(matches!(
++        ValidatedPrefix::try_from_metadata(3, 9, 7, records(), budget(), || true),
++        Err(AncestryError::Cancelled)
++    ));
++    let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
++    assert!(matches!(
++        ValidatedPrefix::try_from_metadata(3, 9, 7, records(), expired, || false),
++        Err(AncestryError::Deadline)
++    ));
++}
++
++#[test]
++fn standard_purge_then_reopen_preserves_merged_metadata_ancestry_only() {
++    use solana_ledger::blockstore::PurgeType;
++
++    let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++    let store = Blockstore::open(directory.path()).unwrap();
++    let all: Vec<_> = records()
++        .into_iter()
++        .chain([(12, meta(12, Some(9))), (15, meta(15, Some(12)))])
++        .collect();
++    let slots: Vec<_> = all.iter().map(|(slot, _)| *slot).collect();
++    for (slot, value) in &all {
++        store.put_meta(*slot, value).unwrap();
++        let hash = solana_sha256_hasher::hash(&slot.to_le_bytes());
++        store.insert_bank_hash(*slot, hash, true);
++        store
++            .insert_optimistic_slot(*slot, &hash, *slot as i64)
++            .unwrap();
++    }
++    // These are disposable DB rows, not consensus-generated certificates.
++    store.set_roots(slots.iter()).unwrap();
++    for (slot, value) in &all {
++        let hash = solana_sha256_hasher::hash(&slot.to_le_bytes());
++        assert_eq!(store.meta(*slot).unwrap().as_ref(), Some(value));
++        assert!(store.is_root(*slot));
++        assert_eq!(
++            store.get_optimistic_slot(*slot).unwrap(),
++            Some((hash, *slot as i64))
++        );
++        assert_eq!(store.get_bank_hash(*slot), Some(hash));
++    }
++    let before = verify_path(&store, 15, 3, budget(), || false).unwrap();
++    let prefix = prefix(); // Same in-memory object survives the DB close/reopen.
++    assert_eq!(
++        prefix.verify(&store, 15, budget(), || false).unwrap(),
++        before
++    );
++    let check = |db: &Blockstore| {
++        for slot in [3, 7] {
++            assert!(db.meta(slot).unwrap().is_none());
++            assert!(!db.is_root(slot));
++            assert!(db.get_optimistic_slot(slot).unwrap().is_none());
++            assert!(db.get_bank_hash(slot).is_none());
++        }
++        for (slot, value) in all.iter().filter(|(slot, _)| *slot > 7) {
++            let hash = solana_sha256_hasher::hash(&slot.to_le_bytes());
++            assert_eq!(db.meta(*slot).unwrap().as_ref(), Some(value));
++            assert!(db.is_root(*slot));
++            assert_eq!(
++                db.get_optimistic_slot(*slot).unwrap(),
++                Some((hash, *slot as i64))
++            );
++            assert_eq!(db.get_bank_hash(*slot), Some(hash));
++        }
++        assert_invalid(verify_path(db, 15, 3, budget(), || false), 7);
++        assert_eq!(prefix.verify(db, 15, budget(), || false).unwrap(), before);
++    };
++    // Exact upstream API with inclusive [0, 7], no chaining cleanup or custom
++    // CF deletion, no compaction-forcing or modification of protected head 9.
++    // This fixture has metadata/evidence rows only: no shreds or transaction
++    // special columns, so it does NOT establish payload/tx archive coverage.
++    store.purge_slots(0, 7, PurgeType::Exact).unwrap();
++    check(&store);
++    drop(store);
++    let reopened = Blockstore::open(directory.path()).unwrap();
++    check(&reopened);
++    // This checks process-local prefix reuse plus DB reopen only. It does NOT
++    // serialize/reload the prefix, restore a snapshot, or restart a validator.
++}

@@ -1,0 +1,637 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -14495,6 +14495,7 @@
+  "solana-signature",
+  "solana-signer",
+  "solana-system-transaction",
++ "solana-transaction-status",
+  "solana-transaction-status-client-types",
+  "solana-unified-scheduler-pool",
+  "wincode",
+diff --git a/zolana-fast-check/Cargo.toml b/zolana-fast-check/Cargo.toml
+--- a/zolana-fast-check/Cargo.toml
++++ b/zolana-fast-check/Cargo.toml
+@@ -46,6 +46,7 @@
+ solana-sdk-ids = { workspace = true }
+ solana-system-transaction = { workspace = true }
+ solana-transaction-status-client-types = { workspace = true }
++solana-transaction-status = { workspace = true }
+ wincode = { workspace = true }
+ 
+ solana-shred-version = { workspace = true }
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -10,6 +10,7 @@
+ mod ancestry_tests;
+ mod build_info;
+ mod offline_probe;
++mod offline_canonical;
+ mod restart_snapshots;
+ mod resume;
+ mod service;
+@@ -1145,6 +1146,9 @@
+ }
+ 
+ fn main() -> Result<()> {
++    if offline_canonical::maybe_run()? {
++        return Ok(());
++    }
+     if build_info::maybe_print()? {
+         return Ok(());
+     }
+diff --git a/zolana-fast-check/src/offline_canonical.rs b/zolana-fast-check/src/offline_canonical.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/offline_canonical.rs
+@@ -0,0 +1,589 @@
++//! Fixed paused-pilot canonical export. No validator, replay, accounts or key API.
++//! The operator's read-only namespace and stopped-actor checks are external gates.
++use {
++    anyhow::{Context, Result, bail, ensure},
++    serde_json::{Value, json},
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++    },
++    solana_transaction_status::{BlockEncodingOptions, ConfirmedBlock},
++    solana_transaction_status_client_types::{TransactionDetails, UiTransactionEncoding},
++    std::{
++        fs::{self, File, OpenOptions},
++        io::{self, BufRead, BufReader, Read, Write},
++        os::{
++            fd::{AsRawFd, FromRawFd},
++            unix::fs::{MetadataExt, OpenOptionsExt},
++        },
++        path::Path,
++        time::{Duration, Instant},
++    },
++};
++
++const FLAG: &str = "--offline-canonical-export";
++const ROOT: &str = "/var/lib/zolana-vat-085-r1/network";
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++const RESUME_SHA: &str = "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a";
++const ORIGINAL_SLOT: u64 = 44;
++const ORIGINAL_BANK: &str = "4KPfPytMfQtVoHrT3buic6vACAvww5DQbhZyFLvnW1JV";
++const LEDGERS: [&str; 3] = [
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-HjbHskvn6Tos8quAv6VjvCwxFDykuBF7KiPYvmmnbaWU",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-A52FF9Tk89Fx9E2NYqvtGBr7SE9gVMPWgWLzjf6i5WxD",
++];
++const IDENTITIES: [&str; 3] = [
++    "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
++    "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
++    "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
++];
++const REQUEST_LIMIT: usize = 4096;
++const BLOCK_LIMIT: usize = 8 * 1024 * 1024;
++const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
++const LIFETIME: Duration = Duration::from_secs(600);
++const MAX_REQUESTS: usize = 1_000_000;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Call {
++    Genesis,
++    Slot,
++    Slots(u64),
++    Block(u64, bool),
++}
++
++fn selected(args: &[String]) -> Result<bool> {
++    let present = args.iter().any(|arg| arg == FLAG);
++    if present {
++        ensure!(args.len() == 1, "offline export takes only its fixed flag");
++    }
++    Ok(present)
++}
++
++fn parse(value: &Value) -> Result<Call> {
++    let object = value.as_object().context("request must be an object")?;
++    ensure!(
++        object.len() == 4
++            && ["jsonrpc", "id", "method", "params"]
++                .iter()
++                .all(|key| object.contains_key(*key))
++            && value["jsonrpc"] == "2.0"
++            && value["id"].as_u64() == Some(1),
++        "fixed RPC envelope required"
++    );
++    let params = value["params"]
++        .as_array()
++        .context("fixed params required")?;
++    let header = json!({"transactionDetails":"none","rewards":false,"commitment":"finalized"});
++    let full = json!({"encoding":"base64","transactionDetails":"full","rewards":false,
++        "commitment":"finalized","maxSupportedTransactionVersion":0});
++    match value["method"].as_str() {
++        Some("getGenesisHash") if params.is_empty() => Ok(Call::Genesis),
++        Some("getSlot") if value["params"] == json!([{"commitment":"finalized"}]) => Ok(Call::Slot),
++        Some("getBlocksWithLimit")
++            if params.len() == 3
++                && params[1].as_u64() == Some(16)
++                && params[2] == json!({"commitment":"finalized"}) =>
++        {
++            let start = params[0].as_u64().context("unsigned start required")?;
++            ensure!(start > 0, "positive start required");
++            Ok(Call::Slots(start))
++        }
++        Some("getBlock") if params.len() == 2 && (params[1] == header || params[1] == full) => {
++            let slot = params[0].as_u64().context("unsigned slot required")?;
++            ensure!(slot > 0, "positive slot required");
++            Ok(Call::Block(slot, params[1] == full))
++        }
++        _ => bail!("offline RPC method or parameters denied"),
++    }
++}
++
++fn bounded_json(value: &Value, limit: usize) -> Result<Vec<u8>> {
++    struct Bounded {
++        bytes: Vec<u8>,
++        limit: usize,
++    }
++    impl Write for Bounded {
++        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
++            if data.len() > self.limit.saturating_sub(self.bytes.len()) {
++                return Err(io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "JSON output bound",
++                ));
++            }
++            self.bytes.extend_from_slice(data);
++            Ok(data.len())
++        }
++        fn flush(&mut self) -> io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut output = Bounded {
++        bytes: Vec::new(),
++        limit,
++    };
++    serde_json::to_writer(&mut output, value)?;
++    Ok(output.bytes)
++}
++
++fn encode_block(block: ConfirmedBlock, full: bool) -> Result<Value> {
++    Ok(serde_json::to_value(block.encode_with_options(
++        UiTransactionEncoding::Base64,
++        BlockEncodingOptions {
++            transaction_details: if full {
++                TransactionDetails::Full
++            } else {
++                TransactionDetails::None
++            },
++            show_rewards: false,
++            max_supported_transaction_version: if full { Some(0) } else { None },
++        },
++    )?)?)
++}
++
++fn deadline(deadline: Instant) -> Result<()> {
++    ensure!(
++        Instant::now() < deadline,
++        "offline export lifetime exceeded"
++    );
++    Ok(())
++}
++
++fn wait_fd(fd: i32, events: i16, end: Instant) -> Result<()> {
++    loop {
++        deadline(end)?;
++        let millis = end
++            .saturating_duration_since(Instant::now())
++            .as_millis()
++            .clamp(1, i32::MAX as u128) as i32;
++        let mut p = libc::pollfd {
++            fd,
++            events,
++            revents: 0,
++        };
++        let n = unsafe { libc::poll(&mut p, 1, millis) };
++        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
++            continue;
++        }
++        ensure!(n >= 0, "offline stdio poll failed");
++        if n == 0 {
++            continue;
++        }
++        ensure!(
++            p.revents & (libc::POLLERR | libc::POLLNVAL) == 0,
++            "offline stdio unavailable"
++        );
++        ensure!(
++            p.revents & (events | libc::POLLHUP) != 0,
++            "offline stdio not ready"
++        );
++        return Ok(());
++    }
++}
++
++fn line(reader: &mut BufReader<File>, end: Instant) -> Result<Option<Vec<u8>>> {
++    let mut result = Vec::new();
++    loop {
++        deadline(end)?;
++        if reader.buffer().is_empty() {
++            wait_fd(reader.get_ref().as_raw_fd(), libc::POLLIN, end)?;
++        }
++        let available = reader.fill_buf()?;
++        if available.is_empty() {
++            ensure!(result.is_empty(), "incomplete offline request line");
++            return Ok(None);
++        }
++        let amount = available
++            .iter()
++            .position(|b| *b == b'\n')
++            .map(|n| n + 1)
++            .unwrap_or(available.len());
++        ensure!(
++            result.len() + amount <= REQUEST_LIMIT,
++            "offline request exceeds bound"
++        );
++        let complete = available[amount - 1] == b'\n';
++        result.extend_from_slice(&available[..amount]);
++        reader.consume(amount);
++        if complete {
++            return Ok(Some(result));
++        }
++    }
++}
++
++fn output(file: &mut File, raw: &[u8], end: Instant) -> Result<()> {
++    for mut chunk in raw.chunks(4096) {
++        while !chunk.is_empty() {
++            wait_fd(file.as_raw_fd(), libc::POLLOUT, end)?;
++            match file.write(chunk) {
++                Ok(0) => bail!("offline output closed"),
++                Ok(n) => chunk = &chunk[n..],
++                Err(e)
++                    if matches!(
++                        e.kind(),
++                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
++                    ) => {}
++                Err(e) => return Err(e.into()),
++            }
++        }
++    }
++    deadline(end)
++}
++
++fn certificate(store: &Blockstore, slot: u64) -> Result<String> {
++    ensure!(store.is_root(slot), "certified slot root bit missing");
++    let (hash, _) = store
++        .get_optimistic_slot(slot)?
++        .context("certified BANK hash missing")?;
++    ensure!(
++        store
++            .get_bank_hash(slot)
++            .is_none_or(|actual| actual == hash),
++        "certified and replay BANK hashes differ"
++    );
++    Ok(hash.to_string())
++}
++
++fn private_directory(path: &Path) -> Result<()> {
++    let meta = fs::symlink_metadata(path)?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == 995
++            && meta.mode() & 0o022 == 0,
++        "fixed owned directory required"
++    );
++    Ok(())
++}
++
++fn resume_identity(root: &Path) -> Result<()> {
++    let path = root.join("resume.json");
++    let mut file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(&path)?;
++    let meta = file.metadata()?;
++    ensure!(
++        meta.is_file()
++            && meta.uid() == 995
++            && meta.nlink() == 1
++            && meta.len() <= 65536
++            && meta.mode() & 0o077 == 0,
++        "fixed private resume evidence required"
++    );
++    let mut bytes = Vec::new();
++    Read::by_ref(&mut file)
++        .take(65537)
++        .read_to_end(&mut bytes)?;
++    let sha = solana_sha256_hasher::hash(&bytes)
++        .to_bytes()
++        .iter()
++        .map(|b| format!("{b:02x}"))
++        .collect::<String>();
++    ensure!(
++        bytes.len() as u64 == meta.len() && sha == RESUME_SHA,
++        "original resume identity pin differs"
++    );
++    // Public metadata only; never call Manifest::load, FileVoteHistoryStorage,
++    // a Keypair loader or any identity/voter filename stored inside this JSON.
++    let value: Value = serde_json::from_slice(&bytes)?;
++    let nodes = value["nodes"]
++        .as_array()
++        .context("fixed peer metadata missing")?;
++    ensure!(
++        nodes.len() == 3 && value["genesis_hash"] == GENESIS,
++        "fixed original network required"
++    );
++    for (i, node) in nodes.iter().enumerate() {
++        ensure!(
++            node["identity"] == IDENTITIES[i]
++                && node["ledger"] == LEDGERS[i]
++                && node["root_slot"].as_u64() == Some(ORIGINAL_SLOT)
++                && node["root_bank_hash"] == ORIGINAL_BANK,
++            "fixed original peer identity or root differs"
++        );
++    }
++    Ok(())
++}
++
++struct Export {
++    stores: Vec<Blockstore>,
++    target: u64,
++    end: Instant,
++}
++impl Export {
++    fn open(end: Instant) -> Result<Self> {
++        ensure!(
++            unsafe { libc::geteuid() } == 995,
++            "fixed original read-only owner required"
++        );
++        let root = Path::new(ROOT);
++        private_directory(root)?;
++        resume_identity(root)?;
++        let mut stores = Vec::new();
++        for relative in LEDGERS {
++            deadline(end)?;
++            let ledger = root.join(relative);
++            private_directory(&ledger)?;
++            private_directory(&ledger.join("rocksdb"))?;
++            ensure!(
++                GenesisConfig::load(&ledger)?.hash().to_string() == GENESIS,
++                "original genesis differs"
++            );
++            let store = Blockstore::open_with_options(
++                &ledger,
++                BlockstoreOptions {
++                    access_type: AccessType::ReadOnly,
++                    ..BlockstoreOptions::default()
++                },
++            )?;
++            ensure!(!store.is_primary_access(), "read-only blockstore required");
++            ensure!(
++                certificate(&store, ORIGINAL_SLOT)? == ORIGINAL_BANK,
++                "original certified root changed"
++            );
++            stores.push(store);
++        }
++        let target = stores
++            .iter()
++            .map(Blockstore::max_root)
++            .min()
++            .context("three fixed sources required")?;
++        ensure!(
++            target >= ORIGINAL_SLOT,
++            "positive certified target required"
++        );
++        let hash = certificate(&stores[0], target)?;
++        for store in &stores {
++            ensure!(
++                certificate(store, target)? == hash,
++                "peer certified target BANK hashes differ"
++            );
++        }
++        let export = Self {
++            stores,
++            target,
++            end,
++        };
++        export.block(target, true)?; // Fixed E must have complete identical transaction metadata now.
++        deadline(end)?;
++        Ok(export)
++    }
++
++    fn block(&self, slot: u64, full: bool) -> Result<Value> {
++        ensure!(
++            slot > 0 && slot <= self.target,
++            "block exceeds fixed finalized target"
++        );
++        let mut agreed = None;
++        for store in &self.stores {
++            deadline(self.end)?;
++            ensure!(store.is_root(slot), "canonical block root missing");
++            // Same actual RPC conversion and encoder, including execution meta,
++            // blockTime/height, versioned transactions and reward omission.
++            let block: ConfirmedBlock = store.get_complete_block(slot, true)?.into();
++            let value = encode_block(block, full)?;
++            ensure!(
++                value["blockHeight"]
++                    .as_u64()
++                    .is_some_and(|height| height > 0)
++                    && value["parentSlot"]
++                        .as_u64()
++                        .is_some_and(|parent| parent < slot),
++                "complete block height/parent required"
++            );
++            bounded_json(&value, BLOCK_LIMIT)?;
++            if let Some(previous) = &agreed {
++                ensure!(
++                    *previous == value,
++                    "peer full canonical block bodies differ"
++                );
++            } else {
++                agreed = Some(value);
++            }
++        }
++        deadline(self.end)?;
++        agreed.context("three fixed sources required")
++    }
++
++    fn call(&self, call: Call) -> Result<Value> {
++        deadline(self.end)?;
++        match call {
++            Call::Genesis => Ok(json!(GENESIS)),
++            Call::Slot => Ok(json!(self.target)),
++            Call::Block(slot, full) => self.block(slot, full),
++            Call::Slots(start) => {
++                let mut agreed = None;
++                for store in &self.stores {
++                    deadline(self.end)?;
++                    let slots = store
++                        .rooted_slot_iterator(start)?
++                        .take_while(|s| *s <= self.target)
++                        .take(16)
++                        .collect::<Vec<_>>();
++                    ensure!(
++                        slots.windows(2).all(|pair| pair[0] < pair[1])
++                            && slots.iter().all(|slot| *slot >= start),
++                        "invalid rooted range"
++                    );
++                    if let Some(previous) = &agreed {
++                        ensure!(*previous == slots, "peer rooted ranges differ");
++                    } else {
++                        agreed = Some(slots);
++                    }
++                }
++                Ok(json!(agreed.context("three fixed sources required")?))
++            }
++        }
++    }
++}
++
++pub(super) fn maybe_run() -> Result<bool> {
++    if !selected(&std::env::args().skip(1).collect::<Vec<_>>())? {
++        return Ok(false);
++    }
++    let end = Instant::now() + LIFETIME;
++    let exporter = Export::open(end)?;
++    let in_fd = unsafe { libc::dup(libc::STDIN_FILENO) };
++    ensure!(in_fd >= 0, "stdin duplication failed");
++    let out_fd = unsafe { libc::dup(libc::STDOUT_FILENO) };
++    if out_fd < 0 {
++        unsafe { libc::close(in_fd) };
++        bail!("stdout duplication failed");
++    }
++    let mut input = BufReader::new(unsafe { File::from_raw_fd(in_fd) });
++    let mut out = unsafe { File::from_raw_fd(out_fd) };
++    let flags = unsafe { libc::fcntl(out.as_raw_fd(), libc::F_GETFL) };
++    ensure!(
++        flags >= 0
++            && unsafe { libc::fcntl(out.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
++                == 0,
++        "bounded nonblocking stdout required"
++    );
++    for _ in 0..MAX_REQUESTS {
++        let Some(raw) = line(&mut input, end)? else {
++            return Ok(true);
++        };
++        let value: Value = serde_json::from_slice(&raw)?;
++        let response = json!({"jsonrpc":"2.0","id":1,"result":exporter.call(parse(&value)?)?});
++        let mut bytes = bounded_json(&response, RESPONSE_LIMIT - 1)?;
++        bytes.push(b'\n');
++        output(&mut out, &bytes, end)?;
++    }
++    bail!("offline canonical request count exhausted")
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn request(method: &str, params: Value) -> Value {
++        json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
++    }
++    #[test]
++    fn fixed_flag_cannot_mix_with_live_or_path_options() {
++        assert!(!selected(&[]).unwrap());
++        assert!(selected(&[FLAG.into()]).unwrap());
++        for extra in ["--service", "--resume-root", "--root", "--build-info", FLAG] {
++            assert!(selected(&[FLAG.into(), extra.into()]).is_err());
++        }
++    }
++    #[test]
++    fn only_four_fixed_finalized_read_shapes() {
++        assert_eq!(
++            parse(&request("getGenesisHash", json!([]))).unwrap(),
++            Call::Genesis
++        );
++        assert_eq!(
++            parse(&request("getSlot", json!([{"commitment":"finalized"}]))).unwrap(),
++            Call::Slot
++        );
++        assert_eq!(
++            parse(&request(
++                "getBlocksWithLimit",
++                json!([u64::MAX,16,{"commitment":"finalized"}])
++            ))
++            .unwrap(),
++            Call::Slots(u64::MAX)
++        );
++        for (details, full) in [("none", false), ("full", true)] {
++            let mut config =
++                json!({"transactionDetails":details,"rewards":false,"commitment":"finalized"});
++            if full {
++                config["encoding"] = json!("base64");
++                config["maxSupportedTransactionVersion"] = json!(0);
++            }
++            assert_eq!(
++                parse(&request("getBlock", json!([1, config]))).unwrap(),
++                Call::Block(1, full)
++            );
++        }
++        for (method, params) in [
++            ("sendTransaction", json!(["fake"])),
++            ("getSlot", json!([])),
++            ("getSlot", json!([{"commitment":"processed"}])),
++            ("getGenesisHash", json!([1])),
++            (
++                "getBlocksWithLimit",
++                json!([1,true,{"commitment":"finalized"}]),
++            ),
++            (
++                "getBlocksWithLimit",
++                json!([0,16,{"commitment":"finalized"}]),
++            ),
++            (
++                "getBlock",
++                json!([1,{"transactionDetails":"none","rewards":0,"commitment":"finalized"}]),
++            ),
++            (
++                "getBlock",
++                json!([true,{"transactionDetails":"none","rewards":false,"commitment":"finalized"}]),
++            ),
++        ] {
++            assert!(parse(&request(method, params)).is_err());
++        }
++        let mut value = request("getGenesisHash", json!([]));
++        value["path"] = json!("elsewhere");
++        assert!(parse(&value).is_err());
++        value = request("getGenesisHash", json!([]));
++        value["id"] = json!(true);
++        assert!(parse(&value).is_err());
++    }
++    #[test]
++    fn output_bound_is_enforced_during_serialization() {
++        assert_eq!(bounded_json(&json!("x"), 3).unwrap(), b"\"x\"");
++        assert!(bounded_json(&json!("xx"), 3).is_err());
++        assert!(deadline(Instant::now() - Duration::from_millis(1)).is_err());
++    }
++
++    #[test]
++    fn actual_rpc_encoder_preserves_header_and_empty_full_transactions() {
++        let block = ConfirmedBlock {
++            previous_blockhash: GENESIS.into(),
++            blockhash: ORIGINAL_BANK.into(),
++            parent_slot: 43,
++            transactions: vec![],
++            rewards: vec![],
++            num_partitions: Some(3),
++            block_time: Some(1_700_000_000),
++            block_height: Some(44),
++        };
++        let full = encode_block(block.clone(), true).unwrap();
++        let header = encode_block(block, false).unwrap();
++        assert_eq!(full["transactions"], json!([]));
++        assert!(header.get("transactions").is_none());
++        for key in [
++            "blockhash",
++            "previousBlockhash",
++            "parentSlot",
++            "blockTime",
++            "blockHeight",
++            "numRewardPartitions",
++        ] {
++            assert_eq!(header[key], full[key]);
++        }
++        assert_eq!(header["blockTime"], json!(1_700_000_000));
++        assert_eq!(header["numRewardPartitions"], json!(3));
++        assert!(header.get("rewards").is_none() && full.get("rewards").is_none());
++    }
++}

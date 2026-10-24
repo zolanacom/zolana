@@ -1,0 +1,181 @@
+{
+  "application": {
+    "baseline_revision": "exact LOCAL-093 after-state",
+    "changed_or_added_files": 4,
+    "delta_patch": "agave-4.3.2-LOCAL-094.patch",
+    "delta_patch_sha256": "b2a577f007bb5ef5a42bea0be36e5458c20a7898d062a39eaceaeac4d65b595c",
+    "existing_preparer_changed": false,
+    "predecessor_patch": {
+      "bytes": 159784,
+      "path": "node/candidate/agave-4.3.2-LOCAL-093.patch",
+      "sha256": "03164976925a02677ef90b7ed21cd42014b6b6aad9ff0f8027fc5d46797a1ab7"
+    },
+    "predecessor_source": {
+      "bytes": 23425,
+      "path": "node/candidate/LOCAL-093-source.json",
+      "sha256": "b95cedb5202686e83cb40595bc91c41a80575b082ec26788188a4dd6dc593ed3"
+    },
+    "prepare_native_candidate_revision_supported": false,
+    "requires_independent_existing_exact_baseline_copy": true
+  },
+  "baseline": {
+    "kind": "exact observed inherited source with LOCAL-092 and LOCAL-093 applied",
+    "qualification": "These before/after pins and the observed compiled source inventory are not a complete reproduction or retroactive d805 source-to-binary attestation.",
+    "required_file_sha256": {
+      ".cargo/config.toml": "edd80898ccf6f07afa276441a6c3a0e54770a1c77f1d5a5329a9d600f768ff99",
+      "Cargo.lock": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "Cargo.toml": "79af403c6c548193deb87fc3a2f445c626f76652b7f05a828e0a19df1ece63c8",
+      "core/src/validator.rs": "42bdecc0d3d6290119e8b567967fe9bd785df7b337324fcdb57aaf1792ebdfbe",
+      "ledger/src/blockstore.rs": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e",
+      "ledger/src/blockstore/blockstore_purge.rs": "4d1906aa1762307d2321275fcb9f6f29a9940f5b8035f6f3b0b5942035243f1a",
+      "ledger/src/blockstore/cleanup_service.rs": "e9fb44b78a8757d7f4e4001442719e40b5af52a5dbc9bc2b3012f57fdf854826",
+      "ledger/src/blockstore_meta.rs": "5a96b5ca9258bda3942672011f3bb8c3f5dd1a8baad9fbe30fca9973d044f453",
+      "ledger/src/blockstore_options.rs": "34a9be9a5f627b895c97b0359779712c148ae11b2872d845b319fad133ecd3d0",
+      "rpc/src/rpc.rs": "f51afe1a27fe487faf4d96f08ac5f14a42eb57dc1cc0ce121444b0490956eacb",
+      "rust-toolchain.toml": "5d959dfcc98b53886ee772ba216c4f9a1b31f093b46b5b263c0d084af54e821d",
+      "transaction-status/src/lib.rs": "c7b2938bcfe744f6afd83386b97640b23d2dc7570185c388ee9f28b2fa28e676",
+      "zolana-fast-check/Cargo.toml": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc",
+      "zolana-fast-check/src/ancestry.rs": "818d16af05549bf7885b5c0a5c8674df9d319cd9845b9445e4a40986f14a0f71",
+      "zolana-fast-check/src/ancestry_archive.rs": "3a36313567e7bdac13f465604536b1d155a5696ad1f8306a37305f1f4ef47cee",
+      "zolana-fast-check/src/ancestry_archive_tests.rs": "9bea3653e422bbafe0e0f7fa8a1640e4c2e124268ca5448de56674c168b44ed9",
+      "zolana-fast-check/src/ancestry_parallel_tests.rs": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+      "zolana-fast-check/src/ancestry_prefix.rs": "65f3385d750c10729d1ad0f41d3d41bef6bdace66c5c5d47f999e1bc6fe4efd5",
+      "zolana-fast-check/src/ancestry_prefix_tests.rs": "7df4f45666e7d8a7a3d07eb86ad75114c9f7ebf5d1957a6e3533ed5c9d877af1",
+      "zolana-fast-check/src/ancestry_tests.rs": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685",
+      "zolana-fast-check/src/main.rs": "34c53883475c6ae3055e238a73bf83a3c41c252d94fec63638a0965ee91e86a6",
+      "zolana-fast-check/src/restart_snapshots.rs": "b22d0848cd02157d02b7a83fe0dfa3cca84b55feed641a606d615cf7313991f5",
+      "zolana-fast-check/src/resume.rs": "7c96a289ea592d363f51a505d7b8a25434266cbca3e296da93a4313df42a023b",
+      "zolana-fast-check/src/service.rs": "63a70881da25e871990c72e14cf8d309bec2067b6061e5f236ba59d7115343b0"
+    }
+  },
+  "candidate_status": "source package; isolated Linux offline/locked build and 71 native tests passed; actual paused-pilot capture not yet accepted",
+  "dependency_graph": {
+    "after_sha256": "8989b37ae537c1d28f0c45d7b385da135381a562bb6160467153b2edb39e8f21",
+    "all_other_tomllib_fields_exact": true,
+    "before_sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+    "new_packages_versions_sources_checksums_or_resolutions": 0,
+    "only_change": "zolana-fast-check dependencies adds existing solana-transaction-status 4.3.2 edge"
+  },
+  "external_execution_gates": [
+    "all existing actors stopped and disabled marker absent before and after",
+    "kernel ReadOnlyPaths or BindReadOnlyPaths on all original pilot state; no runtime/execution/snapshot/keys operations",
+    "root-owned bounded PrivateNetwork unit lifetime; no public listener",
+    "before/after original key/resume/history/ledger metadata evidence by root",
+    "no complete-coverage/prune permission from partial rolling capture",
+    "native exact API compile --offline --locked using exact edge-only staged Cargo.lock plus prepared focused tests before execution"
+  ],
+  "files": {
+    "Cargo.lock": {
+      "after": {
+        "bytes": 337482,
+        "sha256": "8989b37ae537c1d28f0c45d7b385da135381a562bb6160467153b2edb39e8f21"
+      },
+      "before": {
+        "bytes": 337452,
+        "sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7"
+      }
+    },
+    "zolana-fast-check/Cargo.toml": {
+      "after": {
+        "bytes": 2077,
+        "sha256": "391db670347ebfa64d59e6bf98f3f8dabc733bf6e3c32cc3bac61ea2ff1a94dc"
+      },
+      "before": {
+        "bytes": 2028,
+        "sha256": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc"
+      }
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after": {
+        "bytes": 51938,
+        "sha256": "6516a7881f86fb9b11cb91ec3b9c5ba02570941b040f054c111b3f606b82b81e"
+      },
+      "before": {
+        "bytes": 51845,
+        "sha256": "34c53883475c6ae3055e238a73bf83a3c41c252d94fec63638a0965ee91e86a6"
+      }
+    },
+    "zolana-fast-check/src/offline_canonical.rs": {
+      "after": {
+        "bytes": 20853,
+        "sha256": "9f59928fa8074593f471231e9fc3f8eda4a97c52dfc12e25263da5f3d2218d2a"
+      },
+      "before": null
+    }
+  },
+  "format": "zolana094-native-offline-export-source-v1",
+  "implementation": {
+    "body": "actual get_complete_block into ConfirmedBlock and actual upstream encode_with_options, Base64 full transactions plus execution metadata; full bodies/header/rooted ranges must agree on all three peers",
+    "bounds": {
+      "full_block_bytes": 8388608,
+      "lifetime_seconds": 600,
+      "maximum_requests": 1000000,
+      "range_produced_blocks": 16,
+      "request_line_bytes": 4096,
+      "response_line_bytes": 16777216
+    },
+    "dispatch": "single exact --offline-canonical-export flag before ordinary runtime dispatch; mixed runtime/path flags refuse",
+    "runtime_actions": "no validator start, replay, AccountsDb, snapshot generation, purge or key loader in exporter path",
+    "source": "three fixed original paused-pilot Blockstores with AccessType::ReadOnly; fixed UID/path/network/genesis/original resume and certified root evidence",
+    "target": "min static max_root across all three fixed read-only Blockstores; all peer root/certified BANK hash and optional replay hash agree",
+    "transport": "bounded stdin/stdout JSON-RPC only; four fixed finalized read shapes; no socket/listener/new authentication or requester-selected path",
+    "trust": "Same trusted operator RPC model; certified BANK evidence is not a new light-client proof and output checksum is not consensus certification."
+  },
+  "permission": "Source preparation only. No deployment, host activation, keys, wallet changes, financial operations or pruning/deletion is authorized by this package.",
+  "preparation": {
+    "bytes": 4402,
+    "path": ".local/archive-scale-094/offline-native-r1/preparation.json",
+    "sha256": "657133e3e802151b442551301e96e9a051ddc24cfdc311d51c2e03e3cf8710f0"
+  },
+  "remaining_gates": [
+    "root-reviewed isolated read-only actual pilot export/capture and before/after evidence",
+    "rolling serving/capture service activation remains separate from source packaging",
+    "existing-pilot pruning, deletion, automatic cleanup and capacity policy are not authorized or accepted"
+  ],
+  "revision": "LOCAL-094",
+  "validation": {
+    "accepted_runtime_started": false,
+    "accepted_source_modified": false,
+    "actual_pilot_capture": "not accepted or claimed by this source package; no result available when packaged",
+    "collection": {
+      "bytes": 4899,
+      "path": ".local/archive-scale-094/native-build-r1/collection.json",
+      "sha256": "621b94578057e1c386c3a1ecfbad688fcda48d06465a365a85d953af7aebfabe"
+    },
+    "compiled_runner_sha256": "12763a765304f423ba583f6a80ffe0247ca386ef2ada18786f188a8e64d8a1d0",
+    "compiled_source_manifest": {
+      "bytes": 254446,
+      "path": ".local/archive-scale-094/native-build-r1/evidence/compiled-source-manifest.json",
+      "sha256": "87fdca263765f3e04ca32763c938c40ae118b771c3fa142be5b02340404e10d4"
+    },
+    "financial_operations": 0,
+    "local_patch_check": {
+      "Mac_build_or_host_execution": false,
+      "all_four_after_states_match_compiled_manifest": true,
+      "dependency_graph_one_existing_edge_only": true,
+      "fresh_subset_application": true
+    },
+    "native_build_result": {
+      "bytes": 13569,
+      "path": ".local/archive-scale-094/native-build-r1/evidence/result.json",
+      "sha256": "7c1e18c46c09be83994e3b3b431dd55cfa3170da64abb0348a8961697723ceed"
+    },
+    "native_tests": {
+      "discovered": 71,
+      "new_test_names": [
+        "offline_canonical::tests::fixed_flag_cannot_mix_with_live_or_path_options",
+        "offline_canonical::tests::only_four_fixed_finalized_read_shapes",
+        "offline_canonical::tests::output_bound_is_enforced_during_serialization",
+        "offline_canonical::tests::actual_rpc_encoder_preserves_header_and_empty_full_transactions"
+      ],
+      "passed": 71,
+      "test_binary_sha256": "78c0a1e62ceac10a4dbe8645aed566723638d6f6c784af216c7b5e26a33c42ce"
+    },
+    "runtime_execution_during_build": "--build-info only; no validator, ledger export, key, wallet or financial operation",
+    "source_input": {
+      "bytes": 3158,
+      "path": ".local/archive-scale-094/native-build-r1/source-input.json",
+      "sha256": "ddd5e3c5032412a3f17a7d448ce829cba017639058dcef9d7d813bc8572743ca"
+    }
+  }
+}

@@ -1,0 +1,3961 @@
+diff --git a/zolana-fast-check/src/ancestry.rs b/zolana-fast-check/src/ancestry.rs
+--- a/zolana-fast-check/src/ancestry.rs
++++ b/zolana-fast-check/src/ancestry.rs
+@@ -315,4 +315,4 @@
+ 
+ // In-memory native seam only; no durable archive or resume caller is wired.
+ #[path = "ancestry_prefix.rs"]
+-mod prefix;
++pub(crate) mod prefix;
+diff --git a/zolana-fast-check/src/ancestry_archive.rs b/zolana-fast-check/src/ancestry_archive.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_archive.rs
+@@ -0,0 +1,576 @@
++//! Immutable bounded native ancestry generations. The expected complete binding
++//! and manifest digest MUST come from independent caller policy. This file does
++//! not choose snapshots, authorize pruning, or replace current-root certification.
++use {
++    crate::ancestry::{
++        AncestryError, AncestryReport,
++        prefix::{
++            MAX_META_BYTES, MAX_PREFIX_BYTES, MAX_RECORDS, ValidatedPrefix, decode_full_meta,
++            encode_full_meta,
++        },
++    },
++    anyhow::{Context, anyhow, bail},
++    serde::{Deserialize, Serialize},
++    solana_ledger::{blockstore::Blockstore, blockstore_meta::SlotMeta},
++    std::{
++        ffi::CString,
++        fs::File,
++        io::{Read, Write},
++        os::{
++            fd::{AsRawFd, FromRawFd},
++            unix::{ffi::OsStrExt, fs::MetadataExt},
++        },
++        path::{Component, Path},
++        time::Instant,
++    },
++};
++
++pub(crate) type ArchiveError = anyhow::Error;
++const FORMAT: &str = "zolana093-native-ancestry-archive-v1";
++const MAGIC: &[u8; 8] = b"ZANCP001";
++const MAX_MANIFEST: usize = 64 * 1024;
++const MAX_PAYLOAD: usize = MAX_PREFIX_BYTES as usize + MAX_RECORDS * 44 + 12;
++
++#[cfg(test)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum PublicationPoint {
++    BeforeRename,
++    AfterCommit,
++}
++
++#[cfg(test)]
++thread_local! {
++    static PUBLICATION_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(PublicationPoint)>>> =
++        std::cell::RefCell::new(None);
++}
++
++#[cfg(test)]
++fn publication_hook(point: PublicationPoint) {
++    PUBLICATION_HOOK.with(|hook| {
++        if let Some(callback) = hook.borrow_mut().as_mut() {
++            callback(point);
++        }
++    });
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct Domain {
++    pub network: [u8; 32],
++    pub genesis_hash: [u8; 32],
++    pub identity: [u8; 32],
++    pub voter: [u8; 32],
++    pub resume_sha256: [u8; 32],
++    pub ledger_relative_path: String,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct RootEvidence {
++    pub slot: u64,
++    pub is_root: bool,
++    pub certified_bank_hash: [u8; 32],
++    pub certified_timestamp: i64,
++    pub replay_bank_hash: Option<[u8; 32]>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct ArchiveBinding {
++    pub domain: Domain,
++    pub original: RootEvidence,
++    pub head: RootEvidence,
++    pub prune_through: u64,
++    pub snapshot_parent_slot: u64,
++    pub snapshot_slot: u64,
++    pub captured_current_root_slot: u64,
++    pub canonical_export_through: u64,
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Manifest {
++    format: String,
++    binding: ArchiveBinding,
++    record_count: usize,
++    payload_bytes: usize,
++    payload_sha256: [u8; 32],
++}
++
++pub(crate) struct PublishedArchive {
++    pub manifest_sha256: [u8; 32],
++}
++
++pub(crate) struct LoadedArchive {
++    binding: ArchiveBinding,
++    prefix: ValidatedPrefix,
++}
++
++fn digest(raw: &[u8]) -> [u8; 32] {
++    solana_sha256_hasher::hash(raw).to_bytes()
++}
++
++fn budget(deadline: Instant, cancelled: &mut impl FnMut() -> bool) -> Result<(), ArchiveError> {
++    if cancelled() {
++        bail!("ancestry archive operation cancelled");
++    }
++    if Instant::now() >= deadline {
++        bail!("ancestry archive operation deadline exceeded");
++    }
++    Ok(())
++}
++
++fn valid_binding(binding: &ArchiveBinding) -> Result<(), ArchiveError> {
++    let path = Path::new(&binding.domain.ledger_relative_path);
++    if binding.domain.ledger_relative_path.is_empty()
++        || binding.domain.ledger_relative_path.len() > 256
++        || !path.components().all(|c| matches!(c, Component::Normal(_)))
++    {
++        bail!("invalid archive ledger-relative domain path");
++    }
++    for evidence in [&binding.original, &binding.head] {
++        if !evidence.is_root
++            || evidence
++                .replay_bank_hash
++                .is_some_and(|h| h != evidence.certified_bank_hash)
++        {
++            bail!("archive root evidence is not the pinned certified root");
++        }
++    }
++    if !(binding.original.slot <= binding.prune_through
++        && binding.prune_through < binding.head.slot
++        && binding.head.slot <= binding.snapshot_parent_slot
++        && binding.snapshot_parent_slot < binding.snapshot_slot
++        && binding.snapshot_slot <= binding.captured_current_root_slot
++        && binding.canonical_export_through > binding.prune_through)
++    {
++        bail!("archive cutoff/snapshot/export bounds differ");
++    }
++    Ok(())
++}
++
++pub(crate) fn capture_root_evidence(
++    store: &Blockstore,
++    slot: u64,
++) -> Result<RootEvidence, ArchiveError> {
++    if !store.is_root(slot) {
++        bail!("archive evidence slot is not rooted");
++    }
++    let (hash, timestamp) = store
++        .get_optimistic_slot(slot)?
++        .ok_or_else(|| anyhow!("archive evidence lacks certified bank hash"))?;
++    let evidence = RootEvidence {
++        slot,
++        is_root: true,
++        certified_bank_hash: hash.to_bytes(),
++        certified_timestamp: timestamp,
++        replay_bank_hash: store.get_bank_hash(slot).map(|h| h.to_bytes()),
++    };
++    if evidence
++        .replay_bank_hash
++        .is_some_and(|h| h != evidence.certified_bank_hash)
++    {
++        bail!("archive evidence replay and certified hash conflict");
++    }
++    Ok(evidence)
++}
++
++fn checked_fd(fd: i32, what: &str) -> Result<File, ArchiveError> {
++    if fd < 0 {
++        return Err(std::io::Error::last_os_error()).with_context(|| what.to_owned());
++    }
++    // Successful descriptor is uniquely owned by the returned File.
++    Ok(unsafe { File::from_raw_fd(fd) })
++}
++
++fn c_name(name: &[u8]) -> Result<CString, ArchiveError> {
++    CString::new(name).context("archive path contains a NUL")
++}
++
++fn check_owner(file: &File, owner: u32, directory: bool) -> Result<(), ArchiveError> {
++    let m = file.metadata()?;
++    if m.uid() != owner
++        || m.mode() & 0o077 != 0
++        || (directory && !m.is_dir())
++        || (!directory && (!m.is_file() || m.nlink() != 1))
++    {
++        bail!("archive file type, owner, permissions or link count differs");
++    }
++    Ok(())
++}
++
++fn open_root(path: &Path, owner: u32) -> Result<File, ArchiveError> {
++    if !path.is_absolute() {
++        bail!("archive root must be absolute");
++    }
++    let mut directory = checked_fd(
++        unsafe {
++            libc::open(
++                c"/".as_ptr(),
++                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
++            )
++        },
++        "open filesystem root",
++    )?;
++    // O_NOFOLLOW on EVERY component; subsequent operations use pinned dirfds.
++    for component in path.components() {
++        match component {
++            Component::RootDir => {}
++            Component::Normal(name) => {
++                let name = c_name(name.as_bytes())?;
++                directory = checked_fd(
++                    unsafe {
++                        libc::openat(
++                            directory.as_raw_fd(),
++                            name.as_ptr(),
++                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
++                        )
++                    },
++                    "open archive directory component",
++                )?;
++            }
++            _ => bail!("archive root path contains a non-normal component"),
++        }
++    }
++    check_owner(&directory, owner, true)?;
++    Ok(directory)
++}
++
++fn valid_generation(name: &str) -> Result<(), ArchiveError> {
++    if name.is_empty()
++        || name.len() > 64
++        || !name
++            .bytes()
++            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
++    {
++        bail!("invalid immutable archive generation name");
++    }
++    Ok(())
++}
++
++fn open_child(
++    directory: &File,
++    name: &str,
++    owner: u32,
++    is_dir: bool,
++) -> Result<File, ArchiveError> {
++    let name = c_name(name.as_bytes())?;
++    let flags = libc::O_RDONLY
++        | libc::O_NOFOLLOW
++        | libc::O_CLOEXEC
++        | if is_dir {
++            libc::O_DIRECTORY
++        } else {
++            libc::O_NONBLOCK
++        };
++    let file = checked_fd(
++        unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) },
++        "open archive child",
++    )?;
++    check_owner(&file, owner, is_dir)?;
++    Ok(file)
++}
++
++fn write_new(directory: &File, name: &str, owner: u32, raw: &[u8]) -> Result<(), ArchiveError> {
++    let name = c_name(name.as_bytes())?;
++    let mut file = checked_fd(
++        unsafe {
++            libc::openat(
++                directory.as_raw_fd(),
++                name.as_ptr(),
++                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
++                0o600,
++            )
++        },
++        "create exclusive archive file",
++    )?;
++    check_owner(&file, owner, false)?;
++    file.write_all(raw)?;
++    file.sync_all()?;
++    Ok(())
++}
++
++fn read_bounded(mut file: File, max: usize) -> Result<Vec<u8>, ArchiveError> {
++    let expected = file.metadata()?.len();
++    if expected == 0 || expected > max as u64 {
++        bail!("archive file exceeds byte bound");
++    }
++    let mut raw = Vec::new();
++    (&mut file).take(max as u64 + 1).read_to_end(&mut raw)?;
++    if raw.len() > max || raw.len() as u64 != expected || file.metadata()?.len() != expected {
++        bail!("archive file size changed or read was incomplete");
++    }
++    Ok(raw)
++}
++
++fn payload(prefix: &ValidatedPrefix) -> Result<Vec<u8>, ArchiveError> {
++    let count = prefix.records().count();
++    let mut raw = Vec::new();
++    raw.extend_from_slice(MAGIC);
++    raw.extend_from_slice(&(count as u32).to_le_bytes());
++    for (slot, meta) in prefix.records().rev() {
++        let encoded = encode_full_meta(meta)?;
++        raw.extend_from_slice(&slot.to_le_bytes());
++        raw.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
++        raw.extend_from_slice(&digest(&encoded));
++        raw.extend_from_slice(&encoded);
++        if raw.len() > MAX_PAYLOAD {
++            bail!("archive payload exceeds byte bound");
++        }
++    }
++    Ok(raw)
++}
++
++fn decode_payload(
++    raw: &[u8],
++    expected_count: usize,
++    deadline: Instant,
++    cancelled: &mut impl FnMut() -> bool,
++) -> Result<Vec<(u64, SlotMeta)>, ArchiveError> {
++    if raw.len() < 12 || raw.len() > MAX_PAYLOAD || &raw[..8] != MAGIC {
++        bail!("invalid archive payload frame");
++    }
++    let count = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
++    if count == 0 || count > MAX_RECORDS || count != expected_count {
++        bail!("invalid archive record count");
++    }
++    let mut offset = 12usize;
++    let mut result = Vec::with_capacity(count);
++    let mut previous = None;
++    let mut total = 0u64;
++    for _ in 0..count {
++        budget(deadline, cancelled)?;
++        let header_end = offset
++            .checked_add(44)
++            .filter(|v| *v <= raw.len())
++            .ok_or_else(|| anyhow!("truncated archive record header"))?;
++        let header = &raw[offset..header_end];
++        let slot = u64::from_le_bytes(header[..8].try_into().unwrap());
++        let size = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
++        if size == 0 || size > MAX_META_BYTES || previous.is_some_and(|p| slot >= p) {
++            bail!("archive record bound or order differs");
++        }
++        total = total
++            .checked_add(size as u64)
++            .ok_or_else(|| anyhow!("archive byte overflow"))?;
++        if total > MAX_PREFIX_BYTES {
++            bail!("archive exceeds canonical byte bound");
++        }
++        let end = header_end
++            .checked_add(size)
++            .filter(|v| *v <= raw.len())
++            .ok_or_else(|| anyhow!("truncated archive metadata"))?;
++        let encoded = &raw[header_end..end];
++        if digest(encoded).as_slice() != &header[12..44] {
++            bail!("archive record digest differs");
++        }
++        result.push((slot, decode_full_meta(slot, encoded)?));
++        offset = end;
++        previous = Some(slot);
++        budget(deadline, cancelled)?;
++    }
++    if offset != raw.len() {
++        bail!("trailing archive payload bytes");
++    }
++    Ok(result)
++}
++
++pub(crate) fn publish(
++    root: &Path,
++    generation: &str,
++    owner_uid: u32,
++    binding: &ArchiveBinding,
++    records: Vec<(u64, SlotMeta)>,
++    deadline: Instant,
++    mut cancelled: impl FnMut() -> bool,
++) -> Result<PublishedArchive, ArchiveError> {
++    budget(deadline, &mut cancelled)?;
++    valid_generation(generation)?;
++    valid_binding(binding)?;
++    let prefix = ValidatedPrefix::try_from_metadata(
++        binding.original.slot,
++        binding.head.slot,
++        binding.prune_through,
++        records,
++        deadline,
++        &mut cancelled,
++    )?;
++    let raw = payload(&prefix)?;
++    budget(deadline, &mut cancelled)?;
++    let manifest = serde_json::to_vec(&Manifest {
++        format: FORMAT.into(),
++        binding: binding.clone(),
++        record_count: prefix.records().count(),
++        payload_bytes: raw.len(),
++        payload_sha256: digest(&raw),
++    })?;
++    if manifest.len() > MAX_MANIFEST {
++        bail!("archive manifest exceeds byte bound");
++    }
++    let parent = open_root(root, owner_uid)?;
++    let pending = format!(".pending-{generation}");
++    let pending_c = c_name(pending.as_bytes())?;
++    if unsafe { libc::mkdirat(parent.as_raw_fd(), pending_c.as_ptr(), 0o700) } != 0 {
++        return Err(std::io::Error::last_os_error())
++            .context("create exclusive pending archive generation");
++    }
++    // Preserve an incomplete generation on failure. Never resume, overwrite or
++    // publish it merely because files happen to be present after a crash.
++    parent.sync_all()?;
++    let directory = open_child(&parent, &pending, owner_uid, true)?;
++    write_new(&directory, "prefix.bin", owner_uid, &raw)?;
++    budget(deadline, &mut cancelled)?;
++    write_new(&directory, "manifest.json", owner_uid, &manifest)?;
++    directory.sync_all()?;
++    budget(deadline, &mut cancelled)?;
++    #[cfg(test)]
++    publication_hook(PublicationPoint::BeforeRename);
++    let final_c = c_name(generation.as_bytes())?;
++    #[cfg(target_os = "linux")]
++    if unsafe {
++        libc::renameat2(
++            parent.as_raw_fd(),
++            pending_c.as_ptr(),
++            parent.as_raw_fd(),
++            final_c.as_ptr(),
++            libc::RENAME_NOREPLACE,
++        )
++    } != 0
++    {
++        return Err(std::io::Error::last_os_error())
++            .context("publish exclusive archive generation");
++    }
++    #[cfg(not(target_os = "linux"))]
++    bail!("exclusive native archive publication currently requires Linux");
++    parent.sync_all()?;
++    #[cfg(test)]
++    publication_hook(PublicationPoint::AfterCommit);
++    budget(deadline, &mut cancelled)?;
++    Ok(PublishedArchive {
++        manifest_sha256: digest(&manifest),
++    })
++}
++
++pub(crate) fn load(
++    root: &Path,
++    generation: &str,
++    owner_uid: u32,
++    expected_manifest_sha256: [u8; 32],
++    expected: &ArchiveBinding,
++    deadline: Instant,
++    mut cancelled: impl FnMut() -> bool,
++) -> Result<LoadedArchive, ArchiveError> {
++    budget(deadline, &mut cancelled)?;
++    valid_generation(generation)?;
++    valid_binding(expected)?;
++    let parent = open_root(root, owner_uid)?;
++    let directory = open_child(&parent, generation, owner_uid, true)?;
++    let raw_manifest = read_bounded(
++        open_child(&directory, "manifest.json", owner_uid, false)?,
++        MAX_MANIFEST,
++    )?;
++    if digest(&raw_manifest) != expected_manifest_sha256 {
++        bail!("externally pinned archive manifest digest differs");
++    }
++    let manifest: Manifest = serde_json::from_slice(&raw_manifest)?;
++    if manifest.format != FORMAT
++        || &manifest.binding != expected
++        || manifest.record_count == 0
++        || manifest.record_count > MAX_RECORDS
++        || manifest.payload_bytes > MAX_PAYLOAD
++    {
++        bail!("archive manifest format, binding or bounds differ");
++    }
++    budget(deadline, &mut cancelled)?;
++    let raw = read_bounded(
++        open_child(&directory, "prefix.bin", owner_uid, false)?,
++        MAX_PAYLOAD,
++    )?;
++    if raw.len() != manifest.payload_bytes || digest(&raw) != manifest.payload_sha256 {
++        bail!("archive payload size or digest differs");
++    }
++    let records = decode_payload(&raw, manifest.record_count, deadline, &mut cancelled)?;
++    let prefix = ValidatedPrefix::try_from_metadata(
++        expected.original.slot,
++        expected.head.slot,
++        expected.prune_through,
++        records,
++        deadline,
++        &mut cancelled,
++    )?;
++    budget(deadline, &mut cancelled)?;
++    Ok(LoadedArchive {
++        binding: expected.clone(),
++        prefix,
++    })
++}
++
++impl LoadedArchive {
++    pub(crate) fn binding(&self) -> &ArchiveBinding {
++        &self.binding
++    }
++
++    pub(crate) fn read_meta(
++        &self,
++        store: &Blockstore,
++        slot: u64,
++    ) -> Result<Option<SlotMeta>, String> {
++        self.prefix.read_meta(store, slot)
++    }
++
++    pub(crate) fn verify(
++        &self,
++        store: &Blockstore,
++        start: u64,
++        deadline: Instant,
++        cancelled: impl FnMut() -> bool,
++    ) -> Result<AncestryReport, AncestryError> {
++        self.prefix.verify(store, start, deadline, cancelled)
++    }
++
++    pub(crate) fn check_original_root(
++        &self,
++        store: &Blockstore,
++        original_slot: u64,
++        pinned_bank_hash: [u8; 32],
++    ) -> Result<(), ArchiveError> {
++        let original = &self.binding.original;
++        if original.slot != original_slot
++            || original.certified_bank_hash != pinned_bank_hash
++            || original_slot > self.binding.prune_through
++        {
++            bail!("archive does not preserve the caller's original checkpoint");
++        }
++        // Full metadata conflict or a live read/decode error always fails.
++        self.prefix
++            .read_meta(store, original_slot)
++            .map_err(|e| anyhow!(e))?
++            .ok_or_else(|| anyhow!("original checkpoint metadata unavailable"))?;
++        if store.meta(original_slot)?.is_some() {
++            // Preserve the existing root predicate: a matching live certified
++            // hash, and an absent-or-matching replay hash. Timestamp and the
++            // presence of a matching optional replay hash are not new gates.
++            if capture_root_evidence(store, original_slot)?.certified_bank_hash
++                != original.certified_bank_hash
++            {
++                bail!("live original-root evidence conflicts with archive");
++            }
++        } else {
++            if let Some((hash, _)) = store.get_optimistic_slot(original_slot)? {
++                if hash.to_bytes() != original.certified_bank_hash {
++                    bail!("remaining live original certificate conflicts with archive");
++                }
++            }
++            if let Some(hash) = store.get_bank_hash(original_slot) {
++                if hash.to_bytes() != original.certified_bank_hash {
++                    bail!("remaining live original bank hash conflicts with archive");
++                }
++            }
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++#[path = "ancestry_archive_tests.rs"]
++mod tests;
+diff --git a/zolana-fast-check/src/ancestry_archive_tests.rs b/zolana-fast-check/src/ancestry_archive_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_archive_tests.rs
+@@ -0,0 +1,682 @@
++//! Native disposable filesystem/DB fixtures only. No real genesis, validator,
++//! snapshot, BLS certificate or financial state is produced by these unit tests.
++use {
++    super::*,
++    solana_ledger::blockstore::PurgeType,
++    std::{
++        fs,
++        os::unix::fs::{DirBuilderExt, PermissionsExt, symlink},
++        path::PathBuf,
++        sync::atomic::{AtomicU64, Ordering},
++        time::Duration,
++    },
++};
++
++static SEQUENCE: AtomicU64 = AtomicU64::new(0);
++struct Fixture(PathBuf);
++impl Fixture {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!(
++            "zolana093-archive-{}-{}",
++            std::process::id(),
++            SEQUENCE.fetch_add(1, Ordering::Relaxed)
++        ));
++        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
++        Self(path)
++    }
++}
++impl Drop for Fixture {
++    fn drop(&mut self) {
++        fs::remove_dir_all(&self.0).unwrap();
++    }
++}
++fn owner() -> u32 {
++    unsafe { libc::geteuid() }
++}
++fn budget() -> Instant {
++    Instant::now() + Duration::from_secs(10)
++}
++fn hash(slot: u64) -> [u8; 32] {
++    digest(&slot.to_le_bytes())
++}
++fn meta(slot: u64, parent: Option<u64>) -> SlotMeta {
++    let mut value = SlotMeta {
++        slot,
++        parent_slot: parent,
++        consumed: 2,
++        received: 2,
++        last_index: Some(1),
++        ..SlotMeta::default()
++    };
++    value.completed_data_indexes.insert(1);
++    value.next_slots.push(slot + 2);
++    value
++}
++fn records() -> Vec<(u64, SlotMeta)> {
++    vec![
++        (9, meta(9, Some(7))),
++        (7, meta(7, Some(3))),
++        (3, meta(3, None)),
++    ]
++}
++fn evidence(slot: u64) -> RootEvidence {
++    RootEvidence {
++        slot,
++        is_root: true,
++        certified_bank_hash: hash(slot),
++        certified_timestamp: slot as i64,
++        replay_bank_hash: Some(hash(slot)),
++    }
++}
++fn binding() -> ArchiveBinding {
++    ArchiveBinding {
++        domain: Domain {
++            network: [7; 32],
++            genesis_hash: [11; 32],
++            identity: [1; 32],
++            voter: [2; 32],
++            resume_sha256: [3; 32],
++            ledger_relative_path: "peer-0/ledger".into(),
++        },
++        original: evidence(3),
++        head: evidence(9),
++        prune_through: 7,
++        snapshot_parent_slot: 12,
++        snapshot_slot: 15,
++        captured_current_root_slot: 15,
++        canonical_export_through: 15,
++    }
++}
++fn publish_fixture(root: &Path, name: &str) -> PublishedArchive {
++    publish(root, name, owner(), &binding(), records(), budget(), || {
++        false
++    })
++    .unwrap()
++}
++fn load_fixture(root: &Path, name: &str, pin: [u8; 32]) -> Result<LoadedArchive, ArchiveError> {
++    load(root, name, owner(), pin, &binding(), budget(), || false)
++}
++
++#[test]
++fn durable_reload_after_standard_purge_and_db_reopen_uses_fresh_file_prefix() {
++    let archive_dir = Fixture::new();
++    let db_dir = Fixture::new();
++    let store = Blockstore::open(&db_dir.0).unwrap();
++    let values: Vec<_> = records()
++        .into_iter()
++        .chain([(12, meta(12, Some(9))), (15, meta(15, Some(12)))])
++        .collect();
++    let slots: Vec<_> = values.iter().map(|(s, _)| *s).collect();
++    for (slot, meta) in &values {
++        store.put_meta(*slot, meta).unwrap();
++        let hash = solana_sha256_hasher::hash(&slot.to_le_bytes());
++        store.insert_bank_hash(*slot, hash, true);
++        store
++            .insert_optimistic_slot(*slot, &hash, *slot as i64)
++            .unwrap();
++    }
++    store.set_roots(slots.iter()).unwrap();
++    let mut expected = binding();
++    expected.original = capture_root_evidence(&store, 3).unwrap();
++    expected.head = capture_root_evidence(&store, 9).unwrap();
++    let before = crate::ancestry::verify_path(&store, 15, 3, budget(), || false).unwrap();
++    let published = publish(
++        &archive_dir.0,
++        "one",
++        owner(),
++        &expected,
++        records(),
++        budget(),
++        || false,
++    )
++    .unwrap();
++    // All original prefix input is moved into publish; no prefix instance is
++    // retained across this actual DB purge and close.
++    store.purge_slots(0, 7, PurgeType::Exact).unwrap();
++    drop(store);
++    let reopened = Blockstore::open(&db_dir.0).unwrap();
++    assert!(reopened.meta(3).unwrap().is_none());
++    assert!(!reopened.is_root(3));
++    assert!(reopened.get_optimistic_slot(3).unwrap().is_none());
++    assert!(reopened.get_bank_hash(3).is_none());
++    assert!(crate::ancestry::verify_path(&reopened, 15, 3, budget(), || false).is_err());
++    let loaded = load(
++        &archive_dir.0,
++        "one",
++        owner(),
++        published.manifest_sha256,
++        &expected,
++        budget(),
++        || false,
++    )
++    .unwrap();
++    assert_eq!(loaded.binding(), &expected);
++    assert_eq!(
++        loaded.verify(&reopened, 15, budget(), || false).unwrap(),
++        before
++    );
++    loaded.check_original_root(&reopened, 3, hash(3)).unwrap();
++    assert!(loaded.check_original_root(&reopened, 3, hash(4)).is_err());
++    assert_eq!(reopened.meta(9).unwrap().unwrap(), meta(9, Some(7)));
++    assert_eq!(capture_root_evidence(&reopened, 15).unwrap(), evidence(15));
++    drop(loaded);
++    assert_eq!(
++        load(
++            &archive_dir.0,
++            "one",
++            owner(),
++            published.manifest_sha256,
++            &expected,
++            budget(),
++            || false
++        )
++        .unwrap()
++        .verify(&reopened, 15, budget(), || false)
++        .unwrap(),
++        before
++    );
++}
++
++#[test]
++fn external_digest_and_every_domain_binding_are_required() {
++    let root = Fixture::new();
++    let published = publish_fixture(&root.0, "one");
++    assert!(load_fixture(&root.0, "one", [0; 32]).is_err());
++    let original = binding();
++    let mut cases = Vec::new();
++    let mut b = original.clone();
++    b.domain.network[0] ^= 1;
++    cases.push(b);
++    let mut b = original.clone();
++    b.domain.genesis_hash[0] ^= 1;
++    cases.push(b);
++    let mut b = original.clone();
++    b.domain.identity[0] ^= 1;
++    cases.push(b);
++    let mut b = original.clone();
++    b.domain.voter[0] ^= 1;
++    cases.push(b);
++    let mut b = original.clone();
++    b.domain.resume_sha256[0] ^= 1;
++    cases.push(b);
++    let mut b = original.clone();
++    b.domain.ledger_relative_path = "peer-1/ledger".into();
++    cases.push(b);
++    let mut b = original.clone();
++    b.prune_through = 6;
++    cases.push(b);
++    let mut b = original.clone();
++    b.original.certified_timestamp += 1;
++    cases.push(b);
++    for changed in cases {
++        assert!(
++            load(
++                &root.0,
++                "one",
++                owner(),
++                published.manifest_sha256,
++                &changed,
++                budget(),
++                || false
++            )
++            .is_err()
++        );
++    }
++    for name in ["", ".pending-one", "../one", "one/two"] {
++        assert!(load_fixture(&root.0, name, published.manifest_sha256).is_err());
++    }
++    assert!(
++        load(
++            &root.0,
++            "one",
++            owner().wrapping_add(1),
++            published.manifest_sha256,
++            &original,
++            budget(),
++            || false
++        )
++        .is_err()
++    );
++}
++
++#[test]
++fn manifest_and_payload_corruption_are_not_reinterpreted_as_missing() {
++    let root = Fixture::new();
++    let published = publish_fixture(&root.0, "one");
++    let path = root.0.join("one/prefix.bin");
++    let original = fs::read(&path).unwrap();
++    let mut corrupt = original.clone();
++    *corrupt.last_mut().unwrap() ^= 1;
++    fs::write(&path, corrupt).unwrap();
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++    fs::write(&path, &original[..original.len() - 1]).unwrap();
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++    fs::write(&path, &original).unwrap();
++    let manifest = root.0.join("one/manifest.json");
++    let mut value: serde_json::Value =
++        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
++    value["unexpected"] = true.into();
++    let raw = serde_json::to_vec(&value).unwrap();
++    fs::write(&manifest, &raw).unwrap();
++    assert!(load_fixture(&root.0, "one", digest(&raw)).is_err());
++}
++
++fn repin_payload(root: &Path, raw: &[u8]) -> [u8; 32] {
++    fs::write(root.join("one/prefix.bin"), raw).unwrap();
++    let manifest = serde_json::to_vec(&Manifest {
++        format: FORMAT.into(),
++        binding: binding(),
++        record_count: 3,
++        payload_bytes: raw.len(),
++        payload_sha256: digest(raw),
++    })
++    .unwrap();
++    fs::write(root.join("one/manifest.json"), &manifest).unwrap();
++    digest(&manifest)
++}
++
++#[test]
++fn even_re_pinned_frames_must_decode_complete_valid_typed_ancestry() {
++    let root = Fixture::new();
++    publish_fixture(&root.0, "one");
++    let original = fs::read(root.0.join("one/prefix.bin")).unwrap();
++    let mut raw = original.clone();
++    raw[0] ^= 1;
++    let pin = repin_payload(&root.0, &raw);
++    assert!(load_fixture(&root.0, "one", pin).is_err());
++    let mut raw = original.clone();
++    raw[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
++    let pin = repin_payload(&root.0, &raw);
++    assert!(load_fixture(&root.0, "one", pin).is_err());
++    let mut raw = original.clone();
++    raw.extend_from_slice(&[0]);
++    let pin = repin_payload(&root.0, &raw);
++    assert!(load_fixture(&root.0, "one", pin).is_err());
++    let mut raw = original;
++    let size = u32::from_le_bytes(raw[20..24].try_into().unwrap()) as usize;
++    let mut changed = decode_full_meta(9, &raw[56..56 + size]).unwrap();
++    changed.parent_slot = Some(9);
++    let encoded = encode_full_meta(&changed).unwrap();
++    assert_eq!(encoded.len(), size);
++    raw[24..56].copy_from_slice(&digest(&encoded));
++    raw[56..56 + size].copy_from_slice(&encoded);
++    let pin = repin_payload(&root.0, &raw);
++    assert!(load_fixture(&root.0, "one", pin).is_err());
++}
++
++#[test]
++fn owner_paths_refuse_symlink_components_files_and_hardlinks() {
++    let root = Fixture::new();
++    let other = Fixture::new();
++    let published = publish_fixture(&root.0, "one");
++    symlink(&root.0, other.0.join("link")).unwrap();
++    assert!(load_fixture(&other.0.join("link"), "one", published.manifest_sha256).is_err());
++    symlink(root.0.join("one"), root.0.join("two")).unwrap();
++    assert!(load_fixture(&root.0, "two", published.manifest_sha256).is_err());
++    let payload = root.0.join("one/prefix.bin");
++    fs::hard_link(&payload, root.0.join("extra-link")).unwrap();
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++    fs::remove_file(root.0.join("extra-link")).unwrap();
++    fs::rename(&payload, root.0.join("saved-payload")).unwrap();
++    symlink(root.0.join("saved-payload"), &payload).unwrap();
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++}
++
++#[test]
++fn fifo_and_exposed_permissions_refuse_without_blocking_on_open() {
++    let root = Fixture::new();
++    let published = publish_fixture(&root.0, "one");
++    let manifest = root.0.join("one/manifest.json");
++    let raw = fs::read(&manifest).unwrap();
++    fs::remove_file(&manifest).unwrap();
++    let name = CString::new(manifest.as_os_str().as_bytes()).unwrap();
++    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++    fs::remove_file(&manifest).unwrap();
++    fs::write(&manifest, raw).unwrap();
++    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
++    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o755)).unwrap();
++    assert!(load_fixture(&root.0, "one", published.manifest_sha256).is_err());
++}
++
++#[test]
++fn incomplete_generation_is_not_loadable_or_resumable_and_publish_never_overwrites() {
++    let root = Fixture::new();
++    fs::DirBuilder::new()
++        .mode(0o700)
++        .create(root.0.join(".pending-partial"))
++        .unwrap();
++    assert!(load_fixture(&root.0, "partial", [0; 32]).is_err());
++    assert!(
++        publish(
++            &root.0,
++            "partial",
++            owner(),
++            &binding(),
++            records(),
++            budget(),
++            || false
++        )
++        .is_err()
++    );
++    let published = publish_fixture(&root.0, "one");
++    assert!(
++        publish(
++            &root.0,
++            "one",
++            owner(),
++            &binding(),
++            records(),
++            budget(),
++            || false
++        )
++        .is_err()
++    );
++    load_fixture(&root.0, "one", published.manifest_sha256).unwrap();
++}
++
++#[test]
++fn bounds_and_cancellation_do_not_publish_an_authoritative_generation() {
++    let root = Fixture::new();
++    let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
++    assert!(
++        publish(
++            &root.0,
++            "expired",
++            owner(),
++            &binding(),
++            records(),
++            expired,
++            || false
++        )
++        .is_err()
++    );
++    assert!(!root.0.join(".pending-expired").exists());
++    assert!(
++        publish(
++            &root.0,
++            "cancelled",
++            owner(),
++            &binding(),
++            records(),
++            budget(),
++            || true
++        )
++        .is_err()
++    );
++    let mut bad = binding();
++    bad.prune_through = bad.head.slot;
++    assert!(publish(&root.0, "bad", owner(), &bad, records(), budget(), || false).is_err());
++    let mut bad = binding();
++    bad.original.replay_bank_hash = Some([0; 32]);
++    assert!(publish(&root.0, "bad", owner(), &bad, records(), budget(), || false).is_err());
++    let published = publish_fixture(&root.0, "one");
++    assert!(
++        load(
++            &root.0,
++            "one",
++            owner(),
++            published.manifest_sha256,
++            &binding(),
++            expired,
++            || false
++        )
++        .is_err()
++    );
++    assert!(
++        load(
++            &root.0,
++            "one",
++            owner(),
++            published.manifest_sha256,
++            &binding(),
++            budget(),
++            || true
++        )
++        .is_err()
++    );
++    assert!(
++        publish(
++            &root.0,
++            "during",
++            owner(),
++            &binding(),
++            records(),
++            budget(),
++            || root.0.join(".pending-during/manifest.json").exists()
++        )
++        .is_err()
++    );
++    assert!(!root.0.join("during").exists());
++    assert!(root.0.join(".pending-during/manifest.json").exists());
++}
++
++#[test]
++fn fresh_load_preserves_live_conflicts_and_original_checkpoint_pin() {
++    let root = Fixture::new();
++    let db = Fixture::new();
++    let store = Blockstore::open(&db.0).unwrap();
++    let published = publish_fixture(&root.0, "one");
++    let loaded = load_fixture(&root.0, "one", published.manifest_sha256).unwrap();
++    store.put_meta(9, &meta(9, Some(7))).unwrap();
++    let mut conflict = meta(7, Some(3));
++    conflict.received += 1;
++    store.put_meta(7, &conflict).unwrap();
++    assert!(loaded.verify(&store, 9, budget(), || false).is_err());
++    store.put_meta_bytes(7, b"corrupt").unwrap();
++    assert!(loaded.verify(&store, 9, budget(), || false).is_err());
++    assert!(loaded.check_original_root(&store, 4, hash(3)).is_err());
++    let wrong = solana_sha256_hasher::hash(&[99]);
++    store.insert_optimistic_slot(3, &wrong, 3).unwrap();
++    assert!(loaded.check_original_root(&store, 3, hash(3)).is_err());
++}
++
++#[test]
++fn original_live_predicate_allows_matching_optional_hash_and_new_timestamp() {
++    let root = Fixture::new();
++    let db = Fixture::new();
++    let store = Blockstore::open(&db.0).unwrap();
++    let mut expected = binding();
++    expected.original.replay_bank_hash = None;
++    let published = publish(
++        &root.0,
++        "one",
++        owner(),
++        &expected,
++        records(),
++        budget(),
++        || false,
++    )
++    .unwrap();
++    let loaded = load(
++        &root.0,
++        "one",
++        owner(),
++        published.manifest_sha256,
++        &expected,
++        budget(),
++        || false,
++    )
++    .unwrap();
++    store.put_meta(3, &meta(3, None)).unwrap();
++    store.set_roots([3].iter()).unwrap();
++    let matching = solana_sha256_hasher::hash(&3u64.to_le_bytes());
++    store.insert_optimistic_slot(3, &matching, 999).unwrap();
++    loaded.check_original_root(&store, 3, hash(3)).unwrap();
++    store.insert_bank_hash(3, matching, true);
++    loaded.check_original_root(&store, 3, hash(3)).unwrap();
++    store.insert_bank_hash(3, solana_sha256_hasher::hash(&[99]), true);
++    assert!(loaded.check_original_root(&store, 3, hash(3)).is_err());
++}
++
++// Re-exec only the test harness, never the validator CLI. The environment is
++// consumed exclusively inside this cfg(test) module; production has no fault
++// environment or hook. Both cases use public disposable fixture data only.
++fn publication_kill_case(point: PublicationPoint, test_name: &str) {
++    use std::{
++        fs::OpenOptions,
++        os::unix::{fs::OpenOptionsExt, process::ExitStatusExt},
++        process::{Child, Command, Stdio},
++        thread,
++    };
++    const CHILD_CASE: &str = "ZOLANA093_TEST_PUBLICATION_CHILD";
++    const CHILD_ROOT: &str = "ZOLANA093_TEST_PUBLICATION_ROOT";
++    let label = match point {
++        PublicationPoint::BeforeRename => "before",
++        PublicationPoint::AfterCommit => "after",
++    };
++    let new_binding = || {
++        let mut value = binding();
++        value.captured_current_root_slot = 18;
++        value.canonical_export_through = 18;
++        value
++    };
++    if let Some(child_case) = std::env::var_os(CHILD_CASE) {
++        assert_eq!(child_case.as_os_str(), std::ffi::OsStr::new(label));
++        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).unwrap());
++        assert!(root.is_absolute());
++        let marker = root.join("publication-point-seen");
++        PUBLICATION_HOOK.with(|hook| {
++            *hook.borrow_mut() = Some(Box::new(move |observed| {
++                if observed == point {
++                    let mut file = OpenOptions::new()
++                        .write(true)
++                        .create_new(true)
++                        .mode(0o600)
++                        .open(&marker)
++                        .unwrap();
++                    file.write_all(b"observed").unwrap();
++                    file.sync_all().unwrap();
++                    // Parent kills this process; do not execute the next step.
++                    loop {
++                        thread::park();
++                    }
++                }
++            }));
++        });
++        publish(
++            &root,
++            "new",
++            owner(),
++            &new_binding(),
++            records(),
++            budget(),
++            || false,
++        )
++        .unwrap();
++        panic!("publication test hook was not reached");
++    }
++
++    struct ChildGuard(Child);
++    impl Drop for ChildGuard {
++        fn drop(&mut self) {
++            if self.0.try_wait().ok().flatten().is_none() {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++    }
++    let root = Fixture::new();
++    let old = publish_fixture(&root.0, "old");
++    // Expected NEW digest is computed out-of-band from independently known
++    // typed fixture/binding before the child writes anything. Never read the
++    // produced manifest to choose the expected pin.
++    let expected_binding = new_binding();
++    let prefix =
++        ValidatedPrefix::try_from_metadata(3, 9, 7, records(), budget(), || false).unwrap();
++    let raw = payload(&prefix).unwrap();
++    let expected_manifest = serde_json::to_vec(&Manifest {
++        format: FORMAT.into(),
++        binding: expected_binding.clone(),
++        record_count: 3,
++        payload_bytes: raw.len(),
++        payload_sha256: digest(&raw),
++    })
++    .unwrap();
++    let expected_pin = digest(&expected_manifest);
++    assert_ne!(expected_pin, old.manifest_sha256);
++    drop(prefix);
++    let child = Command::new(std::env::current_exe().unwrap())
++        .arg(test_name)
++        .arg("--exact")
++        .arg("--nocapture")
++        .arg("--test-threads=1")
++        .env(CHILD_CASE, label)
++        .env(CHILD_ROOT, &root.0)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++        .unwrap();
++    let mut child = ChildGuard(child);
++    let until = Instant::now() + Duration::from_secs(10);
++    while !root.0.join("publication-point-seen").exists() {
++        assert!(
++            child.0.try_wait().unwrap().is_none(),
++            "publication child exited before its hook"
++        );
++        assert!(
++            Instant::now() < until,
++            "publication child did not reach hook in time"
++        );
++        thread::sleep(Duration::from_millis(5));
++    }
++    // std Child::kill on this Unix fixture sends SIGKILL; verify the actual
++    // termination signal rather than treating an ordinary process exit as it.
++    child.0.kill().unwrap();
++    let status = child.0.wait().unwrap();
++    assert_eq!(status.signal(), Some(libc::SIGKILL));
++    load_fixture(&root.0, "old", old.manifest_sha256).unwrap();
++    let loaded = load(
++        &root.0,
++        "new",
++        owner(),
++        expected_pin,
++        &expected_binding,
++        budget(),
++        || false,
++    );
++    match point {
++        PublicationPoint::BeforeRename => {
++            assert!(loaded.is_err());
++            assert!(!root.0.join("new").exists());
++            assert!(root.0.join(".pending-new/manifest.json").exists());
++        }
++        PublicationPoint::AfterCommit => {
++            let loaded = loaded.unwrap();
++            assert_eq!(loaded.binding(), &expected_binding);
++            assert!(!root.0.join(".pending-new").exists());
++            let db = Fixture::new();
++            let store = Blockstore::open(&db.0).unwrap();
++            store.put_meta(9, &meta(9, Some(7))).unwrap();
++            assert_eq!(
++                loaded
++                    .verify(&store, 9, budget(), || false)
++                    .unwrap()
++                    .entries,
++                3
++            );
++            loaded.check_original_root(&store, 3, hash(3)).unwrap();
++        }
++    }
++    // SIGKILL publication/reload is tested, not host power-loss or a validator
++    // crash; the separate full-validator scenario remains an integration gate.
++}
++
++#[test]
++fn sigkill_before_publication_rename_keeps_only_old_generation_authoritative() {
++    publication_kill_case(
++        PublicationPoint::BeforeRename,
++        "ancestry_archive::tests::sigkill_before_publication_rename_keeps_only_old_generation_authoritative",
++    );
++}
++
++#[test]
++fn sigkill_after_publication_commit_loads_new_generation_with_external_pin() {
++    publication_kill_case(
++        PublicationPoint::AfterCommit,
++        "ancestry_archive::tests::sigkill_after_publication_commit_loads_new_generation_with_external_pin",
++    );
++}
+diff --git a/zolana-fast-check/src/ancestry_prefix.rs b/zolana-fast-check/src/ancestry_prefix.rs
+--- a/zolana-fast-check/src/ancestry_prefix.rs
++++ b/zolana-fast-check/src/ancestry_prefix.rs
+@@ -8,9 +8,9 @@
+ };
+ 
+ // Deliberately small first native slice, not the larger durable-export caps.
+-const MAX_RECORDS: usize = 4096;
+-const MAX_META_BYTES: usize = 64 * 1024;
+-const MAX_PREFIX_BYTES: u64 = 32 * 1024 * 1024;
++pub(crate) const MAX_RECORDS: usize = 4096;
++pub(crate) const MAX_META_BYTES: usize = 64 * 1024;
++pub(crate) const MAX_PREFIX_BYTES: u64 = 32 * 1024 * 1024;
+ 
+ fn invalid(slot: u64, reason: impl Into<String>) -> AncestryError {
+     AncestryError::Invalid {
+@@ -19,7 +19,7 @@
+     }
+ }
+ 
+-fn encode_full_meta(meta: &SlotMeta) -> Result<Vec<u8>, AncestryError> {
++pub(crate) fn encode_full_meta(meta: &SlotMeta) -> Result<Vec<u8>, AncestryError> {
+     let size = wincode::serialized_size(meta)
+         .map_err(|e| invalid(meta.slot, format!("cannot size full metadata: {e}")))?;
+     if size == 0 || size > MAX_META_BYTES as u64 {
+@@ -29,7 +29,7 @@
+         .map_err(|e| invalid(meta.slot, format!("cannot encode full metadata: {e}")))
+ }
+ 
+-fn decode_full_meta(slot: u64, raw: &[u8]) -> Result<SlotMeta, AncestryError> {
++pub(crate) fn decode_full_meta(slot: u64, raw: &[u8]) -> Result<SlotMeta, AncestryError> {
+     if raw.is_empty() || raw.len() > MAX_META_BYTES {
+         return Err(invalid(slot, "full metadata exceeds record bound"));
+     }
+@@ -51,14 +51,14 @@
+ 
+ /// Private owned records cannot be replaced after full native validation.
+ /// "Validated" means metadata/path/size only, never finality or export trust.
+-pub(super) struct ValidatedPrefix {
++pub(crate) struct ValidatedPrefix {
+     original_slot: u64,
+     prune_through: u64,
+     records: BTreeMap<u64, SlotMeta>,
+ }
+ 
+ impl ValidatedPrefix {
+-    pub(super) fn try_from_metadata(
++    pub(crate) fn try_from_metadata(
+         original_slot: u64,
+         head_slot: u64,
+         prune_through: u64,
+@@ -140,7 +140,19 @@
+         }
+     }
+ 
+-    pub(super) fn verify(
++    pub(crate) fn records(&self) -> impl DoubleEndedIterator<Item = (u64, &SlotMeta)> {
++        self.records.iter().map(|(slot, meta)| (*slot, meta))
++    }
++
++    pub(crate) fn read_meta(
++        &self,
++        blockstore: &Blockstore,
++        slot: u64,
++    ) -> Result<Option<SlotMeta>, String> {
++        self.read_from(slot, |slot| blockstore.meta(slot))
++    }
++
++    pub(crate) fn verify(
+         &self,
+         blockstore: &Blockstore,
+         start_slot: u64,
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -4,13 +4,14 @@
+ //! Neither mode claims production validator independence or durable Mac readiness.
+ //! Every ledger and key belongs to a fresh owner-only invocation directory.
+ 
++mod ancestry;
++mod ancestry_archive;
++#[cfg(test)]
++mod ancestry_tests;
+ mod build_info;
+ mod offline_probe;
+-mod ancestry;
+-#[cfg(test)]
+-mod ancestry_tests;
++mod restart_snapshots;
+ mod resume;
+-mod restart_snapshots;
+ mod service;
+ 
+ use {
+@@ -70,6 +71,8 @@
+     slot_anchors: bool,
+     mac_relay: Option<Pubkey>,
+     hold_seconds: u64,
++    durable_ancestry_fixture: bool,
++    durable_ancestry_config_sha256: Option<String>,
+ }
+ 
+ impl Args {
+@@ -87,17 +90,54 @@
+         let mut benchmark_option = false;
+         let mut explicit_nodes = false;
+         let (mut mac_relay, mut hold_seconds) = (None, 0u64);
++        let mut durable_ancestry_fixture = false;
++        let mut durable_ancestry_config_sha256 = None;
+         while let Some(arg) = args.next() {
+             explicit_nodes |= arg == "--nodes";
+-            benchmark_option |= matches!(arg.as_str(), "--nodes" | "--samples" | "--restart-one"
+-                | "--quorum-loss-rejoin" | "--private" | "--slot-anchors" | "--mac-relay" | "--hold-seconds");
++            benchmark_option |= matches!(
++                arg.as_str(),
++                "--nodes"
++                    | "--samples"
++                    | "--restart-one"
++                    | "--quorum-loss-rejoin"
++                    | "--private"
++                    | "--slot-anchors"
++                    | "--mac-relay"
++                    | "--hold-seconds"
++            );
+             match arg.as_str() {
+                 "--root" | "--resume-root" => {
+                     ensure!(root.is_none(), "choose exactly one --root or --resume-root");
+                     resume = arg == "--resume-root";
+-                    root = Some(PathBuf::from(args.next().context("root option needs a path")?));
+-                },
++                    root = Some(PathBuf::from(
++                        args.next().context("root option needs a path")?,
++                    ));
++                }
+                 "--service" => service = true,
++                "--durable-ancestry-fixture" => {
++                    ensure!(
++                        !durable_ancestry_fixture,
++                        "duplicate durable fixture option"
++                    );
++                    durable_ancestry_fixture = true;
++                }
++                "--durable-ancestry-config-sha256" => {
++                    ensure!(
++                        durable_ancestry_config_sha256.is_none(),
++                        "duplicate durable policy pin"
++                    );
++                    let pin = args.next().context(
++                        "durable ancestry configuration needs its independent SHA256 pin",
++                    )?;
++                    ensure!(
++                        pin.len() == 64
++                            && pin
++                                .bytes()
++                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
++                        "durable ancestry policy requires an exact lowercase SHA256 pin"
++                    );
++                    durable_ancestry_config_sha256 = Some(pin);
++                }
+                 "--nodes" => nodes = args.next().context("--nodes needs a count")?.parse()?,
+                 "--samples" => samples = args.next().context("--samples needs a count")?.parse()?,
+                 "--restart-one" => restart_one = true,
+@@ -125,8 +165,25 @@
+                 ),
+             }
+         }
+-        ensure!(!service || (resume && !benchmark_option),
+-            "--service requires only --resume-root ORIGINAL_FIXTURE_ROOT; genesis and benchmark options are forbidden");
++        ensure!(
++            !service || (resume && !benchmark_option),
++            "--service requires only --resume-root ORIGINAL_FIXTURE_ROOT; genesis and benchmark options are forbidden"
++        );
++        ensure!(
++            !durable_ancestry_fixture
++                || (!resume
++                    && nodes == 3
++                    && slot_anchors
++                    && hold_seconds > 0
++                    && !restart_one
++                    && !quorum_loss_rejoin
++                    && mac_relay.is_none()),
++            "durable ancestry eligibility is fresh disposable three-node NPOOL004 fixture creation only"
++        );
++        ensure!(
++            durable_ancestry_config_sha256.is_none() || (resume && service),
++            "a durable ancestry policy pin is permitted only on explicit snapshot-backed service resume"
++        );
+         ensure!(
+             (1..=3).contains(&nodes),
+             "one to three staked validators required"
+@@ -136,10 +193,14 @@
+             "hold duration exceeds the ten-minute development bound"
+         );
+         if resume {
+-            ensure!(nodes == 1 && !restart_one && !private && !slot_anchors && mac_relay.is_none(),
+-                "resume restores topology/network/profile from its original metadata; omit genesis options");
+-            ensure!(!quorum_loss_rejoin || (!explicit_nodes && hold_seconds == 0),
+-                "resumed quorum acceptance restores exactly its original topology and cannot rewrite metadata via a hold");
++            ensure!(
++                nodes == 1 && !restart_one && !private && !slot_anchors && mac_relay.is_none(),
++                "resume restores topology/network/profile from its original metadata; omit genesis options"
++            );
++            ensure!(
++                !quorum_loss_rejoin || (!explicit_nodes && hold_seconds == 0),
++                "resumed quorum acceptance restores exactly its original topology and cannot rewrite metadata via a hold"
++            );
+         }
+         if let Some(relay) = mac_relay {
+             ensure!(
+@@ -164,6 +225,8 @@
+             slot_anchors,
+             mac_relay,
+             hold_seconds,
++            durable_ancestry_fixture,
++            durable_ancestry_config_sha256,
+         })
+     }
+ 
+@@ -214,30 +277,59 @@
+     if args.resume {
+         resume::check_root(root)?;
+     } else {
+-        DirBuilder::new().mode(0o700).create(root)
++        DirBuilder::new()
++            .mode(0o700)
++            .create(root)
+             .context("fresh root required; never reset an existing run")?;
+         DirBuilder::new().mode(0o700).create(root.join("ledgers"))?;
+         resume::check_root(root)?;
+     }
+     let mut lock_options = OpenOptions::new();
+-    lock_options.read(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW);
+-    if !args.resume { lock_options.create_new(true); }
++    lock_options
++        .read(true)
++        .write(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW);
++    if !args.resume {
++        lock_options.create_new(true);
++    }
+     let root_lock = lock_options.open(root.join("process.lock"))?;
+     use std::os::unix::fs::MetadataExt;
+     let lock_meta = root_lock.metadata()?;
+-    ensure!(lock_meta.is_file() && lock_meta.len() == 0 && lock_meta.permissions().mode() & 0o077 == 0
+-        && lock_meta.uid() == unsafe { libc::geteuid() }, "fixture process lock must be an empty current-owner private file");
+-    root_lock.try_lock().context("another process still owns this fixture; no duplicate validator identities may start")?;
++    ensure!(
++        lock_meta.is_file()
++            && lock_meta.len() == 0
++            && lock_meta.permissions().mode() & 0o077 == 0
++            && lock_meta.uid() == unsafe { libc::geteuid() },
++        "fixture process lock must be an empty current-owner private file"
++    );
++    root_lock.try_lock().context(
++        "another process still owns this fixture; no duplicate validator identities may start",
++    )?;
+     root_lock.sync_all()?;
+     File::open(root)?.sync_all()?;
+     let mut log_options = OpenOptions::new();
+-    log_options.write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW);
+-    if args.resume { log_options.append(true); } else { log_options.create_new(true); }
++    log_options
++        .write(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW);
++    if args.resume {
++        log_options.append(true);
++    } else {
++        log_options.create_new(true);
++    }
+     let log = log_options.open(root.join("events.jsonl"))?;
+     let log_meta = log.metadata()?;
+-    ensure!(log_meta.is_file() && log_meta.permissions().mode() & 0o077 == 0
+-        && log_meta.uid() == unsafe { libc::geteuid() }, "fixture event log must remain a private current-owner file");
+-    Ok(Evidence { file: log, _root_lock: root_lock })
++    ensure!(
++        log_meta.is_file()
++            && log_meta.permissions().mode() & 0o077 == 0
++            && log_meta.uid() == unsafe { libc::geteuid() },
++        "fixture event log must remain a private current-owner file"
++    );
++    Ok(Evidence {
++        file: log,
++        _root_lock: root_lock,
++    })
+ }
+ 
+ fn configure_environment(args: &Args) {
+@@ -245,8 +337,11 @@
+     // constructor, but keep its directory scoped in case an invariant regresses.
+     unsafe {
+         env::set_var("FARF_DIR", args.root.join("ledgers"));
+-        if args.private { env::set_var("ZOLANA_NATIVE_INGRESS", "127.0.0.1:0"); }
+-        else { env::remove_var("ZOLANA_NATIVE_INGRESS"); }
++        if args.private {
++            env::set_var("ZOLANA_NATIVE_INGRESS", "127.0.0.1:0");
++        } else {
++            env::remove_var("ZOLANA_NATIVE_INGRESS");
++        }
+     }
+ }
+ 
+@@ -361,10 +456,18 @@
+         // Admission can race a leader handoff or reconnect. Keep the exact
+         // originally signed packet/blockhash/signature, never replace its identity.
+         if last_relay.elapsed() >= Duration::from_millis(250) {
+-            match rpc.send_transaction_with_config(&transaction, RpcSendTransactionConfig {
+-                skip_preflight: true, max_retries: Some(0), ..RpcSendTransactionConfig::default()
+-            }) {
+-                Ok(signature) => ensure!(signature == expected, "RPC substituted retransmission identity"),
++            match rpc.send_transaction_with_config(
++                &transaction,
++                RpcSendTransactionConfig {
++                    skip_preflight: true,
++                    max_retries: Some(0),
++                    ..RpcSendTransactionConfig::default()
++                },
++            ) {
++                Ok(signature) => ensure!(
++                    signature == expected,
++                    "RPC substituted retransmission identity"
++                ),
+                 Err(error) => last_relay_error = Some(error.to_string()),
+             }
+             identical_resends += 1;
+@@ -389,10 +492,11 @@
+                         status.confirmations.is_none(),
+                         "finalized response is not rooted"
+                     );
+-                    let finalized_slot = match node_rpc.get_slot_with_commitment(CommitmentConfig::finalized()) {
+-                        Ok(slot) => slot,
+-                        Err(_) => continue,
+-                    };
++                    let finalized_slot =
++                        match node_rpc.get_slot_with_commitment(CommitmentConfig::finalized()) {
++                            Ok(slot) => slot,
++                            Err(_) => continue,
++                        };
+                     ensure!(
+                         finalized_slot >= status.slot,
+                         "finalized RPC root precedes transaction"
+@@ -611,7 +715,11 @@
+         ensure!(
+             markers == 8 && pool_state.is_some(),
+             "missing native pool or permanent nullifiers: markers={}, pool_found={}, scanned_program_accounts={}, identity={}, pool_context_slot={}",
+-            markers, pool_state.is_some(), scanned_program_accounts, key, pool_context
++            markers,
++            pool_state.is_some(),
++            scanned_program_accounts,
++            key,
++            pool_context
+         );
+         let state =
+             json!({"accounts": observed, "pool": pool_state, "permanent_nullifiers": markers});
+@@ -640,78 +748,132 @@
+     private: Option<&(Value, Value)>,
+     evidence: &mut Evidence,
+ ) -> Result<()> {
+-    ensure!(keys.len() == 3 && cluster.validators.len() == 3,
+-        "quorum-loss test requires exactly three original equal-stake nodes");
++    ensure!(
++        keys.len() == 3 && cluster.validators.len() == 3,
++        "quorum-loss test requires exactly three original equal-stake nodes"
++    );
+     let survivor = keys[0];
+     let mut stopped = Vec::new();
+     for identity in &keys[1..] {
+         let mut node = cluster.exit_node(identity);
+         let storage = FileVoteHistoryStorage::new(node.info.ledger_path.clone());
+-        let history = storage.load(identity).context("verify original signed history before quorum rejoin")?;
++        let history = storage
++            .load(identity)
++            .context("verify original signed history before quorum rejoin")?;
+         let vote_file = storage.filename(identity);
+-        ensure!(vote_file.canonicalize()? == vote_file && vote_file.is_file()
+-            && node.info.ledger_path.canonicalize()? == node.info.ledger_path
+-            && node.info.ledger_path.starts_with(args.root.join("ledgers")),
+-            "quorum rejoin must retain the exact original ledger and voting history");
++        ensure!(
++            vote_file.canonicalize()? == vote_file
++                && vote_file.is_file()
++                && node.info.ledger_path.canonicalize()? == node.info.ledger_path
++                && node.info.ledger_path.starts_with(args.root.join("ledgers")),
++            "quorum rejoin must retain the exact original ledger and voting history"
++        );
+         node.config.require_vote_history = true;
+         node.config.wait_for_supermajority = None;
+-        ensure!(node.config.new_hard_forks.is_none() && node.config.warp_slot.is_none()
+-            && node.config.run_verification && node.config.blockstore_options.recovery_mode.is_none(),
+-            "quorum rejoin must not change verification or reset consensus state");
+-        evidence.event("quorum_original_node_stopped", json!({"identity": identity.to_string(),
++        ensure!(
++            node.config.new_hard_forks.is_none()
++                && node.config.warp_slot.is_none()
++                && node.config.run_verification
++                && node.config.blockstore_options.recovery_mode.is_none(),
++            "quorum rejoin must not change verification or reset consensus state"
++        );
++        evidence.event(
++            "quorum_original_node_stopped",
++            json!({"identity": identity.to_string(),
+             "ledger": node.info.ledger_path, "verified_signed_vote_history_root": history.root(),
+             "require_vote_history": true, "wait_for_supermajority": null,
+-            "orderly_stop": true, "sigkill_test": false}))?;
++            "orderly_stop": true, "sigkill_test": false}),
++        )?;
+         stopped.push((*identity, node));
+     }
+     // Drain any certificate already received while all original voters were up.
+     sleep(Duration::from_secs(2));
+     let rpc = client(cluster, &survivor)?;
+     let root_before = rpc.get_slot_with_commitment(CommitmentConfig::finalized())?;
+-    let bank_root_before = cluster.validators[&survivor].validator.as_ref()
+-        .context("quorum survivor stopped")?.bank_forks.read().unwrap().root();
++    let bank_root_before = cluster.validators[&survivor]
++        .validator
++        .as_ref()
++        .context("quorum survivor stopped")?
++        .bank_forks
++        .read()
++        .unwrap()
++        .root();
+     let destination = Keypair::new().pubkey();
+-    let transaction = solana_system_transaction::transfer(&cluster.funding_keypair,
+-        &destination, PUBLIC_AMOUNT, rpc.get_latest_blockhash()?);
++    let transaction = solana_system_transaction::transfer(
++        &cluster.funding_keypair,
++        &destination,
++        PUBLIC_AMOUNT,
++        rpc.get_latest_blockhash()?,
++    );
+     let signature = transaction.signatures[0];
+-    let returned = rpc.send_transaction_with_config(&transaction, RpcSendTransactionConfig {
+-        skip_preflight: true, max_retries: Some(0), ..RpcSendTransactionConfig::default()
+-    })?;
++    let returned = rpc.send_transaction_with_config(
++        &transaction,
++        RpcSendTransactionConfig {
++            skip_preflight: true,
++            max_retries: Some(0),
++            ..RpcSendTransactionConfig::default()
++        },
++    )?;
+     ensure!(returned == signature, "quorum probe signature substituted");
+     let began = Instant::now();
+     let mut observations = 0;
+     while began.elapsed() < Duration::from_secs(8) {
+         let response = rpc.get_signature_statuses_with_history(&[signature])?;
+         if let Some(status) = &response.value[0] {
+-            ensure!(status.confirmation_status != Some(TransactionConfirmationStatus::Finalized),
+-                "fresh transaction finalized with only one third of original stake online");
++            ensure!(
++                status.confirmation_status != Some(TransactionConfirmationStatus::Finalized),
++                "fresh transaction finalized with only one third of original stake online"
++            );
+         }
+         let rpc_root = rpc.get_slot_with_commitment(CommitmentConfig::finalized())?;
+-        let bank_root = cluster.validators[&survivor].validator.as_ref()
+-            .context("quorum survivor stopped")?.bank_forks.read().unwrap().root();
+-        ensure!(rpc_root == root_before && bank_root == bank_root_before,
+-            "finalized root advanced without quorum: RPC {root_before}->{rpc_root}, Bank {bank_root_before}->{bank_root}");
++        let bank_root = cluster.validators[&survivor]
++            .validator
++            .as_ref()
++            .context("quorum survivor stopped")?
++            .bank_forks
++            .read()
++            .unwrap()
++            .root();
++        ensure!(
++            rpc_root == root_before && bank_root == bank_root_before,
++            "finalized root advanced without quorum: RPC {root_before}->{rpc_root}, Bank {bank_root_before}->{bank_root}"
++        );
+         observations += 1;
+         sleep(Duration::from_millis(100));
+     }
+-    evidence.event("insufficient_stake_did_not_finalize", json!({"survivor": survivor.to_string(),
++    evidence.event(
++        "insufficient_stake_did_not_finalize",
++        json!({"survivor": survivor.to_string(),
+         "online_original_stake_numerator": 1, "online_original_stake_denominator": 3,
+         "probe_signature": signature.to_string(), "finalized_rpc_root": root_before,
+         "actual_bank_root": bank_root_before, "observation_count": observations,
+-        "elapsed_ms": began.elapsed().as_millis(), "threshold_overrides": false}))?;
++        "elapsed_ms": began.elapsed().as_millis(), "threshold_overrides": false}),
++    )?;
+     for (identity, node) in stopped {
+         cluster.restart_node(&identity, node, SocketAddrSpace::Unspecified);
+         let node = &cluster.validators[&identity];
+-        ensure!(node.config.require_vote_history && node.config.wait_for_supermajority.is_none()
+-            && node.config.new_hard_forks.is_none(), "rejoined node lost original-history safety configuration");
++        ensure!(
++            node.config.require_vote_history
++                && node.config.wait_for_supermajority.is_none()
++                && node.config.new_hard_forks.is_none(),
++            "rejoined node lost original-history safety configuration"
++        );
+     }
+     public_send(cluster, keys, args.samples + 2, evidence)?;
+-    evidence.event("quorum_rejoined_original_ledgers_finalized", check_alpenglow(cluster, &args.root)?)?;
++    evidence.event(
++        "quorum_rejoined_original_ledgers_finalized",
++        check_alpenglow(cluster, &args.root)?,
++    )?;
+     if let Some((report, expected_state)) = private {
+         let recovered = audit_private(cluster, keys, report, args.network(), args.slot_anchors)?;
+-        ensure!(recovered["native_state"] == *expected_state,
+-            "quorum loss/rejoin changed original private payments, pool or permanent nullifiers");
+-        ensure!(native_endpoints(keys)?.len() == 3, "rejoined native listeners missing");
++        ensure!(
++            recovered["native_state"] == *expected_state,
++            "quorum loss/rejoin changed original private payments, pool or permanent nullifiers"
++        );
++        ensure!(
++            native_endpoints(keys)?.len() == 3,
++            "rejoined native listeners missing"
++        );
+         evidence.event("private_state_preserved_after_quorum_rejoin", recovered)?;
+     }
+     Ok(())
+@@ -730,7 +892,11 @@
+ fn external_fixture_ready(cluster: &LocalCluster, args: &Args) -> Result<Value> {
+     let mut keys = cluster.get_node_pubkeys();
+     keys.sort();
+-    let endpoints = if args.private { native_endpoints(&keys)? } else { Vec::new() };
++    let endpoints = if args.private {
++        native_endpoints(&keys)?
++    } else {
++        Vec::new()
++    };
+     let peers = keys.iter().map(|key| -> Result<Value> {
+         let rpc = cluster.get_contact_info(key).context("missing held peer")?.rpc()
+             .context("managed validator RPC missing")?;
+@@ -751,7 +917,11 @@
+     }))
+ }
+ 
+-fn baseline(args: &Args, evidence: &mut Evidence, resume_manifest: Option<&resume::Manifest>) -> Result<()> {
++fn baseline(
++    args: &Args,
++    evidence: &mut Evidence,
++    resume_manifest: Option<&resume::Manifest>,
++) -> Result<()> {
+     agave_logger::setup_with_default("warn");
+     evidence.event(
+         "start",
+@@ -770,7 +940,10 @@
+             manifest.start(&args.root)?
+         }
+     } else {
+-        let validator_config = pilot_validator_config(true);
++        let mut validator_config = pilot_validator_config(true);
++        if args.durable_ancestry_fixture {
++            restart_snapshots::configure_fresh_durable_fixture(&mut validator_config)?;
++        }
+         let node_keys: Vec<_> = (0..args.nodes)
+             .map(|_| (ValidatorKeys::new(), true))
+             .collect();
+@@ -833,7 +1006,10 @@
+     keys.sort();
+     let result = (|| {
+         if let Some(manifest) = resume_manifest {
+-            evidence.event("whole_process_original_ledger_restored", manifest.validate_restored(&cluster, args)?)?;
++            evidence.event(
++                "whole_process_original_ledger_restored",
++                manifest.validate_restored(&cluster, args)?,
++            )?;
+         }
+         evidence.event(
+             "real_alpenglow_ready",
+@@ -845,10 +1021,13 @@
+         }
+         if args.hold_seconds > 0 {
+             resume::record(&args.root, &cluster, args)?;
+-            evidence.event("whole_process_resume_metadata_durable", json!({
+-                "manifest": args.root.join("resume.json"), "original_ledgers_only": true,
+-                "root_lock_held": true, "sigkill_test_completed": false,
+-            }))?;
++            evidence.event(
++                "whole_process_resume_metadata_durable",
++                json!({
++                    "manifest": args.root.join("resume.json"), "original_ledgers_only": true,
++                    "root_lock_held": true, "sigkill_test_completed": false,
++                }),
++            )?;
+         }
+         let private = if args.private && args.mac_relay.is_none() && !args.resume {
+             for node in cluster.validators.values() {
+@@ -899,7 +1078,10 @@
+             );
+             node.config.require_vote_history = true;
+             node.config.wait_for_supermajority = None;
+-            ensure!(node.config.new_hard_forks.is_none(), "restart must not introduce a hard fork");
++            ensure!(
++                node.config.new_hard_forks.is_none(),
++                "restart must not introduce a hard fork"
++            );
+             evidence.event("restart_original_ledger", json!({"identity": identity.to_string(),
+                 "ledger": node.info.ledger_path, "verified_vote_history_root": signed_history.root(),
+                 "require_vote_history": true, "orderly_restart": true, "sigkill_test": false}))?;
+@@ -928,11 +1110,17 @@
+         }
+         if args.hold_seconds > 0 {
+             resume::record(&args.root, &cluster, args)?;
+-            evidence.event("whole_process_resume_metadata_durable", json!({
+-                "manifest": args.root.join("resume.json"), "original_ledgers_only": true,
+-                "root_lock_held": true, "sigkill_test_completed": false,
+-            }))?;
+-            evidence.event("external_mac_fixture_ready", external_fixture_ready(&cluster, args)?)?;
++            evidence.event(
++                "whole_process_resume_metadata_durable",
++                json!({
++                    "manifest": args.root.join("resume.json"), "original_ledgers_only": true,
++                    "root_lock_held": true, "sigkill_test_completed": false,
++                }),
++            )?;
++            evidence.event(
++                "external_mac_fixture_ready",
++                external_fixture_ready(&cluster, args)?,
++            )?;
+             sleep(Duration::from_secs(args.hold_seconds));
+             evidence.event(
+                 "external_mac_fixture_hold_finished",
+@@ -957,20 +1145,33 @@
+ }
+ 
+ fn main() -> Result<()> {
+-    if build_info::maybe_print()? { return Ok(()); }
+-    if offline_probe::maybe_run()? { return Ok(()); }
++    if build_info::maybe_print()? {
++        return Ok(());
++    }
++    if offline_probe::maybe_run()? {
++        return Ok(());
++    }
++    if resume::maybe_durable_operation()? {
++        return Ok(());
++    }
+     let mut args = Args::parse()?;
+     let mut evidence = prepare_root(&args)?;
+     let resume_manifest = if args.resume {
+-        let manifest = resume::Manifest::load(&args.root)?;
++        let mut manifest = resume::Manifest::load(&args.root)?;
+         manifest.apply_profile(&mut args)?;
+-        ensure!(!args.quorum_loss_rejoin || args.nodes == 3,
+-            "resumed quorum acceptance requires exactly three original validators");
++        ensure!(
++            !args.quorum_loss_rejoin || args.nodes == 3,
++            "resumed quorum acceptance requires exactly three original validators"
++        );
+         Some(manifest)
+-    } else { None };
++    } else {
++        None
++    };
+     configure_environment(&args);
+     if args.service {
+-        let manifest = resume_manifest.as_ref().context("service requires original resume metadata")?;
++        let manifest = resume_manifest
++            .as_ref()
++            .context("service requires original resume metadata")?;
+         return service::run(&args, &mut evidence, manifest);
+     }
+     match baseline(&args, &mut evidence, resume_manifest.as_ref()) {
+@@ -987,3 +1188,91 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod durable_fixture_args_tests {
++    use super::*;
++    fn parse(values: &[&str]) -> Result<Args> {
++        Args::parse_from(values.iter().map(|v| (*v).to_owned()))
++    }
++    #[test]
++    fn durable_fixture_requires_fresh_three_peer_native_hold_and_explicit_resume_pin() {
++        assert!(
++            parse(&[
++                "--root",
++                "/tmp/new",
++                "--nodes",
++                "3",
++                "--slot-anchors",
++                "--hold-seconds",
++                "600",
++                "--durable-ancestry-fixture"
++            ])
++            .is_ok()
++        );
++        assert!(
++            parse(&[
++                "--root",
++                "/tmp/new",
++                "--nodes",
++                "2",
++                "--slot-anchors",
++                "--hold-seconds",
++                "600",
++                "--durable-ancestry-fixture"
++            ])
++            .is_err()
++        );
++        assert!(
++            parse(&[
++                "--root",
++                "/tmp/new",
++                "--nodes",
++                "3",
++                "--private",
++                "--hold-seconds",
++                "600",
++                "--durable-ancestry-fixture"
++            ])
++            .is_err()
++        );
++        assert!(
++            parse(&[
++                "--resume-root",
++                "/tmp/old",
++                "--service",
++                "--durable-ancestry-fixture"
++            ])
++            .is_err()
++        );
++        let pin = "11".repeat(32);
++        assert!(
++            parse(&[
++                "--resume-root",
++                "/tmp/old",
++                "--service",
++                "--durable-ancestry-config-sha256",
++                &pin
++            ])
++            .is_ok()
++        );
++        assert!(
++            parse(&[
++                "--resume-root",
++                "/tmp/old",
++                "--durable-ancestry-config-sha256",
++                &pin
++            ])
++            .is_err()
++        );
++        assert!(
++            parse(&[
++                "--root",
++                "/tmp/new",
++                "--durable-ancestry-config-sha256",
++                &pin
++            ])
++            .is_err()
++        );
++    }
++}
+diff --git a/zolana-fast-check/src/restart_snapshots.rs b/zolana-fast-check/src/restart_snapshots.rs
+--- a/zolana-fast-check/src/restart_snapshots.rs
++++ b/zolana-fast-check/src/restart_snapshots.rs
+@@ -9,16 +9,18 @@
+         snapshot_config::{SnapshotConfig, SnapshotUsage},
+     },
+     anyhow::{Context, Result, ensure},
++    serde::{Deserialize, Serialize},
+     solana_core::validator::{ValidatorConfig, is_snapshot_config_valid},
+     solana_ledger::{
+         blockstore_options::BlockstoreCleanupStrategy,
+         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
+     },
+     std::{
+-        fs::{self, DirBuilder, File},
++        fs::{self, DirBuilder, File, OpenOptions},
+         io::ErrorKind,
++        io::{Read, Write},
+         num::{NonZeroU64, NonZeroUsize},
+-        os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
++        os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+         path::{Path, PathBuf},
+     },
+ };
+@@ -28,6 +30,223 @@
+ const FULL_INTERVAL_BLOCKS: u64 = 1_024;
+ const RETAIN_FULL: usize = 2;
+ const DIRECTORY: &str = "native-snapshots";
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(super) struct PinnedArchive {
++    pub filename: String,
++    pub slot: u64,
++    pub snapshot_hash: String,
++    pub file_sha256: [u8; 32],
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(super) struct PinnedSnapshots {
++    pub protected: Vec<PinnedArchive>,
++    pub selected_filename: String,
++    pub oldest_parent_slot: u64,
++}
++
++pub(super) fn file_digest(path: &Path, owner: u32, maximum: u64) -> Result<[u8; 32]> {
++    let mut file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(path)?;
++    let meta = file.metadata()?;
++    ensure!(
++        meta.is_file()
++            && meta.uid() == owner
++            && meta.nlink() == 1
++            && meta.permissions().mode() & 0o022 == 0
++            && meta.len() > 0
++            && meta.len() <= maximum
++            && path.canonicalize()? == path,
++        "unsafe or oversized pinned fixture file"
++    );
++    let mut hasher = solana_sha256_hasher::Hasher::default();
++    let mut buffer = [0u8; 65536];
++    let mut total = 0u64;
++    loop {
++        let n = file.read(&mut buffer)?;
++        if n == 0 {
++            break;
++        }
++        total = total.checked_add(n as u64).context("file size overflow")?;
++        ensure!(total <= maximum, "pinned fixture file grew beyond bound");
++        hasher.hash(&buffer[..n]);
++    }
++    ensure!(
++        total == meta.len() && file.metadata()?.len() == meta.len(),
++        "pinned file changed while hashing"
++    );
++    Ok(hasher.result().to_bytes())
++}
++
++pub(super) fn configure_fresh_durable_fixture(config: &mut ValidatorConfig) -> Result<()> {
++    // Only main's fresh three-peer disposable eligibility flag calls this.
++    let mut snapshots =
++        solana_local_cluster::local_cluster::LocalCluster::create_dummy_load_only_snapshot_config();
++    snapshots.usage = SnapshotUsage::LoadAndGenerate;
++    snapshots.full_snapshot_archive_interval =
++        SnapshotInterval::Slots(NonZeroU64::new(64).unwrap());
++    snapshots.incremental_snapshot_archive_interval = SnapshotInterval::Disabled;
++    snapshots.maximum_full_snapshot_archives_to_retain = NonZeroUsize::new(2).unwrap();
++    snapshots.use_direct_io = false;
++    snapshots.use_registered_io_uring_buffers = false;
++    ensure!(
++        is_snapshot_config_valid(&snapshots),
++        "invalid fresh durable-fixture snapshot generation"
++    );
++    config.snapshot_config = snapshots;
++    Ok(())
++}
++
++pub(super) fn validate_pins(
++    ledger: &Path,
++    pins: &PinnedSnapshots,
++    original_root: u64,
++) -> Result<()> {
++    let (_, full, _, _) = paths(ledger);
++    let owner = fs::metadata(ledger)?.uid();
++    owned_directory(&full, owner)?;
++    full_only_inputs(ledger)?;
++    ensure!(
++        pins.protected.len() == 2
++            && pins.protected[0].slot < pins.protected[1].slot
++            && pins.protected[0].slot > original_root
++            && pins.oldest_parent_slot < pins.protected[0].slot
++            && pins.selected_filename == pins.protected[1].filename,
++        "exact two protected full snapshots and explicit selection required"
++    );
++    let actual: Vec<_> = agave_snapshots::paths::full_snapshot_archives_iter(&full).collect();
++    ensure!(
++        actual.len() == 2,
++        "protected full snapshot inventory changed"
++    );
++    for pin in &pins.protected {
++        ensure!(
++            Path::new(&pin.filename).components().count() == 1 && !pin.filename.starts_with('.'),
++            "simple pinned full archive filename required"
++        );
++        let info = actual
++            .iter()
++            .find(|a| {
++                a.path()
++                    .file_name()
++                    .is_some_and(|n| n == pin.filename.as_str())
++            })
++            .context("explicit pinned full archive missing")?;
++        ensure!(
++            info.slot() == pin.slot
++                && info.hash().0.to_string() == pin.snapshot_hash
++                && file_digest(info.path(), owner, 8 * 1024 * 1024 * 1024)? == pin.file_sha256,
++            "pinned full archive metadata or bytes changed"
++        );
++    }
++    let highest = get_highest_full_snapshot_archive_info(&full)
++        .context("pinned selected full archive missing")?;
++    ensure!(
++        highest
++            .path()
++            .file_name()
++            .is_some_and(|n| n == pins.selected_filename.as_str()),
++        "ordinary loader would select an unpinned newer full archive; refusing automatic selection"
++    );
++    Ok(())
++}
++
++// Offline fresh093 fixture preparation only. The two generated archives live
++// in each original ledger root; no filename is treated as verified bank state.
++// These copies become eligible only after the ordinary full snapshot loader.
++pub(super) fn protect_generated(
++    ledger: &Path,
++    original_root: u64,
++    minimum_slot: u64,
++) -> Result<Vec<PinnedArchive>> {
++    let owner = fs::metadata(ledger)?.uid();
++    owned_directory(ledger, owner)?;
++    let mut sources: Vec<_> = agave_snapshots::paths::full_snapshot_archives_iter(ledger).collect();
++    sources.sort_by_key(|info| info.slot());
++    ensure!(
++        sources.len() == 2
++            && sources[0].slot() > original_root
++            && sources[0].slot() >= minimum_slot
++            && sources[0].slot() < sources[1].slot(),
++        "need exactly two real generated full archives strictly after the payment threshold"
++    );
++    let (root, full, incremental, bank) = paths(ledger);
++    for path in [&root, &full, &incremental, &bank] {
++        prepare_directory(path, owner)?;
++    }
++    full_only_inputs(ledger)?;
++    ensure!(
++        fs::read_dir(&full)?.next().is_none(),
++        "protected snapshot directory must be fresh and empty; no overwrite or automatic retry"
++    );
++    let mut pins = Vec::new();
++    for source in sources {
++        let filename = source
++            .path()
++            .file_name()
++            .and_then(|v| v.to_str())
++            .context("generated full archive filename is not UTF8")?
++            .to_owned();
++        ensure!(
++            source.path().parent() == Some(ledger)
++                && Path::new(&filename).components().count() == 1
++                && !filename.starts_with('.'),
++            "generated archive is not a direct original-ledger child"
++        );
++        let digest = file_digest(source.path(), owner, 8 * 1024 * 1024 * 1024)?;
++        let mut input = OpenOptions::new()
++            .read(true)
++            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++            .open(source.path())?;
++        let mut output = OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .custom_flags(libc::O_NOFOLLOW)
++            .open(full.join(&filename))?;
++        let copied = std::io::copy(
++            &mut (&mut input).take(8 * 1024 * 1024 * 1024 + 1),
++            &mut output,
++        )?;
++        ensure!(
++            copied > 0 && copied <= 8 * 1024 * 1024 * 1024,
++            "generated archive copy exceeded bound"
++        );
++        output.flush()?;
++        output.sync_all()?;
++        ensure!(
++            file_digest(source.path(), owner, 8 * 1024 * 1024 * 1024)? == digest
++                && file_digest(&full.join(&filename), owner, 8 * 1024 * 1024 * 1024)? == digest,
++            "generated/protected full archive changed during copy"
++        );
++        pins.push(PinnedArchive {
++            filename,
++            slot: source.slot(),
++            snapshot_hash: source.hash().0.to_string(),
++            file_sha256: digest,
++        });
++    }
++    File::open(&full)?.sync_all()?;
++    Ok(pins)
++}
++
++pub(super) fn configure_pinned(
++    config: &mut ValidatorConfig,
++    ledger: &Path,
++    original_root: u64,
++    pins: &PinnedSnapshots,
++) -> Result<()> {
++    validate_pins(ledger, pins, original_root)?;
++    // Existing Always/real-account/hash verification and no-prune strategy stay
++    // mandatory. The independent pin was checked BEFORE normal selection.
++    configure(config, ledger, original_root)?;
++    validate_pins(ledger, pins, original_root)
++}
+ 
+ fn paths(ledger: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+     let root = ledger.join(DIRECTORY);
+@@ -331,4 +550,67 @@
+         value.use_snapshot_archives_at_startup = UseSnapshotArchivesAtStartup::WhenNewest;
+         assert!(validate_configuration(&value, root.path()).is_err());
+     }
+-}
++    #[test]
++    fn protected_generated_pair_pins_exact_bytes_and_refuses_changed_or_newer_archive() {
++        let root = solana_ledger::get_tmp_ledger_path_auto_delete!();
++        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
++        for slot in [100, 164] {
++            fs::write(
++                root.path().join(format!(
++                    "snapshot-{slot}-11111111111111111111111111111111.tar.zst"
++                )),
++                format!("metadata-only unit archive {slot}; NOT a verified snapshot"),
++            )
++            .unwrap();
++        }
++        assert!(protect_generated(root.path(), 44, 101).is_err());
++        let pair = protect_generated(root.path(), 44, 100).unwrap();
++        assert_eq!(
++            pair.iter().map(|p| p.slot).collect::<Vec<_>>(),
++            vec![100, 164]
++        );
++        let pins = PinnedSnapshots {
++            selected_filename: pair[1].filename.clone(),
++            protected: pair,
++            oldest_parent_slot: 99,
++        };
++        validate_pins(root.path(), &pins, 44).unwrap();
++        assert!(protect_generated(root.path(), 44, 100).is_err());
++        let protected = paths(root.path()).1.join(&pins.protected[0].filename);
++        let original = fs::read(&protected).unwrap();
++        fs::write(&protected, b"changed protected snapshot bytes").unwrap();
++        assert!(validate_pins(root.path(), &pins, 44).is_err());
++        fs::write(&protected, &original).unwrap();
++        validate_pins(root.path(), &pins, 44).unwrap();
++        metadata_archive(root.path(), 228);
++        assert!(validate_pins(root.path(), &pins, 44).is_err());
++    }
++
++    #[test]
++    fn exact_snapshot_pair_and_independent_file_pins_are_mandatory() {
++        let root = solana_ledger::get_tmp_ledger_path_auto_delete!();
++        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
++        let path = root
++            .path()
++            .join("snapshot-100-11111111111111111111111111111111.tar.zst");
++        fs::write(&path, b"metadata-only one source").unwrap();
++        assert!(protect_generated(root.path(), 44, 100).is_err());
++        fs::write(
++            root.path()
++                .join("snapshot-164-11111111111111111111111111111111.tar.zst"),
++            b"metadata-only second source",
++        )
++        .unwrap();
++        let pair = protect_generated(root.path(), 44, 100).unwrap();
++        let mut pins = PinnedSnapshots {
++            selected_filename: pair[1].filename.clone(),
++            protected: pair,
++            oldest_parent_slot: 99,
++        };
++        pins.protected[0].file_sha256[0] ^= 1;
++        assert!(validate_pins(root.path(), &pins, 44).is_err());
++        pins.protected[0].file_sha256[0] ^= 1;
++        pins.selected_filename = pins.protected[0].filename.clone();
++        assert!(validate_pins(root.path(), &pins, 44).is_err());
++    }
++}
+diff --git a/zolana-fast-check/src/resume.rs b/zolana-fast-check/src/resume.rs
+--- a/zolana-fast-check/src/resume.rs
++++ b/zolana-fast-check/src/resume.rs
+@@ -1,7 +1,10 @@
+ //! Owner-only, original-ledger whole-process recovery for this isolated fixture.
+ //! No ledger creation, genesis replacement, account migration, or vote-history reset.
+ use {
+-    super::{Args, UPSTREAM_COMMIT, ancestry, pilot_validator_config, restart_snapshots},
++    super::{
++        Args, UPSTREAM_COMMIT, ancestry, ancestry_archive, pilot_validator_config,
++        restart_snapshots,
++    },
+     agave_votor::vote_history_storage::{FileVoteHistoryStorage, VoteHistoryStorage},
+     anyhow::{Context, Result, ensure},
+     serde::{Deserialize, Serialize},
+@@ -15,9 +18,9 @@
+     solana_signer::Signer,
+     std::{
+         collections::HashSet,
+-        fs::{self, File, OpenOptions},
++        fs::{self, DirBuilder, File, OpenOptions},
+         io::{Read, Write},
+-        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
++        os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+         path::{Component, Path, PathBuf},
+         sync::Arc,
+         thread::sleep,
+@@ -36,6 +39,10 @@
+     root_slot: u64,
+     root_bank_hash: String,
+     vote_history_root: u64,
++}
++
++fn is_false(value: &bool) -> bool {
++    !*value
+ }
+ 
+ #[derive(Serialize, Deserialize)]
+@@ -52,6 +59,179 @@
+     slot_anchors: bool,
+     mac_relay: Option<String>,
+     nodes: Vec<NodeRecord>,
++    #[serde(default, skip_serializing_if = "is_false")]
++    durable_ancestry_fixture: bool,
++    #[serde(skip)]
++    durable: Option<LoadedDurable>,
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct CanonicalExport {
++    relative_path: PathBuf,
++    file_sha256: [u8; 32],
++    network: [u8; 32],
++    genesis_hash: [u8; 32],
++    through_slot: u64,
++    through_blockhash: [u8; 32],
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct DurablePeer {
++    binding: ancestry_archive::ArchiveBinding,
++    generation: String,
++    manifest_sha256: [u8; 32],
++    snapshots: restart_snapshots::PinnedSnapshots,
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct DurablePolicy {
++    format: String,
++    fixture_root: PathBuf,
++    resume_sha256: [u8; 32],
++    canonical_export: CanonicalExport,
++    peers: Vec<DurablePeer>,
++}
++
++struct LoadedDurable {
++    policy: DurablePolicy,
++    archives: Vec<ancestry_archive::LoadedArchive>,
++}
++
++fn hash_bytes(value: &str) -> Result<[u8; 32]> {
++    // Pubkey and BANK/block hashes use the same strict32-byte base58 codec.
++    Ok(value.parse::<Pubkey>()?.to_bytes())
++}
++
++fn hex_pin(value: &str) -> Result<[u8; 32]> {
++    ensure!(
++        value.len() == 64
++            && value
++                .bytes()
++                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
++        "exact lowercase SHA256 pin required"
++    );
++    let mut result = [0u8; 32];
++    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
++        result[index] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
++    }
++    Ok(result)
++}
++
++fn hex(value: &[u8; 32]) -> String {
++    value.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn load_durable(root: &Path, expected_pin: [u8; 32], manifest: &Manifest) -> Result<LoadedDurable> {
++    ensure!(
++        manifest.durable_ancestry_fixture
++            && manifest.nodes.len() == 3
++            && manifest.private
++            && manifest.slot_anchors,
++        "durable policy requires the new disposable093 fixture marker"
++    );
++    ensure!(
++        fs::symlink_metadata(root.join("retention-policy.json"))?.nlink() == 1,
++        "retention policy publication is incomplete or has an unexpected hard link"
++    );
++    let raw = private_bytes(&root.join("retention-policy.json"), 65536)?;
++    ensure!(
++        solana_sha256_hasher::hash(&raw).to_bytes() == expected_pin,
++        "independently pinned retention policy differs"
++    );
++    let policy: DurablePolicy = serde_json::from_slice(&raw)?;
++    let resume_pin =
++        solana_sha256_hasher::hash(&private_bytes(&root.join("resume.json"), 65536)?).to_bytes();
++    ensure!(
++        policy.format == "zolana093-disposable-durable-retention-v1"
++            && policy.fixture_root == root
++            && policy.resume_sha256 == resume_pin
++            && policy.peers.len() == 3,
++        "durable policy domain/count differs"
++    );
++    let canonical = &policy.canonical_export;
++    ensure!(
++        canonical.network == zolana_native_check::TEST_SLOT_NETWORK
++            && canonical.genesis_hash == hash_bytes(&manifest.genesis_hash)?
++            && canonical.through_slot > 0
++            && canonical.through_blockhash != [0; 32],
++        "canonical export network/target binding differs"
++    );
++    let canonical_path = child(root, &canonical.relative_path)?;
++    ensure!(
++        restart_snapshots::file_digest(&canonical_path, uid(), 1024 * 1024 * 1024)?
++            == canonical.file_sha256,
++        "closed full canonical export bytes differ"
++    );
++    let deadline = Instant::now() + Duration::from_secs(60);
++    let mut archives = Vec::new();
++    let mut seen = HashSet::new();
++    for peer in &policy.peers {
++        let domain = &peer.binding.domain;
++        ensure!(
++            seen.insert(domain.identity),
++            "duplicate durable policy peer"
++        );
++        let expected = manifest
++            .nodes
++            .iter()
++            .find(|n| hash_bytes(&n.identity).ok() == Some(domain.identity))
++            .context("durable policy peer not in immutable resume manifest")?;
++        ensure!(
++            domain.network == canonical.network
++                && domain.genesis_hash == canonical.genesis_hash
++                && domain.voter == hash_bytes(&expected.voter)?
++                && domain.resume_sha256 == resume_pin
++                && Path::new(&domain.ledger_relative_path) == expected.ledger
++                && peer.binding.original.slot == expected.root_slot
++                && peer.binding.original.certified_bank_hash
++                    == hash_bytes(&expected.root_bank_hash)?
++                && peer.binding.canonical_export_through == canonical.through_slot
++                && canonical.through_slot > peer.binding.prune_through
++                && peer
++                    .snapshots
++                    .protected
++                    .first()
++                    .is_some_and(|s| s.slot == peer.binding.snapshot_slot)
++                && peer.snapshots.oldest_parent_slot == peer.binding.snapshot_parent_slot
++                && peer
++                    .snapshots
++                    .protected
++                    .last()
++                    .is_some_and(|s| s.slot <= peer.binding.captured_current_root_slot),
++            "durable peer original/domain/export/snapshot binding differs"
++        );
++        restart_snapshots::validate_pins(
++            &child(root, &expected.ledger)?,
++            &peer.snapshots,
++            expected.root_slot,
++        )?;
++        let archive_root = root.join("durable-ancestry").join(&expected.identity);
++        archives.push(ancestry_archive::load(
++            &archive_root,
++            &peer.generation,
++            uid(),
++            peer.manifest_sha256,
++            &peer.binding,
++            deadline,
++            || false,
++        )?);
++    }
++    Ok(LoadedDurable { policy, archives })
++}
++
++fn check_live_durable_head(
++    store: &Blockstore,
++    binding: &ancestry_archive::ArchiveBinding,
++) -> Result<()> {
++    let actual = ancestry_archive::capture_root_evidence(store, binding.head.slot)?;
++    ensure!(
++        actual.certified_bank_hash == binding.head.certified_bank_hash,
++        "retained live durable head certificate conflicts with the captured exact BANK"
++    );
++    Ok(())
+ }
+ 
+ fn uid() -> u32 {
+@@ -61,40 +241,69 @@
+ 
+ pub(super) fn check_root(root: &Path) -> Result<()> {
+     let meta = fs::symlink_metadata(root)?;
+-    ensure!(meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == uid()
+-        && meta.permissions().mode() & 0o077 == 0 && root.canonicalize()? == root,
+-        "original fixture root must be a real current-owner directory with mode 0700");
++    ensure!(
++        meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == uid()
++            && meta.permissions().mode() & 0o077 == 0
++            && root.canonicalize()? == root,
++        "original fixture root must be a real current-owner directory with mode 0700"
++    );
+     let prefix = root.join("ledgers");
+-    ensure!(prefix.canonicalize()? == prefix && fs::metadata(&prefix)?.uid() == uid(),
+-        "original fixture ledger prefix missing or changed");
++    ensure!(
++        prefix.canonicalize()? == prefix && fs::metadata(&prefix)?.uid() == uid(),
++        "original fixture ledger prefix missing or changed"
++    );
+     Ok(())
+ }
+ 
+ fn private_bytes(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+-    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
++    let mut file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(path)?;
+     let meta = file.metadata()?;
+-    ensure!(meta.is_file() && meta.uid() == uid() && meta.permissions().mode() & 0o077 == 0 && meta.len() <= maximum,
+-        "resume file must be a bounded current-owner private regular file");
++    ensure!(
++        meta.is_file()
++            && meta.uid() == uid()
++            && meta.permissions().mode() & 0o077 == 0
++            && meta.len() <= maximum,
++        "resume file must be a bounded current-owner private regular file"
++    );
+     let mut bytes = Vec::new();
+     (&mut file).take(maximum + 1).read_to_end(&mut bytes)?;
+-    ensure!(bytes.len() as u64 <= maximum, "resume file exceeded its bound");
++    ensure!(
++        bytes.len() as u64 <= maximum,
++        "resume file exceeded its bound"
++    );
+     Ok(bytes)
+ }
+ 
+ fn child(root: &Path, relative: &Path) -> Result<PathBuf> {
+-    ensure!(!relative.as_os_str().is_empty() && relative.components().all(|part| matches!(part, Component::Normal(_))),
+-        "resume path must be a simple relative child of the original fixture");
++    ensure!(
++        !relative.as_os_str().is_empty()
++            && relative
++                .components()
++                .all(|part| matches!(part, Component::Normal(_))),
++        "resume path must be a simple relative child of the original fixture"
++    );
+     let path = root.join(relative);
+-    ensure!(path.canonicalize()? == path && path.starts_with(root) && fs::metadata(&path)?.uid() == uid(),
+-        "resume path changed, is not owned, or escaped the original fixture");
++    ensure!(
++        path.canonicalize()? == path
++            && path.starts_with(root)
++            && fs::metadata(&path)?.uid() == uid(),
++        "resume path changed, is not owned, or escaped the original fixture"
++    );
+     Ok(path)
+ }
+ 
+ fn check_vote_file(storage: &FileVoteHistoryStorage, identity: &Pubkey) -> Result<()> {
+     let path = storage.filename(identity);
+     let meta = fs::symlink_metadata(&path)?;
+-    ensure!(path.canonicalize()? == path && meta.is_file() && meta.uid() == uid(),
+-        "original signed vote-history path is not a real current-owner file");
++    ensure!(
++        path.canonicalize()? == path && meta.is_file() && meta.uid() == uid(),
++        "original signed vote-history path is not a real current-owner file"
++    );
+     Ok(())
+ }
+ 
+@@ -105,15 +314,24 @@
+ // replay/repair hash exists, it must independently agree as well.
+ fn retained_root(blockstore: &Blockstore, slot: u64, expected: &str) -> Result<(bool, Value)> {
+     let replay_hash = blockstore.get_bank_hash(slot).map(|hash| hash.to_string());
+-    let certified_hash = blockstore.get_optimistic_slot(slot)?.map(|(hash, _)| hash.to_string());
++    let certified_hash = blockstore
++        .get_optimistic_slot(slot)?
++        .map(|(hash, _)| hash.to_string());
+     let is_root = blockstore.is_root(slot);
+     let observation = json!({"slot": slot, "actual_bank_hash": expected,
+         "blockstore_bank_hash": replay_hash, "blockstore_is_root": is_root,
+         "blockstore_alpenglow_root_bank_hash": certified_hash});
+-    ensure!(replay_hash.as_deref().is_none_or(|hash| hash == expected)
+-        && certified_hash.as_deref().is_none_or(|hash| hash == expected),
+-        "retained original BANK hash conflicts with the captured root: {observation}");
+-    Ok((is_root && certified_hash.as_deref() == Some(expected), observation))
++    ensure!(
++        replay_hash.as_deref().is_none_or(|hash| hash == expected)
++            && certified_hash
++                .as_deref()
++                .is_none_or(|hash| hash == expected),
++        "retained original BANK hash conflicts with the captured root: {observation}"
++    );
++    Ok((
++        is_root && certified_hash.as_deref() == Some(expected),
++        observation,
++    ))
+ }
+ 
+ // Pin an actual root Bank before waiting. Certification persistence can lag
+@@ -126,10 +344,16 @@
+     cancelled: &mut impl FnMut() -> bool,
+ ) -> Result<Value> {
+     loop {
+-        if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
+-        if Instant::now() >= deadline { return Err(ancestry::AncestryError::Deadline.into()); }
++        if cancelled() {
++            return Err(ancestry::AncestryError::Cancelled.into());
++        }
++        if Instant::now() >= deadline {
++            return Err(ancestry::AncestryError::Deadline.into());
++        }
+         let (retained, evidence) = retained_root(blockstore, slot, hash)?;
+-        if retained { return Ok(evidence); }
++        if retained {
++            return Ok(evidence);
++        }
+         sleep(Duration::from_millis(50));
+     }
+ }
+@@ -137,46 +361,91 @@
+ fn key(root: &Path, name: &str) -> Result<Keypair> {
+     let path = child(root, Path::new(name))?;
+     let bytes: Vec<u8> = serde_json::from_slice(&private_bytes(&path, 4096)?)?;
+-    Keypair::try_from(bytes.as_slice()).map_err(|error| anyhow::anyhow!("invalid original fixture key: {error}"))
++    Keypair::try_from(bytes.as_slice())
++        .map_err(|error| anyhow::anyhow!("invalid original fixture key: {error}"))
+ }
+ 
+ impl Manifest {
+     pub(super) fn load(root: &Path) -> Result<Self> {
+         check_root(root)?;
+-        let value: Self = serde_json::from_slice(&private_bytes(&root.join("resume.json"), 65_536)?)?;
+-        ensure!(value.format == "zolana-fast-process-resume-v1" && value.upstream_commit == UPSTREAM_COMMIT
+-            && value.original_root == root && value.ledger_prefix == root.join("ledgers")
+-            && (1..=3).contains(&value.nodes.len()) && (!value.slot_anchors || value.private),
+-            "resume metadata is not this exact original bounded candidate fixture");
++        let value: Self =
++            serde_json::from_slice(&private_bytes(&root.join("resume.json"), 65_536)?)?;
++        ensure!(
++            value.format == "zolana-fast-process-resume-v1"
++                && value.upstream_commit == UPSTREAM_COMMIT
++                && value.original_root == root
++                && value.ledger_prefix == root.join("ledgers")
++                && (1..=3).contains(&value.nodes.len())
++                && (!value.slot_anchors || value.private),
++            "resume metadata is not this exact original bounded candidate fixture"
++        );
+         let mut identities = HashSet::new();
+         for node in &value.nodes {
+-            ensure!(identities.insert(node.identity.clone()) && node.root_slot > 0,
+-                "duplicate resume identity or missing pre-hold root");
++            ensure!(
++                identities.insert(node.identity.clone()) && node.root_slot > 0,
++                "duplicate resume identity or missing pre-hold root"
++            );
+             let identity = key(root, &node.identity_file)?;
+             let voter = key(root, &node.voter_file)?;
+-            ensure!(identity.pubkey().to_string() == node.identity && voter.pubkey().to_string() == node.voter,
+-                "original identity or voting key differs from resume metadata");
++            ensure!(
++                identity.pubkey().to_string() == node.identity
++                    && voter.pubkey().to_string() == node.voter,
++                "original identity or voting key differs from resume metadata"
++            );
+             let ledger = child(root, &node.ledger)?;
+-            ensure!(ledger.starts_with(&value.ledger_prefix) && ledger != value.ledger_prefix && ledger.is_dir(),
+-                "resume ledger is outside the explicit original candidate ledger prefix");
+-            ensure!(GenesisConfig::load(&ledger)?.hash().to_string() == value.genesis_hash,
+-                "original ledger genesis differs");
++            ensure!(
++                ledger.starts_with(&value.ledger_prefix)
++                    && ledger != value.ledger_prefix
++                    && ledger.is_dir(),
++                "resume ledger is outside the explicit original candidate ledger prefix"
++            );
++            ensure!(
++                GenesisConfig::load(&ledger)?.hash().to_string() == value.genesis_hash,
++                "original ledger genesis differs"
++            );
+             let storage = FileVoteHistoryStorage::new(ledger);
+             check_vote_file(&storage, &identity.pubkey())?;
+-            let history = storage.load(&identity.pubkey()).context("verify original signed vote history")?;
+-            ensure!(history.root() >= node.vote_history_root,
+-                "signed vote history rolled behind its pre-hold checkpoint");
++            let history = storage
++                .load(&identity.pubkey())
++                .context("verify original signed vote history")?;
++            ensure!(
++                history.root() >= node.vote_history_root,
++                "signed vote history rolled behind its pre-hold checkpoint"
++            );
+         }
+-        ensure!(key(root, "funding.json")?.pubkey().to_string() == value.funding_public_key,
+-            "original fixture funding key differs");
++        ensure!(
++            key(root, "funding.json")?.pubkey().to_string() == value.funding_public_key,
++            "original fixture funding key differs"
++        );
+         Ok(value)
+     }
+ 
+-    pub(super) fn apply_profile(&self, args: &mut Args) -> Result<()> {
++    pub(super) fn apply_profile(&mut self, args: &mut Args) -> Result<()> {
++        ensure!(
++            args.durable_ancestry_config_sha256.is_none()
++                || (self.durable_ancestry_fixture
++                    && self.nodes.len() == 3
++                    && self.private
++                    && self.slot_anchors),
++            "durable ancestry policy cannot apply to an existing non-eligible fixture"
++        );
++        ensure!(
++            args.durable_ancestry_config_sha256.is_some()
++                || !args.root.join("retention-policy.json").try_exists()?,
++            "retention policy present without its independent explicit pin; no automatic fallback"
++        );
++        args.durable_ancestry_fixture = self.durable_ancestry_fixture;
++        if let Some(pin) = &args.durable_ancestry_config_sha256 {
++            self.durable = Some(load_durable(&args.root, hex_pin(pin)?, self)?);
++        }
+         args.nodes = self.nodes.len();
+         args.private = self.private;
+         args.slot_anchors = self.slot_anchors;
+-        args.mac_relay = self.mac_relay.as_ref().map(|value| value.parse::<Pubkey>()).transpose()?;
++        args.mac_relay = self
++            .mac_relay
++            .as_ref()
++            .map(|value| value.parse::<Pubkey>())
++            .transpose()?;
+         Ok(())
+     }
+ 
+@@ -191,86 +460,208 @@
+         self.start_with_snapshot_policy(root, true)
+     }
+ 
+-    fn start_with_snapshot_policy(&self, root: &Path, snapshot_backed: bool) -> Result<LocalCluster> {
++    fn start_with_snapshot_policy(
++        &self,
++        root: &Path,
++        snapshot_backed: bool,
++    ) -> Result<LocalCluster> {
+         let mut existing = Vec::new();
+         for node in &self.nodes {
+             let ledger_path = child(root, &node.ledger)?;
+             let mut config = pilot_validator_config(false);
+             if snapshot_backed {
+-                restart_snapshots::configure(&mut config, &ledger_path, node.root_slot)?;
++                if let Some(durable) = &self.durable {
++                    let peer = durable
++                        .policy
++                        .peers
++                        .iter()
++                        .find(|p| {
++                            p.binding.domain.identity
++                                == hash_bytes(&node.identity).unwrap_or([0; 32])
++                        })
++                        .context("pinned durable peer missing")?;
++                    restart_snapshots::configure_pinned(
++                        &mut config,
++                        &ledger_path,
++                        node.root_slot,
++                        &peer.snapshots,
++                    )?;
++                } else {
++                    restart_snapshots::configure(&mut config, &ledger_path, node.root_slot)?;
++                }
+             }
+-            existing.push((ExistingValidator {
+-                identity: Arc::new(key(root, &node.identity_file)?),
+-                voter: Arc::new(key(root, &node.voter_file)?),
+-                ledger_path,
+-            }, config));
++            ensure!(
++                snapshot_backed || self.durable.is_none(),
++                "durable resume cannot fall back to genesis replay"
++            );
++            existing.push((
++                ExistingValidator {
++                    identity: Arc::new(key(root, &node.identity_file)?),
++                    voter: Arc::new(key(root, &node.voter_file)?),
++                    ledger_path,
++                },
++                config,
++            ));
+         }
+         let genesis = GenesisConfig::load(&existing[0].0.ledger_path)?;
+-        ensure!(genesis.hash().to_string() == self.genesis_hash, "resume genesis changed");
+-        Ok(LocalCluster::resume_existing_alpenglow(genesis, key(root, "funding.json")?, existing,
+-            self.shred_version, SocketAddrSpace::Unspecified)?)
++        ensure!(
++            genesis.hash().to_string() == self.genesis_hash,
++            "resume genesis changed"
++        );
++        Ok(LocalCluster::resume_existing_alpenglow(
++            genesis,
++            key(root, "funding.json")?,
++            existing,
++            self.shred_version,
++            SocketAddrSpace::Unspecified,
++        )?)
+     }
+ 
+     pub(super) fn validate_restored(&self, cluster: &LocalCluster, args: &Args) -> Result<Value> {
+         self.validate_restored_with_cancel(cluster, args, || false)
+     }
+ 
+-    pub(super) fn validate_restored_with_cancel(&self, cluster: &LocalCluster, args: &Args,
+-        mut cancelled: impl FnMut() -> bool) -> Result<Value> {
+-        ensure!(cluster.genesis_config.hash().to_string() == self.genesis_hash,
+-            "resumed cluster substituted a genesis");
++    pub(super) fn validate_restored_with_cancel(
++        &self,
++        cluster: &LocalCluster,
++        args: &Args,
++        mut cancelled: impl FnMut() -> bool,
++    ) -> Result<Value> {
++        ensure!(
++            cluster.genesis_config.hash().to_string() == self.genesis_hash,
++            "resumed cluster substituted a genesis"
++        );
+         let began = Instant::now();
+         let deadline = began + Duration::from_secs(60);
+         loop {
+-            if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
++            if cancelled() {
++                return Err(ancestry::AncestryError::Cancelled.into());
++            }
+             let mut peers = Vec::new();
+             let mut ancestry_tasks = Vec::new();
+             for expected in &self.nodes {
+                 let identity: Pubkey = expected.identity.parse()?;
+-                let node = cluster.validators.get(&identity).context("resumed identity missing")?;
+-                ensure!(node.info.ledger_path == args.root.join(&expected.ledger)
+-                    && node.info.voting_keypair.pubkey().to_string() == expected.voter
+-                    && node.config.require_vote_history && node.config.wait_for_supermajority.is_none()
+-                    && node.config.new_hard_forks.is_none(), "resumed ledger/key/safety configuration differs");
++                let node = cluster
++                    .validators
++                    .get(&identity)
++                    .context("resumed identity missing")?;
++                ensure!(
++                    node.info.ledger_path == args.root.join(&expected.ledger)
++                        && node.info.voting_keypair.pubkey().to_string() == expected.voter
++                        && node.config.require_vote_history
++                        && node.config.wait_for_supermajority.is_none()
++                        && node.config.new_hard_forks.is_none(),
++                    "resumed ledger/key/safety configuration differs"
++                );
+                 if args.service {
+-                    restart_snapshots::validate_configuration(&node.config, &node.info.ledger_path)?;
++                    restart_snapshots::validate_configuration(
++                        &node.config,
++                        &node.info.ledger_path,
++                    )?;
+                 }
+-                let validator = node.validator.as_ref().context("resumed validator stopped")?;
++                let validator = node
++                    .validator
++                    .as_ref()
++                    .context("resumed validator stopped")?;
+                 // Pin one actual finalized root, then release BankForks before
+                 // doing any Blockstore I/O over potentially long history.
+                 let bank = {
+                     let forks = validator.bank_forks.read().unwrap();
+                     let bank = forks.root_bank();
+-                    if bank.slot() < expected.root_slot || !forks.migration_status().is_alpenglow_enabled() {
++                    if bank.slot() < expected.root_slot
++                        || !forks.migration_status().is_alpenglow_enabled()
++                    {
+                         continue;
+                     }
+                     bank
+                 };
+-                ensure!(bank.feature_set.is_active(&agave_feature_set::alpenglow::id())
+-                    && bank.get_alpenglow_genesis_certificate().is_some(),
+-                    "resumed validator lacks original active Alpenglow state");
+-                let (retained, root_evidence) = retained_root(&validator.blockstore,
+-                    expected.root_slot, &expected.root_bank_hash)?;
+-                ensure!(retained,
+-                    "original pre-hold certified root BANK hash is absent in retained ledger: {root_evidence}");
++                ensure!(
++                    bank.feature_set
++                        .is_active(&agave_feature_set::alpenglow::id())
++                        && bank.get_alpenglow_genesis_certificate().is_some(),
++                    "resumed validator lacks original active Alpenglow state"
++                );
++                let archive = self.durable.as_ref().and_then(|d| {
++                    d.archives
++                        .iter()
++                        .find(|a| a.binding().domain.identity == identity.to_bytes())
++                });
++                if let Some(archive) = archive {
++                    let policy_peer = self
++                        .durable
++                        .as_ref()
++                        .unwrap()
++                        .policy
++                        .peers
++                        .iter()
++                        .find(|p| p.binding.domain.identity == identity.to_bytes())
++                        .context("durable snapshot peer missing")?;
++                    restart_snapshots::validate_pins(
++                        &node.info.ledger_path,
++                        &policy_peer.snapshots,
++                        expected.root_slot,
++                    )?;
++                    if bank.slot() < archive.binding().captured_current_root_slot {
++                        continue;
++                    }
++                    check_live_durable_head(&validator.blockstore, archive.binding())?;
++                    archive.check_original_root(
++                        &validator.blockstore,
++                        expected.root_slot,
++                        hash_bytes(&expected.root_bank_hash)?,
++                    )?;
++                }
++                let root_evidence = if archive.is_some() {
++                    json!({"original_slot":expected.root_slot,"bank_hash":expected.root_bank_hash,
++                        "independently_pinned_durable_full_prefix":true,"current_certificate_source":"live"})
++                } else {
++                    let (retained, evidence) = retained_root(
++                        &validator.blockstore,
++                        expected.root_slot,
++                        &expected.root_bank_hash,
++                    )?;
++                    ensure!(
++                        retained,
++                        "original pre-hold certified root BANK hash is absent in retained ledger: {evidence}"
++                    );
++                    evidence
++                };
+                 let current_root_evidence = if args.service {
+-                    Some(wait_retained_current_root(&validator.blockstore, bank.slot(),
+-                        &bank.hash().to_string(), deadline, &mut cancelled)?)
++                    Some(wait_retained_current_root(
++                        &validator.blockstore,
++                        bank.slot(),
++                        &bank.hash().to_string(),
++                        deadline,
++                        &mut cancelled,
++                    )?)
+                 } else {
+                     None
+                 };
+                 if args.private {
+-                    ensure!(zolana_native_check::native_features_for_profile(args.slot_anchors).iter()
+-                        .all(|feature| bank.feature_set.is_active(feature)), "resumed native feature inactive");
+-                    let account = bank.get_account(&native_payment_program::pool_address()).context("resumed native pool missing")?;
++                    ensure!(
++                        zolana_native_check::native_features_for_profile(args.slot_anchors)
++                            .iter()
++                            .all(|feature| bank.feature_set.is_active(feature)),
++                        "resumed native feature inactive"
++                    );
++                    let account = bank
++                        .get_account(&native_payment_program::pool_address())
++                        .context("resumed native pool missing")?;
+                     use solana_account::ReadableAccount;
+-                    let pool = native_payments::state::PoolState::decode(account.data()).map_err(|error| anyhow::anyhow!("{error}"))?;
+-                    ensure!(pool.network == args.network() && pool.uses_slot_anchors() == args.slot_anchors,
+-                        "resumed native network/profile differs; refusing migration");
++                    let pool = native_payments::state::PoolState::decode(account.data())
++                        .map_err(|error| anyhow::anyhow!("{error}"))?;
++                    ensure!(
++                        pool.network == args.network()
++                            && pool.uses_slot_anchors() == args.slot_anchors,
++                        "resumed native network/profile differs; refusing migration"
++                    );
+                 }
+-                ancestry_tasks.push(ancestry::PathTask { identity: expected.identity.clone(),
+-                    blockstore: Arc::clone(&validator.blockstore), start_slot: bank.slot(),
+-                    target_slot: expected.root_slot });
++                ancestry_tasks.push(ancestry::PathTask {
++                    identity: expected.identity.clone(),
++                    blockstore: Arc::clone(&validator.blockstore),
++                    start_slot: bank.slot(),
++                    target_slot: expected.root_slot,
++                });
+                 peers.push(json!({"identity": expected.identity, "voter": expected.voter,
+                     "ledger": node.info.ledger_path, "original_root_slot": expected.root_slot,
+                     "original_root_bank_hash": expected.root_bank_hash, "resumed_root_slot": bank.slot(),
+@@ -278,24 +669,74 @@
+                     "retained_root_bank_hash_evidence": root_evidence,
+                     "current_root_certified_bank_hash_evidence": current_root_evidence}));
+             }
+-            if cancelled() { return Err(ancestry::AncestryError::Cancelled.into()); }
+-            if Instant::now() >= deadline { return Err(ancestry::AncestryError::Deadline.into()); }
++            if cancelled() {
++                return Err(ancestry::AncestryError::Cancelled.into());
++            }
++            if Instant::now() >= deadline {
++                return Err(ancestry::AncestryError::Deadline.into());
++            }
+             if peers.len() == self.nodes.len() {
++                if let Some(durable) = &self.durable {
++                    // Same pinned roots and one unchanged shared deadline. The
++                    // durable prefix fills only approved pruned metadata; live
++                    // tail/certificate/read errors are never substituted.
++                    for (peer, task) in peers.iter_mut().zip(ancestry_tasks) {
++                        let archive = durable
++                            .archives
++                            .iter()
++                            .find(|a| {
++                                a.binding().domain.identity
++                                    == hash_bytes(&task.identity).unwrap_or([0; 32])
++                            })
++                            .context("durable ancestry peer missing")?;
++                        let checked = archive.verify(
++                            &task.blockstore,
++                            task.start_slot,
++                            deadline,
++                            &mut cancelled,
++                        )?;
++                        peer["original_root_is_ancestor"] = json!(true);
++                        peer["original_ancestry_entries"] = json!(checked.entries);
++                        peer["durable_ancestry_prefix_loaded_this_process"] = json!(true);
++                        let selection = durable
++                            .policy
++                            .peers
++                            .iter()
++                            .find(|p| {
++                                p.binding.domain.identity == archive.binding().domain.identity
++                            })
++                            .context("durable snapshot selection missing")?;
++                        peer["explicit_protected_snapshot_selection"] = json!(selection.snapshots);
++                        peer["ordinary_full_snapshot_verification_required"] = json!(true);
++                        peer["approved_prune_through"] = json!(archive.binding().prune_through);
++                    }
++                    return Ok(
++                        json!({"same_genesis":true,"whole_process_resume":true,"new_ledger_created":false,
++                        "vote_history_reset":false,"durable_prefix_policy_explicit":true,"peers":peers}),
++                    );
++                }
+                 // All immutable peer roots, identity/profile checks and retained
+                 // certificates are pinned before parallel I/O begins. No
+                 // BankForks lock or mutable Bank enters a worker.
+                 let checked = ancestry::verify_paths(ancestry_tasks, deadline, &mut cancelled)
+                     .context("verify every original checkpoint ancestry in parallel")?;
+-                ensure!(checked.len() == peers.len(), "parallel ancestry peer count differs");
++                ensure!(
++                    checked.len() == peers.len(),
++                    "parallel ancestry peer count differs"
++                );
+                 for (peer, checked) in peers.iter_mut().zip(checked) {
+                     peer["original_root_is_ancestor"] = json!(true);
+                     peer["original_ancestry_entries"] = json!(checked.report.entries);
+-                    peer["original_ancestry_parent_links"] = json!(checked.report.entries.saturating_sub(1));
+-                    peer["original_ancestry_elapsed_ms"] = json!(checked.elapsed.as_secs_f64() * 1000.0);
++                    peer["original_ancestry_parent_links"] =
++                        json!(checked.report.entries.saturating_sub(1));
++                    peer["original_ancestry_elapsed_ms"] =
++                        json!(checked.elapsed.as_secs_f64() * 1000.0);
+                     peer["original_ancestry_parallel"] = json!(true);
+                 }
+-                return Ok(json!({"same_genesis": true, "whole_process_resume": true, "new_ports_only": true,
+-                    "new_ledger_created": false, "vote_history_reset": false, "peers": peers}));
++                return Ok(
++                    json!({"same_genesis": true, "whole_process_resume": true, "new_ports_only": true,
++                    "new_ledger_created": false, "vote_history_reset": false, "peers": peers}),
++                );
+             }
+             sleep(Duration::from_millis(50));
+         }
+@@ -309,12 +750,21 @@
+     }
+     let mut nodes = Vec::new();
+     for (identity, node) in &cluster.validators {
+-        let index = (0..args.nodes).find(|index| key(root, &format!("identity-{index}.json"))
+-            .is_ok_and(|key| key.pubkey() == *identity)).context("original saved identity key path missing")?;
++        let index = (0..args.nodes)
++            .find(|index| {
++                key(root, &format!("identity-{index}.json"))
++                    .is_ok_and(|key| key.pubkey() == *identity)
++            })
++            .context("original saved identity key path missing")?;
+         let storage = FileVoteHistoryStorage::new(node.info.ledger_path.clone());
+         check_vote_file(&storage, identity)?;
+-        let history = storage.load(identity).context("verify signed vote history before hold")?;
+-        let validator = node.validator.as_ref().context("cannot save stopped validator resume metadata")?;
++        let history = storage
++            .load(identity)
++            .context("verify signed vote history before hold")?;
++        let validator = node
++            .validator
++            .as_ref()
++            .context("cannot save stopped validator resume metadata")?;
+         // Pin one actual root. Do not chase advancing roots while waiting for
+         // the Votor/storage queues, and never hold BankForks locked during wait.
+         let (root_slot, root_bank_hash) = {
+@@ -325,28 +775,56 @@
+         ensure!(root_slot > 0, "pre-hold root has not advanced from genesis");
+         let began = Instant::now();
+         loop {
+-            let (retained, observation) = retained_root(&validator.blockstore, root_slot, &root_bank_hash)?;
++            let (retained, observation) =
++                retained_root(&validator.blockstore, root_slot, &root_bank_hash)?;
+             if began.elapsed() < Duration::from_millis(50) || retained {
+-                eprintln!("{}", json!({"event": "pre_hold_root_storage_diagnostic", "identity": identity.to_string(),
+-                    "elapsed_ms": began.elapsed().as_millis(), "retained": retained, "evidence": observation}));
++                eprintln!(
++                    "{}",
++                    json!({"event": "pre_hold_root_storage_diagnostic", "identity": identity.to_string(),
++                    "elapsed_ms": began.elapsed().as_millis(), "retained": retained, "evidence": observation})
++                );
+             }
+-            if retained { break; }
+-            ensure!(began.elapsed() < Duration::from_secs(20),
+-                "pre-hold certified root BANK hash did not reach original blockstore: {observation}");
++            if retained {
++                break;
++            }
++            ensure!(
++                began.elapsed() < Duration::from_secs(20),
++                "pre-hold certified root BANK hash did not reach original blockstore: {observation}"
++            );
+             sleep(Duration::from_millis(50));
+         }
+-        nodes.push(NodeRecord { identity: identity.to_string(), voter: node.info.voting_keypair.pubkey().to_string(),
+-            identity_file: format!("identity-{index}.json"), voter_file: format!("voter-{index}.json"),
+-            ledger: node.info.ledger_path.strip_prefix(root)?.to_owned(), root_slot,
+-            root_bank_hash, vote_history_root: history.root() });
++        nodes.push(NodeRecord {
++            identity: identity.to_string(),
++            voter: node.info.voting_keypair.pubkey().to_string(),
++            identity_file: format!("identity-{index}.json"),
++            voter_file: format!("voter-{index}.json"),
++            ledger: node.info.ledger_path.strip_prefix(root)?.to_owned(),
++            root_slot,
++            root_bank_hash,
++            vote_history_root: history.root(),
++        });
+     }
+     nodes.sort_by(|a, b| a.identity.cmp(&b.identity));
+-    let manifest = Manifest { format: "zolana-fast-process-resume-v1".into(), upstream_commit: UPSTREAM_COMMIT.into(),
+-        original_root: root.to_owned(), ledger_prefix: root.join("ledgers"),
+-        genesis_hash: cluster.genesis_config.hash().to_string(), shred_version: cluster.shred_version(),
+-        funding_public_key: cluster.funding_keypair.pubkey().to_string(), private: args.private,
+-        slot_anchors: args.slot_anchors, mac_relay: args.mac_relay.map(|key| key.to_string()), nodes };
+-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW)
++    let manifest = Manifest {
++        format: "zolana-fast-process-resume-v1".into(),
++        upstream_commit: UPSTREAM_COMMIT.into(),
++        original_root: root.to_owned(),
++        ledger_prefix: root.join("ledgers"),
++        genesis_hash: cluster.genesis_config.hash().to_string(),
++        shred_version: cluster.shred_version(),
++        funding_public_key: cluster.funding_keypair.pubkey().to_string(),
++        private: args.private,
++        slot_anchors: args.slot_anchors,
++        mac_relay: args.mac_relay.map(|key| key.to_string()),
++        nodes,
++        durable_ancestry_fixture: args.durable_ancestry_fixture,
++        durable: None,
++    };
++    let mut file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW)
+         .open(root.join("resume.json"))?;
+     serde_json::to_writer_pretty(&mut file, &manifest)?;
+     file.write_all(b"\n")?;
+@@ -356,6 +834,493 @@
+     Ok(())
+ }
+ 
++// Explicit offline operations apply ONLY to newly marked disposable093 roots.
++// Their closed full canonical SQLite export is independently captured/validated
++// by the controller; this Rust helper binds exact bytes and the supplied exact
++// target, and does not claim to parse SQLite or establish light-client proof.
++struct DurableOperation {
++    root: PathBuf,
++    generation: Option<String>,
++    canonical_path: Option<PathBuf>,
++    canonical_sha256: Option<[u8; 32]>,
++    canonical_through: Option<u64>,
++    canonical_blockhash: Option<[u8; 32]>,
++    minimum_snapshot: Option<u64>,
++    policy_sha256: Option<[u8; 32]>,
++}
++
++fn operation_args(
++    mut args: impl Iterator<Item = String>,
++) -> Result<Option<(bool, DurableOperation)>> {
++    let Some(first) = args.next() else {
++        return Ok(None);
++    };
++    let prepare = match first.as_str() {
++        "--durable-ancestry-prepare" => true,
++        "--durable-ancestry-purge" => false,
++        _ => return Ok(None),
++    };
++    let mut value = DurableOperation {
++        root: PathBuf::from(
++            args.next()
++                .context("offline durable operation needs its exact original root")?,
++        ),
++        generation: None,
++        canonical_path: None,
++        canonical_sha256: None,
++        canonical_through: None,
++        canonical_blockhash: None,
++        minimum_snapshot: None,
++        policy_sha256: None,
++    };
++    let mut seen = HashSet::new();
++    while let Some(option) = args.next() {
++        ensure!(
++            seen.insert(option.clone()),
++            "duplicate durable operation option"
++        );
++        let input = args
++            .next()
++            .context("durable operation option requires a value")?;
++        match option.as_str() {
++            "--generation" if prepare => value.generation = Some(input),
++            "--canonical-export" if prepare => value.canonical_path = Some(input.into()),
++            "--canonical-export-sha256" if prepare => {
++                value.canonical_sha256 = Some(hex_pin(&input)?)
++            }
++            "--canonical-export-through" if prepare => {
++                value.canonical_through = Some(input.parse()?)
++            }
++            "--canonical-export-blockhash" if prepare => {
++                value.canonical_blockhash = Some(hash_bytes(&input)?)
++            }
++            "--minimum-snapshot-slot" if prepare => value.minimum_snapshot = Some(input.parse()?),
++            "--policy-sha256" if !prepare => value.policy_sha256 = Some(hex_pin(&input)?),
++            _ => {
++                anyhow::bail!("unknown or inapplicable offline durable operation option: {option}")
++            }
++        }
++    }
++    ensure!(
++        value.root.is_absolute(),
++        "offline durable root must be absolute"
++    );
++    if prepare {
++        ensure!(
++            value.generation.as_ref().is_some_and(|v| !v.is_empty()
++                && v.len() <= 64
++                && v.bytes()
++                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
++                && value.canonical_path.as_deref()
++                    == Some(Path::new("canonical/full-history.sqlite3"))
++                && value.canonical_sha256.is_some()
++                && value.canonical_through.is_some_and(|s| s > 0)
++                && value.canonical_blockhash.is_some_and(|h| h != [0; 32])
++                && value.minimum_snapshot.is_some_and(|s| s > 0),
++            "prepare needs explicit generation, canonical export path/SHA/target slot/blockhash and minimum snapshot slot"
++        );
++    } else {
++        ensure!(
++            value.policy_sha256.is_some(),
++            "purge needs an independent explicit policy SHA256"
++        );
++    }
++    Ok(Some((prepare, value)))
++}
++
++fn offline_lock(root: &Path) -> Result<File> {
++    check_root(root)?;
++    let file = OpenOptions::new()
++        .read(true)
++        .write(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(root.join("process.lock"))?;
++    let meta = file.metadata()?;
++    ensure!(
++        meta.is_file()
++            && meta.uid() == uid()
++            && meta.len() == 0
++            && meta.nlink() == 1
++            && meta.permissions().mode() & 0o077 == 0,
++        "offline operation requires original private process lock"
++    );
++    file.try_lock()
++        .context("validator process still owns fixture; offline operation refused")?;
++    Ok(file)
++}
++
++fn owned_directory(root: &Path) -> Result<()> {
++    match DirBuilder::new().mode(0o700).create(root) {
++        Ok(()) => File::open(root.parent().context("directory parent missing")?)?.sync_all()?,
++        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
++        Err(error) => return Err(error.into()),
++    }
++    let meta = fs::symlink_metadata(root)?;
++    ensure!(
++        meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == uid()
++            && meta.permissions().mode() & 0o077 == 0
++            && root.canonicalize()? == root,
++        "durable preparation directory is not a real private owned path"
++    );
++    Ok(())
++}
++
++fn open_original_store(ledger: &Path) -> Result<Blockstore> {
++    let database = ledger.join("rocksdb");
++    let meta = fs::symlink_metadata(&database)?;
++    ensure!(
++        meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == uid()
++            && database.canonicalize()? == database,
++        "original blockstore directory missing/changed; never create a replacement"
++    );
++    Ok(Blockstore::open(ledger)?)
++}
++
++fn full_prefix(
++    store: &Blockstore,
++    head: u64,
++    original: u64,
++    deadline: Instant,
++) -> Result<Vec<(u64, solana_ledger::blockstore_meta::SlotMeta)>> {
++    ancestry::verify_path(store, head, original, deadline, || false)?;
++    let mut records = Vec::new();
++    let mut slot = head;
++    loop {
++        ensure!(
++            Instant::now() < deadline && records.len() < ancestry::prefix::MAX_RECORDS,
++            "fresh fixture ancestry exceeds its preparation deadline or 4096-record bound"
++        );
++        let meta = store.meta(slot)?.context("full prefix metadata vanished")?;
++        ensure!(meta.slot == slot, "full prefix slot substitution");
++        let parent = meta.parent_slot;
++        records.push((slot, meta));
++        if slot == original {
++            break;
++        }
++        let next = parent.context("full prefix parent missing")?;
++        ensure!(
++            original <= next && next < slot,
++            "full prefix parent passed original checkpoint"
++        );
++        slot = next;
++    }
++    Ok(records)
++}
++
++fn publish_policy(root: &Path, policy: &DurablePolicy) -> Result<[u8; 32]> {
++    let mut raw = serde_json::to_vec_pretty(policy)?;
++    raw.push(b'\n');
++    ensure!(
++        raw.len() <= 65536,
++        "aggregate retention policy exceeds bound"
++    );
++    let pending = root.join(".retention-policy.pending");
++    let target = root.join("retention-policy.json");
++    let mut file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW)
++        .open(&pending)?;
++    file.write_all(&raw)?;
++    file.sync_all()?;
++    // Atomic exclusive publication. A crash before unlink leaves two links and
++    // the loader refuses; no partial/truncated policy becomes eligible.
++    fs::hard_link(&pending, &target)?;
++    File::open(root)?.sync_all()?;
++    fs::remove_file(&pending)?;
++    File::open(root)?.sync_all()?;
++    Ok(solana_sha256_hasher::hash(&raw).to_bytes())
++}
++
++fn public_policy(policy: &DurablePolicy, pin: &[u8; 32]) -> Value {
++    json!({"format":policy.format,"fixture_root":policy.fixture_root,"policy_sha256":hex(pin),
++        "preparation_only":true,"full_snapshot_verification_required_on_resume":true,
++        "canonical_export":{"relative_path":policy.canonical_export.relative_path,
++            "sha256":hex(&policy.canonical_export.file_sha256),"through_slot":policy.canonical_export.through_slot,
++            "through_blockhash":Pubkey::new_from_array(policy.canonical_export.through_blockhash).to_string()},
++        "peers":policy.peers.iter().map(|p| json!({"identity":Pubkey::new_from_array(p.binding.domain.identity).to_string(),
++            "original_root_slot":p.binding.original.slot,"original_root_bank_hash":Pubkey::new_from_array(p.binding.original.certified_bank_hash).to_string(),
++            "head_slot":p.binding.head.slot,"head_bank_hash":Pubkey::new_from_array(p.binding.head.certified_bank_hash).to_string(),
++            "prune_through":p.binding.prune_through,"snapshot_parent_slot":p.binding.snapshot_parent_slot,
++            "oldest_snapshot_slot":p.binding.snapshot_slot,"captured_current_root_slot":p.binding.captured_current_root_slot,
++            "snapshots":p.snapshots,"ancestry_manifest_sha256":hex(&p.manifest_sha256)})).collect::<Vec<_>>()})
++}
++
++fn prepare_durable(root: &Path, args: DurableOperation, manifest: &Manifest) -> Result<Value> {
++    ensure!(
++        !root.join("retention-policy.json").try_exists()?
++            && !root.join(".retention-policy.pending").try_exists()?,
++        "retention preparation requires fresh policy paths; no overwrite/retry"
++    );
++    let canonical_path = args
++        .canonical_path
++        .context("canonical export path missing")?;
++    ensure!(
++        canonical_path == Path::new("canonical/full-history.sqlite3"),
++        "only the fixed full canonical export path is permitted"
++    );
++    let canonical_sha = args
++        .canonical_sha256
++        .context("canonical export pin missing")?;
++    ensure!(
++        restart_snapshots::file_digest(&child(root, &canonical_path)?, uid(), 1024 * 1024 * 1024)?
++            == canonical_sha,
++        "closed full canonical export bytes differ before preparation"
++    );
++    let through_slot = args.canonical_through.context("canonical target missing")?;
++    let through_blockhash = args
++        .canonical_blockhash
++        .context("canonical target hash missing")?;
++    ensure!(
++        through_slot > 0 && through_blockhash != [0; 32],
++        "canonical export exact nonzero target required"
++    );
++    let resume_sha =
++        solana_sha256_hasher::hash(&private_bytes(&root.join("resume.json"), 65536)?).to_bytes();
++    let deadline = Instant::now() + Duration::from_secs(60);
++    let mut peers = Vec::new();
++    let archive_base = root.join("durable-ancestry");
++    owned_directory(&archive_base)?;
++    for node in &manifest.nodes {
++        let ledger = child(root, &node.ledger)?;
++        let store = open_original_store(&ledger)?;
++        let current = store.max_root();
++        ancestry_archive::capture_root_evidence(&store, current)?;
++        let protected = restart_snapshots::protect_generated(
++            &ledger,
++            node.root_slot,
++            args.minimum_snapshot
++                .context("minimum snapshot slot missing")?,
++        )?;
++        ensure!(
++            protected[1].slot <= current,
++            "generated snapshot exceeds captured live certified root"
++        );
++        let snapshot_slot = protected[0].slot;
++        let parent = store
++            .meta(snapshot_slot)?
++            .context("oldest snapshot canonical metadata missing")?
++            .parent_slot
++            .context("oldest snapshot canonical parent missing")?;
++        ensure!(
++            node.root_slot < parent && parent < snapshot_slot,
++            "snapshot parent does not leave a pruneable certified checkpoint interval"
++        );
++        let mut head = parent;
++        let mut count = 0;
++        loop {
++            ensure!(
++                Instant::now() < deadline && count < ancestry::prefix::MAX_RECORDS,
++                "certified head search exceeded fixture budget"
++            );
++            if store.is_root(head) && store.get_optimistic_slot(head)?.is_some() {
++                break;
++            }
++            let meta = store
++                .meta(head)?
++                .context("snapshot parent ancestry missing")?;
++            let next = meta.parent_slot.context("snapshot parent chain ended")?;
++            ensure!(
++                node.root_slot < next && next < head,
++                "no certified head strictly above original root"
++            );
++            head = next;
++            count += 1;
++        }
++        let cutoff = head.checked_sub(1).context("head cannot be genesis")?;
++        ensure!(
++            node.root_slot <= cutoff && cutoff < through_slot,
++            "prune cutoff not covered by full canonical export"
++        );
++        ancestry::verify_path(&store, current, node.root_slot, deadline, || false)?;
++        let records = full_prefix(&store, head, node.root_slot, deadline)?;
++        let binding = ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: zolana_native_check::TEST_SLOT_NETWORK,
++                genesis_hash: hash_bytes(&manifest.genesis_hash)?,
++                identity: hash_bytes(&node.identity)?,
++                voter: hash_bytes(&node.voter)?,
++                resume_sha256: resume_sha,
++                ledger_relative_path: node
++                    .ledger
++                    .to_str()
++                    .context("ledger path is not UTF8")?
++                    .to_owned(),
++            },
++            original: ancestry_archive::capture_root_evidence(&store, node.root_slot)?,
++            head: ancestry_archive::capture_root_evidence(&store, head)?,
++            prune_through: cutoff,
++            snapshot_parent_slot: parent,
++            snapshot_slot,
++            captured_current_root_slot: current,
++            canonical_export_through: through_slot,
++        };
++        ensure!(
++            binding.original.certified_bank_hash == hash_bytes(&node.root_bank_hash)?,
++            "original root certificate differs from immutable resume manifest"
++        );
++        let snapshots = restart_snapshots::PinnedSnapshots {
++            selected_filename: protected[1].filename.clone(),
++            protected,
++            oldest_parent_slot: parent,
++        };
++        restart_snapshots::validate_pins(&ledger, &snapshots, node.root_slot)?;
++        let archive_root = archive_base.join(&node.identity);
++        owned_directory(&archive_root)?;
++        let generation = args
++            .generation
++            .as_ref()
++            .context("archive generation missing")?;
++        let published = ancestry_archive::publish(
++            &archive_root,
++            generation,
++            uid(),
++            &binding,
++            records,
++            deadline,
++            || false,
++        )?;
++        let loaded = ancestry_archive::load(
++            &archive_root,
++            generation,
++            uid(),
++            published.manifest_sha256,
++            &binding,
++            deadline,
++            || false,
++        )?;
++        check_live_durable_head(&store, &binding)?;
++        loaded.check_original_root(&store, node.root_slot, hash_bytes(&node.root_bank_hash)?)?;
++        loaded.verify(&store, current, deadline, || false)?;
++        peers.push(DurablePeer {
++            binding,
++            generation: generation.clone(),
++            manifest_sha256: published.manifest_sha256,
++            snapshots,
++        });
++    }
++    let policy = DurablePolicy {
++        format: "zolana093-disposable-durable-retention-v1".into(),
++        fixture_root: root.to_owned(),
++        resume_sha256: resume_sha,
++        canonical_export: CanonicalExport {
++            relative_path: canonical_path,
++            file_sha256: canonical_sha,
++            network: zolana_native_check::TEST_SLOT_NETWORK,
++            genesis_hash: hash_bytes(&manifest.genesis_hash)?,
++            through_slot,
++            through_blockhash,
++        },
++        peers,
++    };
++    let pin = publish_policy(root, &policy)?;
++    load_durable(root, pin, manifest)?;
++    Ok(public_policy(&policy, &pin))
++}
++
++fn purge_durable(root: &Path, expected_pin: [u8; 32], manifest: &Manifest) -> Result<Value> {
++    let loaded = load_durable(root, expected_pin, manifest)?;
++    let deadline = Instant::now() + Duration::from_secs(60);
++    let mut stores = Vec::new();
++    // Preflight EVERY peer before the first purge. A partial failed mutation is
++    // left for forensic inspection; it is never automatically retried/reset.
++    for (peer, archive) in loaded.policy.peers.iter().zip(&loaded.archives) {
++        let ledger = child(root, Path::new(&peer.binding.domain.ledger_relative_path))?;
++        let store = open_original_store(&ledger)?;
++        ensure!(
++            store.max_root() == peer.binding.captured_current_root_slot
++                && store.meta(peer.binding.original.slot)?.is_some(),
++            "purge fixture already changed or was previously pruned"
++        );
++        ancestry_archive::capture_root_evidence(&store, peer.binding.captured_current_root_slot)?;
++        check_live_durable_head(&store, &peer.binding)?;
++        archive.check_original_root(
++            &store,
++            peer.binding.original.slot,
++            peer.binding.original.certified_bank_hash,
++        )?;
++        archive.verify(
++            &store,
++            peer.binding.captured_current_root_slot,
++            deadline,
++            || false,
++        )?;
++        stores.push(store);
++    }
++    for ((peer, archive), store) in loaded
++        .policy
++        .peers
++        .iter()
++        .zip(&loaded.archives)
++        .zip(&stores)
++    {
++        store.purge_slots(
++            0,
++            peer.binding.prune_through,
++            solana_ledger::blockstore::blockstore_purge::PurgeType::Exact,
++        )?;
++        ensure!(
++            store.meta(peer.binding.original.slot)?.is_none()
++                && store.meta(peer.binding.head.slot)?.is_some(),
++            "ordinary purge did not remove old metadata or damaged live certified head"
++        );
++        ancestry_archive::capture_root_evidence(store, peer.binding.captured_current_root_slot)?;
++        check_live_durable_head(store, &peer.binding)?;
++        archive.check_original_root(
++            store,
++            peer.binding.original.slot,
++            peer.binding.original.certified_bank_hash,
++        )?;
++        archive.verify(
++            store,
++            peer.binding.captured_current_root_slot,
++            deadline,
++            || false,
++        )?;
++    }
++    let mut result = public_policy(&loaded.policy, &expected_pin);
++    result["operation"] = json!("ordinary_exact_purge_complete");
++    result["old_checkpoint_metadata_pruned_all_peers"] = json!(true);
++    result["merged_full_ancestry_verified_all_peers"] = json!(true);
++    Ok(result)
++}
++
++pub(super) fn maybe_durable_operation() -> Result<bool> {
++    let Some((prepare, args)) = operation_args(std::env::args().skip(1))? else {
++        return Ok(false);
++    };
++    ensure!(
++        cfg!(target_os = "linux"),
++        "durable offline fixture operations are Linux-only"
++    );
++    let root = args.root.clone();
++    let _lock = offline_lock(&root)?;
++    let manifest = Manifest::load(&root)?;
++    ensure!(
++        manifest.durable_ancestry_fixture
++            && manifest.nodes.len() == 3
++            && manifest.private
++            && manifest.slot_anchors,
++        "offline durable operation refuses every pre-existing/non-disposable fixture"
++    );
++    let result = if prepare {
++        prepare_durable(&root, args, &manifest)?
++    } else {
++        purge_durable(
++            &root,
++            args.policy_sha256.context("policy pin missing")?,
++            &manifest,
++        )?
++    };
++    println!("{}", serde_json::to_string(&result)?);
++    Ok(true)
++}
++
+ #[cfg(test)]
+ mod snapshot_root_provenance_tests {
+     use super::*;
+@@ -367,13 +1332,30 @@
+         let hash = solana_sha256_hasher::hash(b"fixed restored current root");
+         store.insert_optimistic_slot(100, &hash, 0).unwrap();
+         store.set_roots([100].iter()).unwrap();
+-        let checked = wait_retained_current_root(&store, 100, &hash.to_string(),
+-            Instant::now() + Duration::from_secs(2), &mut || false).unwrap();
++        let checked = wait_retained_current_root(
++            &store,
++            100,
++            &hash.to_string(),
++            Instant::now() + Duration::from_secs(2),
++            &mut || false,
++        )
++        .unwrap();
+         assert_eq!(checked["slot"], 100);
+-        assert_eq!(checked["blockstore_alpenglow_root_bank_hash"], hash.to_string());
++        assert_eq!(
++            checked["blockstore_alpenglow_root_bank_hash"],
++            hash.to_string()
++        );
+         let wrong = solana_sha256_hasher::hash(b"different restored root");
+-        assert!(wait_retained_current_root(&store, 100, &wrong.to_string(),
+-            Instant::now() + Duration::from_secs(2), &mut || false).is_err());
++        assert!(
++            wait_retained_current_root(
++                &store,
++                100,
++                &wrong.to_string(),
++                Instant::now() + Duration::from_secs(2),
++                &mut || false
++            )
++            .is_err()
++        );
+     }
+ 
+     #[test]
+@@ -381,13 +1363,172 @@
+         let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
+         let store = Blockstore::open(directory.path()).unwrap();
+         let hash = solana_sha256_hasher::hash(b"missing current root");
+-        let expired = wait_retained_current_root(&store, 100, &hash.to_string(),
+-            Instant::now(), &mut || false).unwrap_err();
+-        assert!(matches!(expired.downcast_ref::<ancestry::AncestryError>(),
+-            Some(ancestry::AncestryError::Deadline)));
+-        let stopped = wait_retained_current_root(&store, 100, &hash.to_string(),
+-            Instant::now() + Duration::from_secs(2), &mut || true).unwrap_err();
+-        assert!(matches!(stopped.downcast_ref::<ancestry::AncestryError>(),
+-            Some(ancestry::AncestryError::Cancelled)));
+-    }
+-}
++        let expired =
++            wait_retained_current_root(&store, 100, &hash.to_string(), Instant::now(), &mut || {
++                false
++            })
++            .unwrap_err();
++        assert!(matches!(
++            expired.downcast_ref::<ancestry::AncestryError>(),
++            Some(ancestry::AncestryError::Deadline)
++        ));
++        let stopped = wait_retained_current_root(
++            &store,
++            100,
++            &hash.to_string(),
++            Instant::now() + Duration::from_secs(2),
++            &mut || true,
++        )
++        .unwrap_err();
++        assert!(matches!(
++            stopped.downcast_ref::<ancestry::AncestryError>(),
++            Some(ancestry::AncestryError::Cancelled)
++        ));
++    }
++    fn parse_operation(values: &[&str]) -> Result<Option<(bool, DurableOperation)>> {
++        operation_args(values.iter().map(|v| (*v).to_owned()))
++    }
++
++    #[test]
++    fn offline_retention_cli_requires_complete_independent_pins_and_rejects_ambiguity() {
++        let pin = "11".repeat(32);
++        assert!(
++            parse_operation(&["--root", "/tmp/fresh"])
++                .unwrap()
++                .is_none()
++        );
++        assert!(parse_operation(&["--durable-ancestry-prepare", "/tmp/fresh"]).is_err());
++        assert!(
++            parse_operation(&[
++                "--durable-ancestry-prepare",
++                "/tmp/fresh",
++                "--generation",
++                "r1",
++                "--canonical-export",
++                "canonical/full-history.sqlite3",
++                "--canonical-export-sha256",
++                &pin,
++                "--canonical-export-through",
++                "100",
++                "--canonical-export-blockhash",
++                "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
++                "--minimum-snapshot-slot",
++                "80"
++            ])
++            .unwrap()
++            .is_some()
++        );
++        assert!(
++            parse_operation(&[
++                "--durable-ancestry-purge",
++                "/tmp/fresh",
++                "--policy-sha256",
++                &pin
++            ])
++            .unwrap()
++            .is_some()
++        );
++        assert!(
++            parse_operation(&[
++                "--durable-ancestry-purge",
++                "/tmp/fresh",
++                "--policy-sha256",
++                &pin,
++                "--policy-sha256",
++                &pin
++            ])
++            .is_err()
++        );
++        assert!(
++            parse_operation(&[
++                "--durable-ancestry-purge",
++                "relative",
++                "--policy-sha256",
++                &pin
++            ])
++            .is_err()
++        );
++        assert!(
++            parse_operation(&[
++                "--durable-ancestry-purge",
++                "/tmp/fresh",
++                "--generation",
++                "one"
++            ])
++            .is_err()
++        );
++        assert!(
++            parse_operation(&[
++                "--durable-ancestry-purge",
++                "/tmp/fresh",
++                "--policy-sha256",
++                &"AA".repeat(32)
++            ])
++            .is_err()
++        );
++    }
++
++    #[test]
++    fn aggregate_policy_is_exclusively_published_and_exactly_pinned() {
++        let root = solana_ledger::get_tmp_ledger_path_auto_delete!();
++        let policy = DurablePolicy {
++            format: "unit metadata only".into(),
++            fixture_root: root.path().to_owned(),
++            resume_sha256: [1; 32],
++            canonical_export: CanonicalExport {
++                relative_path: "canonical/full-history.sqlite3".into(),
++                file_sha256: [2; 32],
++                network: [3; 32],
++                genesis_hash: [4; 32],
++                through_slot: 100,
++                through_blockhash: [5; 32],
++            },
++            peers: vec![],
++        };
++        let pin = publish_policy(root.path(), &policy).unwrap();
++        let bytes = private_bytes(&root.path().join("retention-policy.json"), 65536).unwrap();
++        assert_eq!(solana_sha256_hasher::hash(&bytes).to_bytes(), pin);
++        assert!(publish_policy(root.path(), &policy).is_err());
++        assert_eq!(
++            fs::read(root.path().join("retention-policy.json")).unwrap(),
++            bytes
++        );
++        assert_eq!(
++            fs::metadata(root.path().join("retention-policy.json"))
++                .unwrap()
++                .nlink(),
++            1
++        );
++    }
++    #[test]
++    fn durable_head_must_keep_its_live_root_certificate_above_cutoff() {
++        let directory = solana_ledger::get_tmp_ledger_path_auto_delete!();
++        let store = Blockstore::open(directory.path()).unwrap();
++        let hash = solana_sha256_hasher::hash(b"durable retained H");
++        store.insert_optimistic_slot(100, &hash, 0).unwrap();
++        store.set_roots([100].iter()).unwrap();
++        let head = ancestry_archive::capture_root_evidence(&store, 100).unwrap();
++        let mut binding = ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: [1; 32],
++                genesis_hash: [2; 32],
++                identity: [3; 32],
++                voter: [4; 32],
++                resume_sha256: [5; 32],
++                ledger_relative_path: "ledgers/fixture".into(),
++            },
++            original: head.clone(),
++            head,
++            prune_through: 99,
++            snapshot_parent_slot: 100,
++            snapshot_slot: 101,
++            captured_current_root_slot: 102,
++            canonical_export_through: 102,
++        };
++        check_live_durable_head(&store, &binding).unwrap();
++        binding.head.certified_bank_hash[0] ^= 1;
++        assert!(check_live_durable_head(&store, &binding).is_err());
++        binding.head.slot = 101;
++        assert!(check_live_durable_head(&store, &binding).is_err());
++    }
++}

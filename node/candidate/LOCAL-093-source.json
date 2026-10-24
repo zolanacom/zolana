@@ -1,0 +1,362 @@
+{
+  "actual_full_SlotMeta_source": {
+    "path": "ledger/src/blockstore_meta.rs",
+    "sha256": "5a96b5ca9258bda3942672011f3bb8c3f5dd1a8baad9fbe30fca9973d044f453",
+    "type": "SlotMeta = SlotMetaV3; full native type, not SlotMetaRepair or a local stub"
+  },
+  "application": {
+    "Cargo_lock_service_and_original_ancestry_tests_changed": false,
+    "baseline_revision": "LOCAL-092 R2",
+    "changed_or_added_files": 7,
+    "delta_patch": "agave-4.3.2-LOCAL-093.patch",
+    "delta_patch_sha256": "03164976925a02677ef90b7ed21cd42014b6b6aad9ff0f8027fc5d46797a1ab7",
+    "existing_preparer_changed": false,
+    "new_file_before_state": "ancestry_archive.rs and ancestry_archive_tests.rs must be absent",
+    "predecessor_patch": {
+      "bytes": 24692,
+      "path": "node/candidate/agave-4.3.2-LOCAL-092.patch",
+      "sha256": "be27624c08d12df3135f512aaddbf1172b698863952206d90a63cc7179f93b0e"
+    },
+    "predecessor_source": {
+      "bytes": 10192,
+      "path": "node/candidate/LOCAL-092-source.json",
+      "sha256": "fb940c77606985b0b841bfa4d69d579f5b1de7bad98b1017a934a9e45bb18b69"
+    },
+    "prepare_native_candidate_revision_supported": false,
+    "requires_independent_existing_exact_baseline_copy": true
+  },
+  "baseline": {
+    "d805_binary_sha256": "d8057e383babd37d24efd092f610595bc1dea9915aafc965c340bf9d17d97d53",
+    "kind": "exact observed inherited source plus exact LOCAL-092 R2 delta",
+    "observed_inventory": {
+      "path": ".local/storage-recovery-092/actual-inventory-r1/result.json",
+      "sha256": "4c7afaabfd87f36436abae30bda967995384756d83d9cdf7ca11da5be552a45d"
+    },
+    "original_18_file_sha256": {
+      ".cargo/config.toml": "edd80898ccf6f07afa276441a6c3a0e54770a1c77f1d5a5329a9d600f768ff99",
+      "Cargo.lock": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "Cargo.toml": "79af403c6c548193deb87fc3a2f445c626f76652b7f05a828e0a19df1ece63c8",
+      "core/src/validator.rs": "42bdecc0d3d6290119e8b567967fe9bd785df7b337324fcdb57aaf1792ebdfbe",
+      "ledger/src/blockstore.rs": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e",
+      "ledger/src/blockstore/blockstore_purge.rs": "4d1906aa1762307d2321275fcb9f6f29a9940f5b8035f6f3b0b5942035243f1a",
+      "ledger/src/blockstore/cleanup_service.rs": "e9fb44b78a8757d7f4e4001442719e40b5af52a5dbc9bc2b3012f57fdf854826",
+      "ledger/src/blockstore_meta.rs": "5a96b5ca9258bda3942672011f3bb8c3f5dd1a8baad9fbe30fca9973d044f453",
+      "ledger/src/blockstore_options.rs": "34a9be9a5f627b895c97b0359779712c148ae11b2872d845b319fad133ecd3d0",
+      "rust-toolchain.toml": "5d959dfcc98b53886ee772ba216c4f9a1b31f093b46b5b263c0d084af54e821d",
+      "zolana-fast-check/Cargo.toml": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc",
+      "zolana-fast-check/src/ancestry.rs": "38b8032cfeaea7ce5208fdf72c93883ffda1292d8502dbf47c1486da90ad2abb",
+      "zolana-fast-check/src/ancestry_parallel_tests.rs": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+      "zolana-fast-check/src/ancestry_tests.rs": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685",
+      "zolana-fast-check/src/main.rs": "44bfc8858075f5efd317374d4e55d1e07428265cc723e9ab992fdd911dc078e9",
+      "zolana-fast-check/src/restart_snapshots.rs": "eb0c2afe2e111249c34d4506ba0941a655f431af5a5e0522112a66b2122e6b68",
+      "zolana-fast-check/src/resume.rs": "9a746b879053151f174a5cf23f9e49bcf4405064268f8e437185554fe59120b2",
+      "zolana-fast-check/src/service.rs": "63a70881da25e871990c72e14cf8d309bec2067b6061e5f236ba59d7115343b0"
+    },
+    "qualification": "The checked original 18 file pins and LOCAL-092 prerequisites are not a complete inherited-source reproduction or retroactive d805 source-to-binary attestation. The full observed compiled manifest describes the isolated test build, not accepted-runtime activation.",
+    "required_file_sha256": {
+      ".cargo/config.toml": "edd80898ccf6f07afa276441a6c3a0e54770a1c77f1d5a5329a9d600f768ff99",
+      "Cargo.lock": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "Cargo.toml": "79af403c6c548193deb87fc3a2f445c626f76652b7f05a828e0a19df1ece63c8",
+      "core/src/validator.rs": "42bdecc0d3d6290119e8b567967fe9bd785df7b337324fcdb57aaf1792ebdfbe",
+      "ledger/src/blockstore.rs": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e",
+      "ledger/src/blockstore/blockstore_purge.rs": "4d1906aa1762307d2321275fcb9f6f29a9940f5b8035f6f3b0b5942035243f1a",
+      "ledger/src/blockstore/cleanup_service.rs": "e9fb44b78a8757d7f4e4001442719e40b5af52a5dbc9bc2b3012f57fdf854826",
+      "ledger/src/blockstore_meta.rs": "5a96b5ca9258bda3942672011f3bb8c3f5dd1a8baad9fbe30fca9973d044f453",
+      "ledger/src/blockstore_options.rs": "34a9be9a5f627b895c97b0359779712c148ae11b2872d845b319fad133ecd3d0",
+      "rust-toolchain.toml": "5d959dfcc98b53886ee772ba216c4f9a1b31f093b46b5b263c0d084af54e821d",
+      "zolana-fast-check/Cargo.toml": "eab0bb8eeb5d6fc13aec387e12a01ea72fbe1166239f4abf5246561d9d7c79dc",
+      "zolana-fast-check/src/ancestry.rs": "f77e0f896f93d947e64b0b5b3b760ece7153316ecb6ff173843274d07d70848c",
+      "zolana-fast-check/src/ancestry_parallel_tests.rs": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+      "zolana-fast-check/src/ancestry_prefix.rs": "a8ea272566b1ef2d6c2e46e1411e532ad1983747c94848da674f13ae20acecc4",
+      "zolana-fast-check/src/ancestry_prefix_tests.rs": "7df4f45666e7d8a7a3d07eb86ad75114c9f7ebf5d1957a6e3533ed5c9d877af1",
+      "zolana-fast-check/src/ancestry_tests.rs": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685",
+      "zolana-fast-check/src/main.rs": "44bfc8858075f5efd317374d4e55d1e07428265cc723e9ab992fdd911dc078e9",
+      "zolana-fast-check/src/restart_snapshots.rs": "eb0c2afe2e111249c34d4506ba0941a655f431af5a5e0522112a66b2122e6b68",
+      "zolana-fast-check/src/resume.rs": "9a746b879053151f174a5cf23f9e49bcf4405064268f8e437185554fe59120b2",
+      "zolana-fast-check/src/service.rs": "63a70881da25e871990c72e14cf8d309bec2067b6061e5f236ba59d7115343b0"
+    }
+  },
+  "candidate_status": "DISPOSABLE SSD recovery accepted:67 native tests, normal all3 snapshots, post-prune SIGKILL/restart, exact native-state and full canonical payment recovery; no production activation",
+  "files": {
+    "zolana-fast-check/src/ancestry.rs": {
+      "after": {
+        "bytes": 11063,
+        "sha256": "818d16af05549bf7885b5c0a5c8674df9d319cd9845b9445e4a40986f14a0f71"
+      },
+      "before": {
+        "bytes": 11052,
+        "sha256": "f77e0f896f93d947e64b0b5b3b760ece7153316ecb6ff173843274d07d70848c"
+      }
+    },
+    "zolana-fast-check/src/ancestry_archive.rs": {
+      "after": {
+        "bytes": 19057,
+        "sha256": "3a36313567e7bdac13f465604536b1d155a5696ad1f8306a37305f1f4ef47cee"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/ancestry_archive_tests.rs": {
+      "after": {
+        "bytes": 22819,
+        "sha256": "9bea3653e422bbafe0e0f7fa8a1640e4c2e124268ca5448de56674c168b44ed9"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/ancestry_prefix.rs": {
+      "after": {
+        "bytes": 6493,
+        "sha256": "65f3385d750c10729d1ad0f41d3d41bef6bdace66c5c5d47f999e1bc6fe4efd5"
+      },
+      "before": {
+        "bytes": 6075,
+        "sha256": "a8ea272566b1ef2d6c2e46e1411e532ad1983747c94848da674f13ae20acecc4"
+      }
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after": {
+        "bytes": 51845,
+        "sha256": "34c53883475c6ae3055e238a73bf83a3c41c252d94fec63638a0965ee91e86a6"
+      },
+      "before": {
+        "bytes": 45576,
+        "sha256": "44bfc8858075f5efd317374d4e55d1e07428265cc723e9ab992fdd911dc078e9"
+      }
+    },
+    "zolana-fast-check/src/restart_snapshots.rs": {
+      "after": {
+        "bytes": 25402,
+        "sha256": "b22d0848cd02157d02b7a83fe0dfa3cca84b55feed641a606d615cf7313991f5"
+      },
+      "before": {
+        "bytes": 14380,
+        "sha256": "eb0c2afe2e111249c34d4506ba0941a655f431af5a5e0522112a66b2122e6b68"
+      }
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "after": {
+        "bytes": 60920,
+        "sha256": "7c96a289ea592d363f51a505d7b8a25434266cbca3e296da93a4313df42a023b"
+      },
+      "before": {
+        "bytes": 21181,
+        "sha256": "9a746b879053151f174a5cf23f9e49bcf4405064268f8e437185554fe59120b2"
+      }
+    }
+  },
+  "format": "zolana093-staged-durable-ancestry-source-v1",
+  "implementation": {
+    "bounds": {
+      "canonical_metadata_bytes": 33554432,
+      "decoder_sequence_preallocation_bytes": 65536,
+      "manifest_bytes": 65536,
+      "record_bytes": 65536,
+      "records": 4096
+    },
+    "canonical_archive": "Policy pins a separate closed full-transaction canonical SQLite export and fixed target E>C. Native code checks its byte/domain binding; complete RPC body/metadata validation and old-payment recovery are separate controller acceptance gates.",
+    "external_authority": "Caller-pinned manifest digest plus exact network/genesis/node/voter/ledger/resume/original-root and certified BANK evidence; archive contents cannot choose their own trust root.",
+    "full_metadata": "Actual complete SlotMeta V3 canonical wincode records, same existing ancestry predicate, full-field live/archive overlap equality, live read errors fatal, missing-only fallback at or below approved cutoff; no missing-tail substitution.",
+    "path_checks": "Owned private real directories and single-link regular files through pinned no-follow dirfds; nonblocking regular-file open refuses FIFO before reading.",
+    "prototype_only": "4096 records/32MiB does not size or authorize existing million-slot pilot retention.",
+    "publication": "Exclusive pending generation; payload file, manifest file and generation directory fsync; Linux renameat2 NOREPLACE; parent fsync. No automatic overwrite, retry, abandoned-generation adoption or self-derived policy pin.",
+    "purge_seam": "All three peers preflight before standard upstream PurgeType::Exact. Cutoff C=H-1 is below the protected snapshot parent P and S; original O remains unchanged. This package is not authorization to invoke that seam.",
+    "resume_and_snapshot": "Explicit disposable fixture marker and independently pinned retention-policy.json. Exact protected full-snapshot file pair and original O are bound; current restored-root certificate, signed vote history and canonical live tail checks stay live.",
+    "scope": "Small Linux-only durable original-root metadata archive and explicit fresh three-validator fixture integration; no new consensus, key, fee or authority algorithm."
+  },
+  "permission": {
+    "cleanup_configuration_change": false,
+    "deployment": false,
+    "prune_or_delete": false,
+    "runtime_start": false,
+    "wallet_key_access": false
+  },
+  "remaining_gates": [
+    "Production-scale rolling archive publication/capture, bounded serving and retention policy; current4096-record metadata cap is not million-slot sizing.",
+    "Full production pilot canonical archive configuration and old accepted/expired-absent pending-wallet recovery through deployed gateway/browser.",
+    "Independent-host failures, power-loss acceptance and sustained capacity/disk reclamation; disposable test does not authorize existing pilot pruning."
+  ],
+  "revision": "LOCAL-093",
+  "unchanged_test_support": {
+    "zolana-fast-check/src/ancestry_parallel_tests.rs": "236319b25c5756b94e945bf2a4bdbd2f4f1afdfedf0be2d1631310f2e8689acf",
+    "zolana-fast-check/src/ancestry_prefix_tests.rs": "7df4f45666e7d8a7a3d07eb86ad75114c9f7ebf5d1957a6e3533ed5c9d877af1",
+    "zolana-fast-check/src/ancestry_tests.rs": "a6e85ef8cbe56408f8f1d55844558fdae8da58789dbe27daebb7ad6639962685"
+  },
+  "upstream_context": {
+    "commit": "a203300045b405f86c9c84308b2eae76af69ac3b",
+    "qualification": "Context of inherited source graph, not a claim this delta applies directly to pristine upstream or every earlier candidate.",
+    "version": "Agave 4.3.2"
+  },
+  "validation": {
+    "actual_linux_native": {
+      "accepted_lock_sha256": "26789f9b60030e7075788df1b3150e0172f4c630fc2ccd1177bf56c4dd3859b7",
+      "accepted_runtime_started": false,
+      "accepted_source_modified": false,
+      "accepted_source_preserved": true,
+      "build_flags": [
+        "--offline",
+        "--locked",
+        "-j6",
+        "-p",
+        "zolana-fast-check",
+        "--bin",
+        "zolana-fast-check",
+        "--features",
+        "zolana-pilot-202-recovery"
+      ],
+      "cargo": "1.97.1",
+      "compiled_runtime_binary_sha256": "3dcf349026e272cebc21d5818a034ec1edcfef08934da40dcfbd29af2b7e8454",
+      "compiled_source_manifest": {
+        "bytes": 254304,
+        "path": ".local/storage-recovery-093/integration-build-r1/evidence/compiled-source-manifest.json",
+        "sha256": "73f9b907e801fc7b28aa8d186b02fe36460898e0fba4c00a86ac14b7706306cb"
+      },
+      "financial_operations": 0,
+      "observed_original_baseline_manifest": {
+        "bytes": 253731,
+        "path": ".local/storage-recovery-093/integration-build-r1/evidence/baseline-manifest.json",
+        "sha256": "ffdda539fa006767647c3e34a92996ca33bc3146c6d78a2ee36aff690987f44d"
+      },
+      "result": {
+        "bytes": 13170,
+        "path": ".local/storage-recovery-093/integration-build-r1/evidence/result.json",
+        "sha256": "a79b4750176b179e0db38fc03f842644e255b2e08dd1dcbad27caf59ca8078ab"
+      },
+      "runtime_build_info_stdout": {
+        "bytes": 1350,
+        "path": ".local/storage-recovery-093/integration-build-r1/evidence/runtime-build-info.stdout",
+        "sha256": "9203cabe946434c49b32a85ac178d485cecde0e8f10fda89d3da89189e5de2df"
+      },
+      "runtime_probe_scope": "--build-info public linkage only; no validators, keys or ledgers opened",
+      "rustc": "1.97.1",
+      "source_input": {
+        "bytes": 3187,
+        "path": ".local/storage-recovery-093/integration-build-r1/source-input.json",
+        "sha256": "a69f47fd7b5ddde7ee340a6d1a66e76b3c884a51a0048702664b7c200c977259"
+      },
+      "status": "passed",
+      "storage": "private RAM tmpfs",
+      "test_binary_sha256": "9e33348f4f93a2d025017c4946dad57a3c0f2cf8e8c5046dc3296a7d7995df80",
+      "test_names": [
+        "ancestry::parallel_tests::ancestry_parallel_external_non_send_cancellation_stops_and_joins_all_walks",
+        "ancestry::parallel_tests::ancestry_parallel_invalid_peer_count_and_pre_cancel_never_start_workers",
+        "ancestry::parallel_tests::ancestry_parallel_late_worker_success_cannot_override_deadline_and_is_joined",
+        "ancestry::parallel_tests::ancestry_parallel_one_invalid_path_aborts_siblings_and_retains_the_original_error",
+        "ancestry::parallel_tests::ancestry_parallel_one_shared_deadline_joins_every_worker_without_partial_success",
+        "ancestry::parallel_tests::ancestry_parallel_overlaps_three_walks_and_preserves_input_order",
+        "ancestry::parallel_tests::ancestry_parallel_real_full_metadata_paths_and_corrupt_peer_fail_closed",
+        "ancestry::parallel_tests::ancestry_parallel_worker_panic_is_fail_closed_and_siblings_are_joined",
+        "ancestry::prefix::tests::archive_can_fill_only_missing_records_in_approved_prefix_never_missing_tail",
+        "ancestry::prefix::tests::callback_checks_deadline_and_cancel_before_and_after_full_read",
+        "ancestry::prefix::tests::callback_predicate_matches_live_error_and_invalid_parent_outcomes",
+        "ancestry::prefix::tests::corrupt_live_full_metadata_is_fatal_instead_of_using_archived_replacement",
+        "ancestry::prefix::tests::full_overlap_conflicts_include_fields_beyond_parent_and_slot",
+        "ancestry::prefix::tests::native_decoder_bounds_hostile_sequence_length_and_encoder_bounds_full_record",
+        "ancestry::prefix::tests::native_full_metadata_roundtrip_rejects_wrong_slot_truncation_and_trailing",
+        "ancestry::prefix::tests::prefix_range_count_and_preparation_budget_are_bounded",
+        "ancestry::prefix::tests::prefix_rejects_bad_lookup_slot_missing_or_invalid_parent_and_extra_branch",
+        "ancestry::prefix::tests::prefix_total_encoded_bytes_are_bounded_before_path_acceptance",
+        "ancestry::prefix::tests::standard_purge_then_reopen_preserves_merged_metadata_ancestry_only",
+        "ancestry::prefix::tests::target_metadata_is_required_but_original_targets_own_parent_is_not_walked",
+        "ancestry::prefix::tests::unchanged_live_reader_and_merged_prefix_give_identical_real_blockstore_reports",
+        "ancestry_archive::tests::bounds_and_cancellation_do_not_publish_an_authoritative_generation",
+        "ancestry_archive::tests::durable_reload_after_standard_purge_and_db_reopen_uses_fresh_file_prefix",
+        "ancestry_archive::tests::even_re_pinned_frames_must_decode_complete_valid_typed_ancestry",
+        "ancestry_archive::tests::external_digest_and_every_domain_binding_are_required",
+        "ancestry_archive::tests::fifo_and_exposed_permissions_refuse_without_blocking_on_open",
+        "ancestry_archive::tests::fresh_load_preserves_live_conflicts_and_original_checkpoint_pin",
+        "ancestry_archive::tests::incomplete_generation_is_not_loadable_or_resumable_and_publish_never_overwrites",
+        "ancestry_archive::tests::manifest_and_payload_corruption_are_not_reinterpreted_as_missing",
+        "ancestry_archive::tests::original_live_predicate_allows_matching_optional_hash_and_new_timestamp",
+        "ancestry_archive::tests::owner_paths_refuse_symlink_components_files_and_hardlinks",
+        "ancestry_archive::tests::sigkill_after_publication_commit_loads_new_generation_with_external_pin",
+        "ancestry_archive::tests::sigkill_before_publication_rename_keeps_only_old_generation_authoritative",
+        "ancestry_tests::cancellation_after_the_target_metadata_read_cannot_claim_success",
+        "ancestry_tests::cancellation_before_or_during_a_valid_path_never_returns_a_partial_report",
+        "ancestry_tests::cancelled_type_survives_anyhow_context_for_graceful_service_shutdown",
+        "ancestry_tests::corrupt_raw_metadata_returns_a_fallible_error_without_repairing_the_fixture",
+        "ancestry_tests::cycle_is_rejected_by_the_strictly_decreasing_parent_rule",
+        "ancestry_tests::expired_deadline_fails_even_on_valid_or_equal_root_paths",
+        "ancestry_tests::jumping_below_target_or_finding_target_on_another_branch_is_not_a_proof",
+        "ancestry_tests::metadata_slot_must_match_the_lookup_key_even_if_parent_would_reach_target",
+        "ancestry_tests::missing_parent_self_parent_and_upward_parent_all_fail_closed",
+        "ancestry_tests::missing_start_or_middle_metadata_cannot_be_accepted_as_ancestry",
+        "ancestry_tests::real_blockstore_more_than_100k_links_survives_reopen_without_a_count_cap",
+        "ancestry_tests::target_newer_than_start_fails_without_reinterpreting_root_order",
+        "ancestry_tests::target_termination_requires_its_metadata_but_never_walks_its_own_parent",
+        "build_info::tests::build_info_rejects_runtime_arguments_before_opening_anything",
+        "build_info::tests::build_info_reports_both_actual_dependency_functions",
+        "durable_fixture_args_tests::durable_fixture_requires_fresh_three_peer_native_hold_and_explicit_resume_pin",
+        "offline_probe::tests::offline_probe_rejects_arbitrary_paths_or_runtime_options",
+        "restart_snapshots::tests::exact_snapshot_pair_and_independent_file_pins_are_mandatory",
+        "restart_snapshots::tests::missing_or_stale_snapshot_cannot_silently_replay_from_genesis",
+        "restart_snapshots::tests::original_snapshot_policy_uses_real_archive_and_bounded_full_only_generation",
+        "restart_snapshots::tests::protected_generated_pair_pins_exact_bytes_and_refuses_changed_or_newer_archive",
+        "restart_snapshots::tests::repeated_original_snapshot_binding_preserves_existing_archive_and_directories",
+        "restart_snapshots::tests::symlink_snapshot_directory_or_archive_is_rejected_without_following_it",
+        "restart_snapshots::tests::unexpected_incremental_or_remote_input_is_preserved_and_rejected",
+        "restart_snapshots::tests::unsafe_existing_directory_is_not_repaired_or_cleared",
+        "restart_snapshots::tests::verifier_or_history_pruning_changes_are_rejected",
+        "resume::snapshot_root_provenance_tests::aggregate_policy_is_exclusively_published_and_exactly_pinned",
+        "resume::snapshot_root_provenance_tests::current_root_provenance_wait_keeps_deadline_and_cancellation_guards",
+        "resume::snapshot_root_provenance_tests::current_root_requires_its_own_persisted_certificate_and_hash",
+        "resume::snapshot_root_provenance_tests::durable_head_must_keep_its_live_root_certificate_above_cutoff",
+        "resume::snapshot_root_provenance_tests::offline_retention_cli_requires_complete_independent_pins_and_rejects_ambiguity",
+        "service::tests::actual_sigterm_and_sigint_set_the_stop_flag_without_terminating_the_process",
+        "service::tests::ordinary_bounded_benchmark_and_resume_modes_remain_available",
+        "service::tests::service_parse_accepts_only_original_resume_without_benchmark_options"
+      ],
+      "test_stdout": {
+        "bytes": 7454,
+        "path": ".local/storage-recovery-093/integration-build-r1/evidence/tests.stdout",
+        "sha256": "41d4624b9905f5733719f003eff0e3d81ffb9526e42afd12f424f755364d4659"
+      },
+      "tests_passed": 67,
+      "uid": 999
+    },
+    "durable_unit_qualification": "The 12 archive tests include real SIGKILL subprocess publication boundaries and a fresh file-prefix load after disposable standard purge/DB reopen. Those tests do not prove full validator snapshot replay, full canonical archive service, consensus-produced evidence or disk reclamation.",
+    "full_validator_crash_restart": {
+      "audited_fresh_process_resumes": 2,
+      "canonical_export_through": 194,
+      "collection": {
+        "path": ".local/storage-recovery-093/recovery-r3/collection.json",
+        "sha256": "28e38bb33f8b4bbcc830c1682041f97513471e9f827ba1013ca0f0dca9215f66"
+      },
+      "executed_or_passed_claim": true,
+      "original_full_proof_payment_slots": [
+        80,
+        84,
+        88
+      ],
+      "original_keys_resume_unchanged": true,
+      "original_root": 42,
+      "post_prune_SIGKILL_between_successful_audits": true,
+      "power_loss_or_independent_host_test": false,
+      "produced_canonical_blocks": 192,
+      "production_or_existing_pilot_activation": false,
+      "prune_through": 128,
+      "result": {
+        "path": ".local/storage-recovery-093/recovery-r3/evidence/result.json",
+        "sha256": "0058accfef44f94f6ad6b85ee73cd675d6ee890cd779666b9a6bb0fb35e22c8b"
+      },
+      "retained_head": 129,
+      "same_notes_backing_permanent_markers": [
+        8,
+        994,
+        8
+      ],
+      "snapshot_pair": [
+        130,
+        194
+      ],
+      "status": "passed_disposable_SSD_process_crash_only"
+    },
+    "local_patch_application": {
+      "all_7_after_bytes_equal_tested_integration_source": true,
+      "all_7_after_pins_equal_compiled_source_manifest": true,
+      "check_and_apply": "git apply --no-index with Git discovery ceiling and explicit skipped-patch refusal",
+      "full_20_file_baseline_preparation_rehearsed": false,
+      "scope": "Disposable local seven-file delta after LOCAL-092, plus three untouched test-support files; no local Rust compilation.",
+      "status": "passed",
+      "untouched_support_equal": true
+    }
+  }
+}
