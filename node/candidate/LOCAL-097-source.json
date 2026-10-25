@@ -1,0 +1,352 @@
+{
+  "actual_SST_overlay_canary_acceptance": {
+    "lower_files_unchanged": true,
+    "lower_sst_files": 2,
+    "native_sigkills": 2,
+    "original_pilot_opened": false,
+    "qualification": "Tiny genuine native Blockstore process-crash COW isolation; separate from full pilot recovery. Failed WAL-only r1 evidence is preserved.",
+    "result": {
+      "bytes": 5615,
+      "path": ".local/ssd-recovery-097/ops-r2/canary-result.json",
+      "sha256": "9ef98c6f68eacf8ff9ae55cbcc5103b664797abc649ad9a1074e5aca75109dac"
+    },
+    "same_overlay_view_across_process_restarts": true,
+    "status": "passed",
+    "validators_started": false
+  },
+  "actual_build_acceptance": {
+    "added_relative095": 25,
+    "all_commands_offline_locked_or_fixed_binary_no_filter_no_stop": true,
+    "baseline_tests": 79,
+    "collection": {
+      "bytes": 6255,
+      "path": ".local/ssd-recovery-097/build-r2/collection.json",
+      "sha256": "b8caea45d27703f5a0cefbd5fa4ed8c9167a26965a0bec31a20b51df5a740e45"
+    },
+    "command_seconds": {
+      "compile": 37.00445582100656,
+      "list": 1.00035879900679,
+      "runner-compile": 5.000904896995053,
+      "runtime-build-info": 1.000354541989509,
+      "tests": 12.001127231982537
+    },
+    "compiled_source_manifest": {
+      "bytes": 255310,
+      "path": ".local/ssd-recovery-097/build-r2/evidence/compiled-source-manifest.json",
+      "sha256": "8b3869b03ea4151cac6aebd43cbc5295cc99fc8704260fccf8f99a2397f85da9"
+    },
+    "failed": 0,
+    "filtered_out": 0,
+    "full_scratch_manifest_restored": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d",
+    "ignored": 0,
+    "native_tests": 104,
+    "new_test_names": [
+      "offline_metadata::tests::fixed_export_flag_cannot_mix_with_live_or_path_options",
+      "offline_metadata::tests::public_resume_rejects_changed_network_peer_voter_or_original_root",
+      "offline_metadata::tests::snapshot_inventory_requires_exact_two_fixed_pins_and_no_incremental_input",
+      "offline_metadata::tests::bounded_private_reads_refuse_symlinks_hardlinks_and_oversize",
+      "offline_metadata::tests::certified_head_walk_requires_strict_complete_parent_path",
+      "offline_metadata::tests::certified_head_walk_obeys_deadline_and_original_boundary",
+      "offline_metadata::tests::published_manifest_requires_independent_sha_and_full_v2_binding",
+      "offline_metadata::tests::metadata_export_domain_keeps_original_and_older_snapshot_bounds",
+      "offline_ssd::tests::ssd_modes_are_fixed_and_reject_live_or_path_arguments",
+      "offline_ssd::tests::ssd_independent_receipt_pin_is_checked_before_json_or_bindings",
+      "offline_ssd::tests::ssd_fixed_peer_rejects_manifest_identity_and_genesis_substitution",
+      "offline_ssd::tests::ssd_current_original_and_snapshot_bounds_cannot_move",
+      "offline_ssd::tests::ssd_corrupt_unknown_typed_binding_does_not_fallback",
+      "offline_ssd::tests::ssd_fixed_pins_remain_distinct_and_ram_filesystem_is_refused",
+      "offline_overlay_canary::tests::overlay_canary_accepts_only_fixed_modes_without_paths_or_live_flags",
+      "offline_overlay_canary::tests::overlay_canary_distinguishes_full_native_metadata_not_parent_projection",
+      "offline_overlay_canary::tests::overlay_canary_genuine_store_reopens_and_preserves_exact_purge",
+      "copy_runtime::tests::provenance_refuses_host_namespace_original_alias_and_missing_key",
+      "copy_runtime::tests::generated_origins_are_limited_to_new_mutable_copy_outputs",
+      "copy_runtime::tests::private_file_descriptor_checks_reject_public_mode_and_unlisted_hardlink",
+      "copy_runtime::tests::complete_new_account_alias_groups_never_admit_authority_aliases",
+      "copy_runtime::tests::fixed_copy_service_rejects_every_alternate_path_or_extra_operation",
+      "copy_runtime::tests::actual_mount_parser_and_pins_reject_wrong_view_or_shared_propagation",
+      "copy_runtime::tests::overlay_must_have_all_three_fixed_layers_and_no_indirection",
+      "copy_runtime::tests::copy_file_paths_cannot_escape_or_enter_any_original_rocksdb"
+    ],
+    "old_sealed095_096_097r1_preserved": true,
+    "postflight": {
+      "bytes": 678,
+      "path": ".local/ssd-recovery-097/build-r2/evidence/postflight.json",
+      "sha256": "3c76e70136ea7c4cdd635b894ff844aca511ff918f3829af387962c94fca9c87"
+    },
+    "result": {
+      "bytes": 19574,
+      "path": ".local/ssd-recovery-097/build-r2/evidence/result.json",
+      "sha256": "fcc935670d353c9f1c16846708678f85984bca3b08f1c44b1789e907283fed07"
+    },
+    "runtime_bytes": 93683376,
+    "runtime_public_probe": {
+      "financial_operations": 0,
+      "format": "zolana085-epoch202-runner-build-v1",
+      "keys_read": false,
+      "ledgers_opened": false,
+      "mode": "public-linkage-probe",
+      "runner_compiled_new_feature": true,
+      "runtime": {
+        "activation_first_slot": 413696,
+        "compiled_new_feature": true,
+        "compiled_old_retry_feature": false,
+        "consensus_output_sha256": "fe6f03c9cd7ed3d9774f71acd97f0f16b5dda937fcfcca483e66d6b1e0352e30",
+        "format": "zolana085-epoch202-runtime-build-v1",
+        "genesis_hash": "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p",
+        "historical201_policy": "existing-entry-preserved-v1",
+        "network": [
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67
+        ],
+        "root_anchor": {
+          "bank_hash": "BYnRBCtGoKuEqWz36fwqYn6uBe1yY5ftp5oW9qs22Gdz",
+          "raw_input_sha256": "6e56d2954b6e1ea6afdcd14e9688fca011bae4c9b357cf8d904fe9669e7b038e",
+          "slot": 413694
+        },
+        "signed_parent": {
+          "bank_hash": "HXxWUSa9AoiyFJ7BEsVHNXLVNziD64zayM5592axQAsh",
+          "block_id": "FaEvei6cJcPzF83uK8MLLAQLLSXGQoe9m77FdpjCRTYu",
+          "raw_input_sha256": "f98785132ad63e75b9cdc21622992fc825d796ae9ef3c7f21fa45099cb87c2c9",
+          "slot": 413695
+        },
+        "target_epoch": 202
+      },
+      "validators_started": false,
+      "votor": {
+        "activation_slot": 413696,
+        "crate_feature_enabled": true,
+        "format": "zolana085-epoch202-votor-build-v1",
+        "per_certificate_policy": "requested-epoch202-sidecar-only-v1",
+        "runtime_view_api": "Bank::pilot_epoch202_recovery_view",
+        "target_epoch": 202
+      }
+    },
+    "runtime_sealed_path": "/dev/shm/zolana-ssd-recovery-097-sealed-r2/zolana-fast-check",
+    "runtime_sha256": "8af761c22aa2176030aad0294bd11aede5d75650783b82312ef6e950ab74dc99",
+    "status": "passed",
+    "summary": "test result: ok. 104 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.10s",
+    "test_stdout": {
+      "bytes": 11515,
+      "path": ".local/ssd-recovery-097/build-r2/evidence/tests.stdout",
+      "sha256": "30051c85c5891896f8d0c8ed7eb8e98470f7a9a56e9055dd89d78035101fdae6"
+    }
+  },
+  "actual_fresh_SSD_acceptance": {
+    "SIGKILL_only_after_first_peer_full_native_SSD_load_verified": true,
+    "full_live_and_loaded_path_entries_each_peer": 521846,
+    "host_reboot_tested": false,
+    "keys_loaded": false,
+    "qualification": "Actual native loader process-crash/relaunch on fixed ext4 metadata files using prior r1 runtime; the unchanged leaf and 095 archive implementation are included here. Not full validator, power-loss or host-reboot evidence.",
+    "result": {
+      "bytes": 42366,
+      "path": ".local/ssd-recovery-097/ssd-runtime.json",
+      "sha256": "5f00d7e6030ba5abafc1c13c6157c5a3fcb25f86371116b335c6eb1c98c87130"
+    },
+    "runtime_sha256": "d3d09868bd6b4adc25bc3b5d4d7bfcde6e9b1770e36b1b96e2888f116eace0d9",
+    "source_fingerprints_unchanged": true,
+    "source_leaf_byte_identical_in_this_r2_candidate": true,
+    "status": "passed",
+    "subsequent_fresh_process_verified_all_three": true,
+    "validators_started": false
+  },
+  "actual_unpruned_pilot_acceptance": {
+    "actual_native_SIGKILL_cycles": 1,
+    "all_three_peers_complete_ancestry_entries": 521846,
+    "all_three_peers_current_root": 522202,
+    "all_three_peers_original_root": 44,
+    "financial_operations": 0,
+    "host_reboot_claim": false,
+    "independent_copy_claim": false,
+    "native_state_sha256_before_and_after": "84c6dee1844ddc3762abddfa59de5393f6dabd79518a0ff720bdb35724586e93",
+    "ordinary_full_snapshot_resumes": 2,
+    "original_ledger_writes": 0,
+    "prune_operations": 0,
+    "qualification": "Large-history ordinary validator replay/recovery in an isolated unpruned COW view dependent on preserved original read-only lower files and preserved RAM upper/private shared memory. This does not accept original-pilot pruning or durable independent-copy reboot recovery.",
+    "result": {
+      "bytes": 93011,
+      "path": ".local/ssd-recovery-097/pilot-r3/pilot-result.json",
+      "sha256": "b529361c83855213e5e0d2cbbe053aa29cb1638b4d922157541502c81a6e9ce2"
+    },
+    "runtime_sha256": "8af761c22aa2176030aad0294bd11aede5d75650783b82312ef6e950ab74dc99",
+    "same_preserved_mutable_overlay_view": true,
+    "status": "passed"
+  },
+  "application": {
+    "automatic_preparer_changed": false,
+    "baseline": "exact LOCAL095 compiled after-state, including unchanged LOCAL094 main and tested ReadOnly ledger API",
+    "baseline_manifest": {
+      "bytes": 254750,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/compiled-source-manifest.json",
+      "sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d"
+    },
+    "baseline_runtime_sha256": "5c99ead8b97ebcb9427b8d5874ab3f966b31786b85b15d1fbe52e17cad20ab54",
+    "changed_or_added_files": 7,
+    "do_not_apply_after_LOCAL096": "This cumulative patch includes offline_metadata.rs and its main dispatch. Apply only to the pinned LOCAL095 after-state; do not stack it after LOCAL096. Prior 096 artifacts remain historical independent evidence.",
+    "existing_modified_files": 3,
+    "includes_LOCAL096_slice": true,
+    "initially_absent_modules": 4,
+    "patch": {
+      "bytes": 109438,
+      "path": "node/candidate/agave-4.3.2-LOCAL-097.patch",
+      "sha256": "9ccd65e5d1d34b0fe7ccd4213b5d2f13e4725463bbac0588c53a78d3190cd6ce"
+    },
+    "reconstruction": {
+      "bytes": 2691,
+      "path": ".local/ssd-recovery-097/candidate-reconstruction-r1.json",
+      "sha256": "b9b70817eef8d27b999a2b22bb2a9c6dd2858d4c52a5c484b7c60fea5fc03b39"
+    },
+    "requires_independent_full_workspace_pin_verification": true
+  },
+  "build_preparation": {
+    "bytes": 1883,
+    "path": ".local/ssd-recovery-097/build-r2/preparation.json",
+    "sha256": "cc6d35c1ddb6a69bd7d069919f52164682d7ea595ecd4c655d2d8be7fa6f3f22"
+  },
+  "commands": {
+    "canary": [
+      "--offline-overlay-canary",
+      "<one fixed mode>"
+    ],
+    "metadata_export": [
+      "--offline-pilot-metadata-export"
+    ],
+    "ssd_diagnostic": [
+      "--offline-pilot-metadata-ssd-crash-hold"
+    ],
+    "ssd_verify": [
+      "--offline-pilot-metadata-ssd-verify"
+    ],
+    "unpruned_copy": [
+      "--isolated-pilot-copy-service",
+      "--provenance-sha256",
+      "<independently sealed root provenance SHA256>"
+    ]
+  },
+  "files": {
+    "ledger/src/blockstore.rs": {
+      "after": {
+        "bytes": 264734,
+        "sha256": "8c2f387ac4d23dc5a73e65bf7af0594b43d4080db03c6a7e5287855008a7e7f8"
+      },
+      "before": {
+        "bytes": 264405,
+        "sha256": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e"
+      }
+    },
+    "ledger/src/blockstore_db.rs": {
+      "after": {
+        "bytes": 54006,
+        "sha256": "3c682082c870bd28880dc136d90d819295539cc8217420919e3dda6c3ec4b424"
+      },
+      "before": {
+        "bytes": 53199,
+        "sha256": "d3b083b5b0f5f0bf471ea5dc3bb89de1235a23f52dec234a24e9767208e911c7"
+      }
+    },
+    "zolana-fast-check/src/copy_runtime.rs": {
+      "after": {
+        "bytes": 39167,
+        "sha256": "de7c42584f6edad0cc822b75d75bb62ff5bd3ad145f198a22b81b9160cf11761"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after": {
+        "bytes": 52296,
+        "sha256": "0711131d986b6dc816401bf30e02db8d58fb0a98f907d2b03310c4dc834d49ab"
+      },
+      "before": {
+        "bytes": 51938,
+        "sha256": "6516a7881f86fb9b11cb91ec3b9c5ba02570941b040f054c111b3f606b82b81e"
+      }
+    },
+    "zolana-fast-check/src/offline_metadata.rs": {
+      "after": {
+        "bytes": 28326,
+        "sha256": "fdb3c362dcffe7a256315f0f16d323949dc34426485f9ca021232e9ae8a27fb9"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/offline_overlay_canary.rs": {
+      "after": {
+        "bytes": 9903,
+        "sha256": "e46720cd5fab2bfa3d668f6d5e4b4c64543a84b2c6e3d093390c5aeca233554c"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/offline_ssd.rs": {
+      "after": {
+        "bytes": 25839,
+        "sha256": "e81d21d83cde9bec2037ee6a3f29f7c9f996d7b3cd11be77f03cef659083fcad"
+      },
+      "before": null
+    }
+  },
+  "final_preservation": "Root owns final independent preservation/closure evidence separately; this source artifact does not replace that gate.",
+  "format": "zolana097-native-cumulative-candidate-v1",
+  "preparation": {
+    "bytes": 7762,
+    "path": ".local/ssd-recovery-097/native-r2/preparation.json",
+    "sha256": "1c9bc4622a401c85c01124230410525c144a6cf3fef5c3236ef1fcb8a1ab4cd3"
+  },
+  "qualifications": [
+    "Source-only candidate publication does not install or activate a runtime, service, gateway or public listener.",
+    "Operator-produced fixed private views, sealed provenance and key custody are external mandatory prerequisites, not supplied by this patch.",
+    "No changes to original pilot retention eligibility, no policy adoption or original pilot pruning, no reset/genesis fallback.",
+    "The canary Exact purge is restricted to disposable canary data; the actual large pilot COW test remained unpruned.",
+    "RAM OverlayFS upper/private shared memory remains volatile; no host-reboot/power-loss or independent durable clone claim.",
+    "Inherited 095 finite V2 caps remain 1,048,576 records, 8 GiB decoded metadata,512 MiB stored metadata plus framing,48 MiB index per peer; not unbounded multi-year storage.",
+    "No payment-speed, Chrome/Mac-to-Linux performance, public-testnet-launch or competitor superiority claim.",
+    "This seven-leaf reconstruction is not a substitute for full cumulative workspace provenance or retroactive d805 build attestation."
+  ],
+  "source_scope": {
+    "copy_runtime": "Explicit fixed unpruned isolated-copy service guard. Checks independently pinned provenance, mount/network namespaces, overlay layers, inode/link ownership and copied authority files before any writable runtime setup; ordinary original-root/current-root/signed-history/full-snapshot checks remain.",
+    "ledger_api": "Only dev-context-only explicit Primary flush facade and crate-private implementation. FlushOptions.set_wait(true) for both written CFs (SlotMeta, Root); no automatic validator/retention/read flush.",
+    "main": "Four module declarations and fixed early dispatch; copy provenance gate executes first, before prepare_root/process.lock and all live setup.",
+    "offline_metadata": "Byte-identical LOCAL096 keyless ReadOnly original-pilot metadata exporter; fixed UID995/domain/source/output, independently pinned snapshots, unchanged 095 V2 publication/load.",
+    "offline_overlay_canary": "Fixed disposable canary-r2 only; genuine SlotMeta/Root SST generation, mutations/Exact purge in merged view, process restart inspections; no original pilot access.",
+    "offline_ssd": "Fixed keyless fresh-process SSD metadata verification and explicit peer0-after-verification crash hold; no validator startup or source writes.",
+    "unchanged": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "dependencies",
+      "ancestry V2 payload/index/codec/bounds",
+      "resume.rs",
+      "restart_snapshots.rs",
+      "ordinary fresh-fixture eligibility",
+      "installed runtime and service configuration",
+      "wallet and browser source"
+    ]
+  },
+  "status": "frozen source-only review artifact; actual scoped Linux receipts linked; not an installation or activation"
+}

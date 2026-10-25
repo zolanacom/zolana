@@ -1,0 +1,2916 @@
+diff --git a/ledger/src/blockstore.rs b/ledger/src/blockstore.rs
+--- a/ledger/src/blockstore.rs
++++ b/ledger/src/blockstore.rs
+@@ -1397,6 +1397,13 @@
+ 
+     pub fn live_files_metadata(&self) -> Result<Vec<LiveFile>> {
+         self.db.live_files_metadata()
++    }
++
++    /// Explicit synchronous SST preparation for the disposable OverlayFS canary.
++    /// Never called by validator startup, retention, cleanup or ordinary reads.
++    #[cfg(feature = "dev-context-only-utils")]
++    pub fn flush_overlay_canary_metadata(&self) -> Result<()> {
++        self.db.flush_overlay_canary_metadata()
+     }
+ 
+     #[cfg(feature = "dev-context-only-utils")]
+diff --git a/ledger/src/blockstore_db.rs b/ledger/src/blockstore_db.rs
+--- a/ledger/src/blockstore_db.rs
++++ b/ledger/src/blockstore_db.rs
+@@ -462,6 +462,25 @@
+         }
+     }
+ 
++    // Only the disposable canary calls this diagnostic API. Flush every CF it
++    // writes (FULL SlotMeta and Root), not RocksDB's unused default CF.
++    #[cfg(feature = "dev-context-only-utils")]
++    pub(crate) fn flush_overlay_canary_metadata(&self) -> Result<()> {
++        if self.access_type != AccessType::Primary {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "overlay canary metadata flush requires actual Primary access",
++            )
++            .into());
++        }
++        let mut options = rocksdb::FlushOptions::default();
++        options.set_wait(true);
++        for name in [columns::SlotMeta::NAME, columns::Root::NAME] {
++            self.db.flush_cf_opt(self.cf_handle(name), &options)?;
++        }
++        Ok(())
++    }
++
+     pub(crate) fn live_files_metadata(&self) -> Result<Vec<LiveFile>> {
+         match self.db.live_files() {
+             Ok(live_files) => Ok(live_files),
+diff --git a/zolana-fast-check/src/copy_runtime.rs b/zolana-fast-check/src/copy_runtime.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/copy_runtime.rs
+@@ -0,0 +1,1142 @@
++//! Explicit unpruned copy-only service. No original fixture eligibility changes.
++//! Root constructs/seals the private view; this gate runs before even process.lock.
++use {
++    crate::{Args, configure_environment, prepare_root, resume, service},
++    anyhow::{Context, Result, ensure},
++    serde::Deserialize,
++    serde_json::json,
++    std::{
++        collections::{BTreeMap, BTreeSet},
++        ffi::CString,
++        fs::{self, File, OpenOptions},
++        io::Read,
++        os::{
++            fd::{AsRawFd, FromRawFd},
++            unix::{
++                ffi::OsStrExt,
++                fs::{MetadataExt, OpenOptionsExt},
++            },
++        },
++        path::{Component, Path, PathBuf},
++        time::{Duration, Instant},
++    },
++};
++
++const FLAG: &str = "--isolated-pilot-copy-service";
++const PIN_FLAG: &str = "--provenance-sha256";
++const PROOF: &str = "/run/zolana-ssd-recovery-097-copy-r1/provenance.json";
++const ROOT: &str = "/var/lib/zolana-vat-085-r1/network";
++const BASE: &str = "/dev/shm/zolana-ssd-recovery-097-copy-r1";
++const RAM: &str = "/dev/shm/zolana-ssd-recovery-097-copy-r1/ram";
++const RESUME: &str = "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a";
++const UID: u32 = 995;
++const GID: u32 = 986;
++const RAM_BYTES: u64 = 24 * 1024 * 1024 * 1024;
++const MAX_FILES: usize = 512;
++const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
++const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
++const IDENTITIES: [&str; 3] = [
++    "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
++    "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
++    "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
++];
++const LEDGERS: [&str; 3] = [
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-HjbHskvn6Tos8quAv6VjvCwxFDykuBF7KiPYvmmnbaWU",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-A52FF9Tk89Fx9E2NYqvtGBr7SE9gVMPWgWLzjf6i5WxD",
++];
++const SNAPSHOTS: [&str; 2] = [
++    "snapshot-520508-CZu7jPfXYrwpFzztzWg8vR3jAtUYHy5GU8x6Y5PqHgQ8.tar.zst",
++    "snapshot-521532-AFZP8sCmsTr9TDh1MBgs9kBNciqayAC4uB5USTroNum5.tar.zst",
++];
++
++#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
++#[serde(deny_unknown_fields)]
++struct Identity {
++    device: u64,
++    inode: u64,
++}
++impl Identity {
++    fn of(file: &File) -> Result<Self> {
++        let m = file.metadata()?;
++        Ok(Self {
++            device: m.dev(),
++            inode: m.ino(),
++        })
++    }
++    fn valid(self) -> bool {
++        self.device > 0 && self.inode > 0
++    }
++}
++
++#[derive(Clone, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct MountPin {
++    mount_id: u64,
++    line_sha256: String,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Namespaces {
++    mount: Identity,
++    network: Identity,
++    host_mount: Identity,
++    host_network: Identity,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Peer {
++    identity: String,
++    overlay_mount: MountPin,
++    lower_mount: MountPin,
++    lower_identity: Identity,
++    upper_identity: Identity,
++    work_identity: Identity,
++}
++#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "lowercase")]
++enum Origin {
++    Copied,
++    Generated,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct InputFile {
++    origin: Origin,
++    relative: String,
++    identity: Identity,
++    source_identity: Option<Identity>,
++    bytes: u64,
++    sha256: String,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Provenance {
++    format: String,
++    resume_sha256: String,
++    overlay_canary_receipt_sha256: String,
++    namespace: Namespaces,
++    source_root: Identity,
++    copy_root: Identity,
++    copy_root_mount: MountPin,
++    root_mount: MountPin,
++    ram_root: Identity,
++    ram_mount: MountPin,
++    ram_max_bytes: u64,
++    peers: Vec<Peer>,
++    files: Vec<InputFile>,
++}
++
++#[derive(Clone, Debug)]
++struct Mount {
++    id: u64,
++    root: PathBuf,
++    point: PathBuf,
++    options: BTreeSet<String>,
++    optional: Vec<String>,
++    kind: String,
++    super_options: BTreeSet<String>,
++    line_sha256: String,
++}
++
++fn sha(raw: &[u8]) -> String {
++    solana_sha256_hasher::hash(raw)
++        .to_bytes()
++        .iter()
++        .map(|b| format!("{b:02x}"))
++        .collect()
++}
++fn valid_pin(pin: &str) -> Result<()> {
++    ensure!(
++        pin.len() == 64
++            && pin
++                .bytes()
++                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
++        "exact lowercase SHA256 required"
++    );
++    Ok(())
++}
++fn budget(end: Instant) -> Result<()> {
++    ensure!(Instant::now() < end, "copy provenance deadline exceeded");
++    Ok(())
++}
++fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>> {
++    let mut f = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(path)?;
++    let mut raw = Vec::new();
++    Read::by_ref(&mut f).take(max + 1).read_to_end(&mut raw)?;
++    ensure!(
++        raw.len() as u64 <= max,
++        "bounded provenance/proc input exceeded"
++    );
++    Ok(raw)
++}
++fn namespace(path: &str) -> Result<Identity> {
++    let m = fs::metadata(path)?;
++    Ok(Identity {
++        device: m.dev(),
++        inode: m.ino(),
++    })
++}
++fn mount_id(file: &File) -> Result<u64> {
++    let mut out = std::mem::MaybeUninit::<libc::statx>::zeroed();
++    let result = unsafe {
++        libc::statx(
++            file.as_raw_fd(),
++            c"".as_ptr(),
++            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
++            libc::STATX_MNT_ID,
++            out.as_mut_ptr(),
++        )
++    };
++    ensure!(
++        result == 0,
++        "statx mount identity unavailable: {}",
++        std::io::Error::last_os_error()
++    );
++    let out = unsafe { out.assume_init() };
++    ensure!(
++        out.stx_mask & libc::STATX_MNT_ID != 0 && out.stx_mnt_id > 0,
++        "actual mount ID absent"
++    );
++    Ok(out.stx_mnt_id)
++}
++fn unescape_path(text: &str) -> Result<PathBuf> {
++    let bytes = text.as_bytes();
++    let mut out = Vec::new();
++    let mut at = 0;
++    while at < bytes.len() {
++        if bytes[at] == b'\\' {
++            ensure!(at + 3 < bytes.len(), "mount escape truncated");
++            let value = match &bytes[at + 1..at + 4] {
++                b"040" => b' ',
++                b"011" => b'\t',
++                b"012" => b'\n',
++                b"134" => b'\\',
++                _ => anyhow::bail!("unknown mount escape"),
++            };
++            out.push(value);
++            at += 4;
++        } else {
++            out.push(bytes[at]);
++            at += 1;
++        }
++    }
++    let path = PathBuf::from(String::from_utf8(out)?);
++    ensure!(path.is_absolute(), "absolute mount path required");
++    Ok(path)
++}
++fn mounts(raw: &[u8]) -> Result<BTreeMap<u64, Mount>> {
++    ensure!(raw.len() <= 256 * 1024, "mount table byte bound");
++    let mut result = BTreeMap::new();
++    for line in std::str::from_utf8(raw)?.lines() {
++        ensure!(
++            line.len() <= 8192 && result.len() < 2048,
++            "mount table line/count bound"
++        );
++        let (left, right) = line.split_once(" - ").context("mount separator absent")?;
++        let a: Vec<_> = left.split_whitespace().collect();
++        let b: Vec<_> = right.split_whitespace().collect();
++        ensure!(a.len() >= 6 && b.len() == 3, "mount record shape differs");
++        let id = a[0].parse()?;
++        let entry = Mount {
++            id,
++            root: unescape_path(a[3])?,
++            point: unescape_path(a[4])?,
++            options: a[5].split(',').map(str::to_owned).collect(),
++            optional: a[6..].iter().map(|s| (*s).to_owned()).collect(),
++            kind: b[0].into(),
++            super_options: b[2].split(',').map(str::to_owned).collect(),
++            line_sha256: sha(line.as_bytes()),
++        };
++        ensure!(result.insert(id, entry).is_none(), "duplicate mount ID");
++    }
++    ensure!(!result.is_empty(), "empty mount table");
++    Ok(result)
++}
++fn private_mount(m: &Mount) -> Result<()> {
++    ensure!(
++        !m.optional.iter().any(|s| s.starts_with("shared:")
++            || s.starts_with("master:")
++            || s.starts_with("propagate_from:")),
++        "copy mount has external propagation"
++    );
++    Ok(())
++}
++fn pinned_mount<'a>(
++    all: &'a BTreeMap<u64, Mount>,
++    pin: &MountPin,
++    point: &Path,
++) -> Result<&'a Mount> {
++    valid_pin(&pin.line_sha256)?;
++    let m = all.get(&pin.mount_id).context("expected mount ID absent")?;
++    ensure!(
++        m.id == pin.mount_id && m.point == point && m.line_sha256 == pin.line_sha256,
++        "actual copy mount record differs"
++    );
++    private_mount(m)?;
++    Ok(m)
++}
++fn directory(path: &Path, expected: Identity, owner: u32, mode: u32) -> Result<File> {
++    ensure!(path.canonicalize()? == path, "copy directory alias/symlink");
++    let f = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
++        .open(path)?;
++    let m = f.metadata()?;
++    ensure!(
++        Identity::of(&f)? == expected && m.is_dir() && m.uid() == owner && m.mode() & 0o777 == mode,
++        "copy directory identity/owner/mode differs"
++    );
++    Ok(f)
++}
++fn relative(value: &str) -> Result<PathBuf> {
++    let p = PathBuf::from(value);
++    ensure!(
++        !value.is_empty()
++            && value.len() <= 1024
++            && p.components().count() <= 16
++            && p.components().all(|c| matches!(c, Component::Normal(_))),
++        "bounded relative copy filename required"
++    );
++    ensure!(
++        !LEDGERS
++            .iter()
++            .any(|l| p.starts_with(Path::new(l).join("rocksdb"))),
++        "small-file proof cannot enter RocksDB"
++    );
++    Ok(p)
++}
++fn overlay_shape(m: &Mount, peer: usize) -> Result<()> {
++    ensure!(
++        m.kind == "overlay" && m.root == Path::new("/") && m.options.contains("rw"),
++        "expected writable overlay absent"
++    );
++    for expected in [
++        format!("lowerdir={BASE}/lowers/peer-{peer}"),
++        format!("upperdir={RAM}/upper/peer-{peer}"),
++        format!("workdir={RAM}/work/peer-{peer}"),
++    ] {
++        ensure!(
++            m.super_options.contains(&expected),
++            "overlay lower/upper/work differs"
++        );
++    }
++    ensure!(
++        !m.super_options.iter().any(|s| matches!(
++            s.as_str(),
++            "metacopy=on" | "redirect_dir=on" | "redirect_dir=follow" | "nfs_export=on"
++        )),
++        "unapproved overlay indirection/export option"
++    );
++    Ok(())
++}
++
++fn immutable_paths() -> BTreeSet<String> {
++    let mut out = BTreeSet::from(["resume.json".into(), "funding.json".into()]);
++    for i in 0..3 {
++        out.insert(format!("identity-{i}.json"));
++        out.insert(format!("voter-{i}.json"));
++        for name in ["genesis.bin", "genesis.tar.bz2"] {
++            out.insert(format!("{}/{name}", LEDGERS[i]));
++        }
++        for name in SNAPSHOTS {
++            out.insert(format!("{}/native-snapshots/full/{name}", LEDGERS[i]));
++        }
++    }
++    out
++}
++fn mandatory_paths() -> BTreeSet<String> {
++    let mut out = immutable_paths();
++    out.insert("process.lock".into());
++    out.insert("events.jsonl".into());
++    for i in 0..3 {
++        out.insert(format!("{}/vote_history-{}.bin", LEDGERS[i], IDENTITIES[i]));
++    }
++    out
++}
++fn account_or_bank_path(value: &str) -> bool {
++    let p = Path::new(value);
++    LEDGERS.iter().any(|l| {
++        p.starts_with(Path::new(l).join("accounts"))
++            || p.starts_with(Path::new(l).join("native-snapshots/bank"))
++    })
++}
++fn generated_path(value: &str) -> bool {
++    if account_or_bank_path(value) {
++        return true;
++    }
++    let p = Path::new(value);
++    for ledger in LEDGERS {
++        if p.parent() == Some(Path::new(ledger).join("native-snapshots/full").as_path()) {
++            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
++                return false;
++            };
++            if SNAPSHOTS.contains(&name) {
++                return false;
++            }
++            let Some(stem) = [".tar.zst", ".tar.bz2", ".tar.gz", ".tar.lz4"]
++                .iter()
++                .find_map(|suffix| name.strip_suffix(suffix))
++            else {
++                return false;
++            };
++            let Some(rest) = stem.strip_prefix("snapshot-") else {
++                return false;
++            };
++            let Some((slot, hash)) = rest.split_once('-') else {
++                return false;
++            };
++            return slot
++                .parse::<u64>()
++                .is_ok_and(|s| s > 521_532 && s.to_string() == slot)
++                && hash.parse::<solana_pubkey::Pubkey>().is_ok();
++        }
++    }
++    false
++}
++fn validate_provenance(p: &Provenance) -> Result<()> {
++    ensure!(
++        p.format == "zolana097-isolated-unpruned-copy-view-v1"
++            && p.resume_sha256 == RESUME
++            && p.ram_max_bytes == RAM_BYTES,
++        "fixed unpruned copy provenance differs"
++    );
++    valid_pin(&p.overlay_canary_receipt_sha256)?;
++    ensure!(
++        p.overlay_canary_receipt_sha256 != "0".repeat(64),
++        "actual overlay canary receipt required"
++    );
++    for n in [
++        p.namespace.mount,
++        p.namespace.network,
++        p.namespace.host_mount,
++        p.namespace.host_network,
++        p.source_root,
++        p.copy_root,
++        p.ram_root,
++    ] {
++        ensure!(n.valid(), "zero copy/namespace identity");
++    }
++    ensure!(
++        p.namespace.mount != p.namespace.host_mount
++            && p.namespace.network != p.namespace.host_network,
++        "host mount/network namespace is not an isolated copy"
++    );
++    ensure!(
++        p.source_root.device != p.copy_root.device
++            && p.copy_root.device == p.ram_root.device
++            && p.source_root != p.copy_root,
++        "copy root aliases original device/inode"
++    );
++    ensure!(
++        p.peers.len() == 3
++            && p.files.len() >= mandatory_paths().len()
++            && p.files.len() <= MAX_FILES,
++        "copy peer/file count differs"
++    );
++    let mut names = BTreeSet::new();
++    let mut ids = BTreeSet::new();
++    let mut origins = BTreeSet::new();
++    let mut total = 0u64;
++    let mandatory = mandatory_paths();
++    let mut groups: BTreeMap<Identity, Vec<&InputFile>> = BTreeMap::new();
++    for f in &p.files {
++        relative(&f.relative)?;
++        valid_pin(&f.sha256)?;
++        ensure!(
++            names.insert(f.relative.clone()) && f.identity.valid(),
++            "duplicate copy path or zero identity"
++        );
++        ensure!(
++            f.identity.device == p.copy_root.device && f.bytes <= MAX_FILE_BYTES,
++            "copy file size/device differs"
++        );
++        match (f.origin, f.source_identity) {
++            (Origin::Copied, Some(source)) => {
++                ensure!(
++                    source.valid() && source.device == p.source_root.device && source != f.identity,
++                    "copied file source alias/device differs"
++                );
++                origins.insert(source);
++            }
++            (Origin::Generated, None) => ensure!(
++                !mandatory.contains(&f.relative) && generated_path(&f.relative),
++                "generated origin cannot replace original authority/input"
++            ),
++            _ => anyhow::bail!("explicit copied/generated origin differs"),
++        }
++        ids.insert(f.identity);
++        groups.entry(f.identity).or_default().push(f);
++        total = total
++            .checked_add(f.bytes)
++            .context("copy byte count overflow")?;
++    }
++    for files in groups.values() {
++        if files.len() > 1 {
++            ensure!(
++                files.iter().all(|f| account_or_bank_path(&f.relative)
++                    && f.bytes == files[0].bytes
++                    && f.sha256 == files[0].sha256),
++                "new mutable hardlinks escape complete account/bank alias group"
++            );
++        }
++    }
++    ensure!(
++        total <= MAX_TOTAL_BYTES
++            && ids.is_disjoint(&origins)
++            && mandatory_paths().is_subset(&names),
++        "copy small-file total/mandatory inputs/aliases differ"
++    );
++    let resume = p
++        .files
++        .iter()
++        .find(|f| f.relative == "resume.json")
++        .unwrap();
++    ensure!(
++        resume.sha256 == RESUME,
++        "copied original resume bytes differ"
++    );
++    let mut dirs = BTreeSet::from([p.copy_root, p.ram_root]);
++    for (i, peer) in p.peers.iter().enumerate() {
++        ensure!(
++            peer.identity == IDENTITIES[i] && peer.lower_identity.device == p.source_root.device,
++            "copy peer/lower identity differs"
++        );
++        for d in [peer.upper_identity, peer.work_identity] {
++            ensure!(
++                d.valid() && d.device == p.ram_root.device && dirs.insert(d),
++                "upper/work alias or device differs"
++            );
++        }
++    }
++    Ok(())
++}
++
++fn actual_identity(file: &File, p: &InputFile, links: u64, owner: u32, group: u32) -> Result<()> {
++    let m = file.metadata()?;
++    ensure!(
++        m.is_file()
++            && m.uid() == owner
++            && m.gid() == group
++            && m.mode() & 0o777 == 0o600
++            && m.nlink() == links
++            && m.len() == p.bytes
++            && Identity::of(file)? == p.identity,
++        "copied private input identity/mode/size differs"
++    );
++    Ok(())
++}
++fn open_relative(root: &File, rel: &Path) -> Result<File> {
++    let mut parent = root.try_clone()?;
++    let names: Vec<_> = rel.components().collect();
++    for (i, part) in names.iter().enumerate() {
++        let Component::Normal(name) = part else {
++            anyhow::bail!("non-normal copied path")
++        };
++        let name = CString::new(name.as_bytes())?;
++        let is_dir = i + 1 != names.len();
++        let fd = unsafe {
++            libc::openat(
++                parent.as_raw_fd(),
++                name.as_ptr(),
++                libc::O_RDONLY
++                    | libc::O_NOFOLLOW
++                    | libc::O_NONBLOCK
++                    | libc::O_CLOEXEC
++                    | if is_dir { libc::O_DIRECTORY } else { 0 },
++            )
++        };
++        ensure!(
++            fd >= 0,
++            "open copied input refused: {}",
++            std::io::Error::last_os_error()
++        );
++        let next = unsafe { File::from_raw_fd(fd) };
++        if is_dir {
++            let m = next.metadata()?;
++            ensure!(
++                m.is_dir() && m.uid() == UID && m.gid() == GID && m.mode() & 0o777 == 0o700,
++                "copied parent is not private operator directory"
++            );
++        }
++        parent = next;
++    }
++    Ok(parent)
++}
++fn file_digest(file: &mut File, expected: &InputFile, end: Instant) -> Result<()> {
++    let before = file.metadata()?;
++    let mut total = 0u64;
++    let mut hasher = solana_sha256_hasher::Hasher::default();
++    let mut buf = [0u8; 65536];
++    loop {
++        budget(end)?;
++        let n = file.read(&mut buf)?;
++        if n == 0 {
++            break;
++        }
++        total += n as u64;
++        ensure!(total <= expected.bytes, "copied input grew");
++        hasher.hash(&buf[..n]);
++    }
++    let after = file.metadata()?;
++    ensure!(
++        total == expected.bytes
++            && sha_hex(hasher.result().to_bytes()) == expected.sha256
++            && before.dev() == after.dev()
++            && before.ino() == after.ino()
++            && before.len() == after.len()
++            && before.mtime() == after.mtime()
++            && before.mtime_nsec() == after.mtime_nsec()
++            && before.ctime() == after.ctime()
++            && before.ctime_nsec() == after.ctime_nsec(),
++        "copied input changed or digest differs"
++    );
++    Ok(())
++}
++fn sha_hex(raw: [u8; 32]) -> String {
++    raw.iter().map(|b| format!("{b:02x}")).collect()
++}
++fn tree_files(
++    path: &Path,
++    rel: &Path,
++    files: &mut BTreeSet<String>,
++    dirs: &mut usize,
++    end: Instant,
++) -> Result<()> {
++    budget(end)?;
++    ensure!(
++        rel.components().count() <= 16 && *dirs <= 1024,
++        "copy tree depth/directory bound"
++    );
++    for entry in fs::read_dir(path)? {
++        budget(end)?;
++        let entry = entry?;
++        let next = rel.join(entry.file_name());
++        let metadata = fs::symlink_metadata(entry.path())?;
++        if LEDGERS.iter().any(|l| next == Path::new(l).join("rocksdb")) {
++            ensure!(metadata.is_dir(), "overlay tree point is not directory");
++            continue;
++        }
++        ensure!(
++            !metadata.file_type().is_symlink(),
++            "copy tree symlink refused"
++        );
++        if metadata.is_dir() {
++            ensure!(
++                metadata.uid() == UID && metadata.gid() == GID && metadata.mode() & 0o777 == 0o700,
++                "copy tree directory owner/mode differs"
++            );
++            *dirs += 1;
++            tree_files(&entry.path(), &next, files, dirs, end)?;
++        } else {
++            ensure!(
++                metadata.is_file() && files.len() < MAX_FILES,
++                "copy tree special file/count bound"
++            );
++            files.insert(
++                next.to_str()
++                    .context("UTF8 copy filename required")?
++                    .to_owned(),
++            );
++        }
++    }
++    Ok(())
++}
++
++struct VerifiedCopy {
++    proof_sha256: String,
++    files: usize,
++}
++fn verify_copy(pin: &str) -> Result<VerifiedCopy> {
++    valid_pin(pin)?;
++    let end = Instant::now() + Duration::from_secs(30);
++    ensure!(
++        cfg!(target_os = "linux")
++            && unsafe { libc::getuid() } == UID
++            && unsafe { libc::geteuid() } == UID
++            && unsafe { libc::getgid() } == GID
++            && unsafe { libc::getegid() } == GID,
++        "fixed unprivileged Linux copy operator required"
++    );
++    let proof_path = Path::new(PROOF);
++    ensure!(
++        proof_path.canonicalize()? == proof_path,
++        "provenance path alias"
++    );
++    let file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(proof_path)?;
++    let m = file.metadata()?;
++    ensure!(
++        m.is_file()
++            && m.uid() == 0
++            && m.nlink() == 1
++            && m.mode() & 0o777 == 0o444
++            && m.len() > 0
++            && m.len() <= 128 * 1024,
++        "root-sealed bounded provenance required"
++    );
++    let mut raw = Vec::new();
++    file.take(128 * 1024 + 1).read_to_end(&mut raw)?;
++    ensure!(
++        raw.len() as u64 == m.len() && sha(&raw) == pin,
++        "independent complete provenance pin differs"
++    );
++    let p: Provenance = serde_json::from_slice(&raw)?;
++    validate_provenance(&p)?;
++    ensure!(
++        namespace("/proc/self/ns/mnt")? == p.namespace.mount
++            && namespace("/proc/self/ns/net")? == p.namespace.network,
++        "actual copy namespace differs"
++    );
++    let status = String::from_utf8(read_bounded(Path::new("/proc/self/status"), 65536)?)?;
++    ensure!(
++        status.lines().any(|l| l == "NoNewPrivs:\t1")
++            && ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]
++                .iter()
++                .all(|key| status
++                    .lines()
++                    .any(|l| l == format!("{key}:\t0000000000000000"))),
++        "copy operator has effective capabilities or new privileges"
++    );
++    let all = mounts(&read_bounded(
++        Path::new("/proc/self/mountinfo"),
++        256 * 1024,
++    )?)?;
++    let actual_root = File::open("/")?;
++    let namespace_root_mount = pinned_mount(&all, &p.root_mount, Path::new("/"))?;
++    ensure!(
++        mount_id(&actual_root)? == namespace_root_mount.id,
++        "namespace root mount differs"
++    );
++    let ram = directory(Path::new(RAM), p.ram_root, 0, 0o755)?;
++    let ram_mount = pinned_mount(&all, &p.ram_mount, Path::new(RAM))?;
++    ensure!(
++        ram_mount.kind == "tmpfs"
++            && ram_mount.options.contains("rw")
++            && mount_id(&ram)? == ram_mount.id,
++        "actual bounded RAM mount differs"
++    );
++    let mut fsinfo = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
++    ensure!(
++        unsafe { libc::fstatvfs(ram.as_raw_fd(), fsinfo.as_mut_ptr()) } == 0,
++        "RAM capacity query failed"
++    );
++    let fsinfo = unsafe { fsinfo.assume_init() };
++    ensure!(
++        (fsinfo.f_blocks as u128) * (fsinfo.f_frsize as u128) <= RAM_BYTES as u128,
++        "copy RAM filesystem exceeds24GiB cap"
++    );
++    let root = directory(Path::new(ROOT), p.copy_root, UID, 0o700)?;
++    let root_mount = pinned_mount(&all, &p.copy_root_mount, Path::new(ROOT))?;
++    ensure!(
++        root_mount.kind == "tmpfs"
++            && root_mount.options.contains("rw")
++            && mount_id(&root)? == root_mount.id,
++        "visibleROOT is not the approved mutable NEWcopy bind"
++    );
++    for (i, peer) in p.peers.iter().enumerate() {
++        budget(end)?;
++        let ledger = Path::new(ROOT).join(LEDGERS[i]);
++        let point = ledger.join("rocksdb");
++        let mounted = OpenOptions::new()
++            .read(true)
++            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
++            .open(&point)?;
++        let overlay = pinned_mount(&all, &peer.overlay_mount, &point)?;
++        overlay_shape(overlay, i)?;
++        ensure!(
++            mount_id(&mounted)? == overlay.id,
++            "visibleRocksDB is not the approved overlay"
++        );
++        let lower_path = Path::new(BASE).join(format!("lowers/peer-{i}"));
++        let lower = OpenOptions::new()
++            .read(true)
++            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
++            .open(&lower_path)?;
++        let lower_mount = pinned_mount(&all, &peer.lower_mount, &lower_path)?;
++        ensure!(
++            Identity::of(&lower)? == peer.lower_identity
++                && mount_id(&lower)? == lower_mount.id
++                && lower_mount.options.contains("ro")
++                && lower_mount.kind == "ext4"
++                && lower_mount.root == point,
++            "originalRocksDB lower is not the fixed readonly source bind"
++        );
++        directory(
++            &Path::new(RAM).join(format!("upper/peer-{i}")),
++            peer.upper_identity,
++            UID,
++            0o700,
++        )?;
++        directory(
++            &Path::new(RAM).join(format!("work/peer-{i}")),
++            peer.work_identity,
++            UID,
++            0o700,
++        )?;
++    }
++    ensure!(
++        !Path::new(ROOT).join("retention-policy.json").try_exists()?
++            && !Path::new(ROOT)
++                .join(".retention-policy.pending")
++                .try_exists()?,
++        "unprunedcopy forbids every retention policy"
++    );
++    let immutable = immutable_paths();
++    let mut opened = Vec::new();
++    // First prove every descriptor is a disjoint copied input, before hashing any key.
++    for input in &p.files {
++        budget(end)?;
++        let rel = relative(&input.relative)?;
++        let f = open_relative(&root, &rel)?;
++        let links = p
++            .files
++            .iter()
++            .filter(|other| other.identity == input.identity)
++            .count() as u64;
++        actual_identity(&f, input, links, UID, GID)?;
++        let m = all
++            .get(&mount_id(&f)?)
++            .context("copied input actual mount absent")?;
++        private_mount(m)?;
++        ensure!(
++            m.point.starts_with(ROOT),
++            "copied file escaped visibleROOT mount tree"
++        );
++        if immutable.contains(&input.relative) {
++            ensure!(
++                m.options.contains("ro"),
++                "copied key/resume/genesis/snapshot input is not readonly"
++            );
++        }
++        opened.push((input, f));
++    }
++    let mut found = BTreeSet::new();
++    let mut directories = 1;
++    tree_files(
++        Path::new(ROOT),
++        Path::new(""),
++        &mut found,
++        &mut directories,
++        end,
++    )?;
++    ensure!(
++        found == p.files.iter().map(|f| f.relative.clone()).collect(),
++        "copy small-file tree differs from root-pinned manifest"
++    );
++    for (input, mut f) in opened {
++        file_digest(&mut f, input, end)?;
++    }
++    budget(end)?;
++    Ok(VerifiedCopy {
++        proof_sha256: pin.into(),
++        files: p.files.len(),
++    })
++}
++
++fn selected(args: &[String]) -> Result<Option<&str>> {
++    if !args.iter().any(|s| s == FLAG) {
++        return Ok(None);
++    }
++    ensure!(
++        args.len() == 3 && args[0] == FLAG && args[1] == PIN_FLAG,
++        "fixedcopy service takes only its provenanceSHA"
++    );
++    valid_pin(&args[2])?;
++    Ok(Some(&args[2]))
++}
++pub(super) fn maybe_run() -> Result<bool> {
++    let values: Vec<_> = std::env::args().skip(1).collect();
++    let Some(pin) = selected(&values)? else {
++        return Ok(false);
++    };
++    // This MUST precede prepare_root's mutable lock/log access and every key loader.
++    let view = verify_copy(pin)?;
++    let mut args = Args::parse_from(
++        ["--resume-root", ROOT, "--service"]
++            .into_iter()
++            .map(str::to_owned),
++    )?;
++    let mut evidence = prepare_root(&args)?;
++    evidence.event("isolated_unpruned_copy_provenance_verified", json!({"provenance_sha256":view.proof_sha256,"copied_small_files":view.files,"unpruned":true,"original_resume_sha256":RESUME,"funding_or_payment_operations":0}))?;
++    let mut manifest = resume::Manifest::load(&args.root)?;
++    manifest.apply_profile(&mut args)?;
++    ensure!(
++        !args.durable_ancestry_fixture && args.durable_ancestry_config_sha256.is_none(),
++        "oldfixture/policy eligibility cannot enter unprunedcopy service"
++    );
++    configure_environment(&args);
++    service::run(&args, &mut evidence, &manifest)?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn proof() -> Provenance {
++        let id = |device, inode| Identity { device, inode };
++        let mount = || MountPin {
++            mount_id: 1,
++            line_sha256: "1".repeat(64),
++        };
++        Provenance {
++            format: "zolana097-isolated-unpruned-copy-view-v1".into(),
++            resume_sha256: RESUME.into(),
++            overlay_canary_receipt_sha256: "1".repeat(64),
++            namespace: Namespaces {
++                mount: id(3, 1),
++                network: id(3, 2),
++                host_mount: id(3, 3),
++                host_network: id(3, 4),
++            },
++            source_root: id(1, 1),
++            copy_root: id(2, 1),
++            copy_root_mount: mount(),
++            root_mount: mount(),
++            ram_root: id(2, 2),
++            ram_mount: mount(),
++            ram_max_bytes: RAM_BYTES,
++            peers: (0..3)
++                .map(|i| Peer {
++                    identity: IDENTITIES[i].into(),
++                    overlay_mount: mount(),
++                    lower_mount: mount(),
++                    lower_identity: id(1, 10 + i as u64),
++                    upper_identity: id(2, 10 + i as u64 * 2),
++                    work_identity: id(2, 11 + i as u64 * 2),
++                })
++                .collect(),
++            files: mandatory_paths()
++                .into_iter()
++                .enumerate()
++                .map(|(i, relative)| InputFile {
++                    origin: Origin::Copied,
++                    sha256: if relative == "resume.json" {
++                        RESUME.into()
++                    } else {
++                        "1".repeat(64)
++                    },
++                    relative,
++                    identity: id(2, 100 + i as u64),
++                    source_identity: Some(id(1, 100 + i as u64)),
++                    bytes: 1,
++                })
++                .collect(),
++        }
++    }
++
++    #[test]
++    fn provenance_refuses_host_namespace_original_alias_and_missing_key() {
++        validate_provenance(&proof()).unwrap();
++        let mut p = proof();
++        p.namespace.mount = p.namespace.host_mount;
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        p.namespace.network = p.namespace.host_network;
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        p.copy_root = p.source_root;
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        p.files[0].identity = p.files[0].source_identity.unwrap();
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        p.files.retain(|f| f.relative != "funding.json");
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        p.peers[1].upper_identity = p.peers[0].upper_identity;
++        assert!(validate_provenance(&p).is_err());
++    }
++
++    #[test]
++    fn generated_origins_are_limited_to_new_mutable_copy_outputs() {
++        let mut p = proof();
++        p.files.push(InputFile {
++            origin: Origin::Generated,
++            relative: format!("{}/accounts/run/new", LEDGERS[0]),
++            identity: Identity {
++                device: 2,
++                inode: 999,
++            },
++            source_identity: None,
++            bytes: 4,
++            sha256: "1".repeat(64),
++        });
++        validate_provenance(&p).unwrap();
++        p.files.last_mut().unwrap().relative = "identity-9.json".into();
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        let f = p
++            .files
++            .iter_mut()
++            .find(|f| f.relative == "funding.json")
++            .unwrap();
++        f.origin = Origin::Generated;
++        f.source_identity = None;
++        assert!(validate_provenance(&p).is_err());
++        assert!(generated_path(&format!(
++            "{}/native-snapshots/full/snapshot-522556-11111111111111111111111111111111.tar.zst",
++            LEDGERS[0]
++        )));
++        assert!(!generated_path(&format!(
++            "{}/native-snapshots/full/{}",
++            LEDGERS[0], SNAPSHOTS[0]
++        )));
++        assert!(!generated_path(&format!(
++            "{}/native-snapshots/incremental/new",
++            LEDGERS[0]
++        )));
++    }
++
++    #[test]
++    fn private_file_descriptor_checks_reject_public_mode_and_unlisted_hardlink() {
++        use std::os::unix::fs::PermissionsExt;
++        let root = std::env::temp_dir().join(format!(
++            "zolana097-copy-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        fs::create_dir(&root).unwrap();
++        let path = root.join("private");
++        let mut f = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(&path)
++            .unwrap();
++        std::io::Write::write_all(&mut f, b"copy-only").unwrap();
++        let input = InputFile {
++            origin: Origin::Generated,
++            relative: "accounts/new".into(),
++            identity: Identity::of(&f).unwrap(),
++            source_identity: None,
++            bytes: 9,
++            sha256: sha(b"copy-only"),
++        };
++        let uid = unsafe { libc::geteuid() };
++        let gid = unsafe { libc::getegid() };
++        actual_identity(&f, &input, 1, uid, gid).unwrap();
++        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(actual_identity(&f, &input, 1, uid, gid).is_err());
++        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
++        fs::hard_link(&path, root.join("alias")).unwrap();
++        assert!(actual_identity(&f, &input, 1, uid, gid).is_err());
++        actual_identity(&f, &input, 2, uid, gid).unwrap();
++        drop(f);
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn complete_new_account_alias_groups_never_admit_authority_aliases() {
++        let mut p = proof();
++        let id = Identity {
++            device: 2,
++            inode: 999,
++        };
++        for path in [
++            format!("{}/accounts/run/new", LEDGERS[0]),
++            format!("{}/native-snapshots/bank/slot/storage", LEDGERS[0]),
++        ] {
++            p.files.push(InputFile {
++                origin: Origin::Generated,
++                relative: path,
++                identity: id,
++                source_identity: None,
++                bytes: 4,
++                sha256: "1".repeat(64),
++            });
++        }
++        validate_provenance(&p).unwrap();
++        p.files.last_mut().unwrap().sha256 = "2".repeat(64);
++        assert!(validate_provenance(&p).is_err());
++        let mut p = proof();
++        p.files[1].identity = p.files[0].identity;
++        assert!(validate_provenance(&p).is_err());
++    }
++    #[test]
++    fn fixed_copy_service_rejects_every_alternate_path_or_extra_operation() {
++        let pin = "1".repeat(64);
++        assert!(
++            selected(&[FLAG.into(), PIN_FLAG.into(), pin.clone()])
++                .unwrap()
++                .is_some()
++        );
++        assert!(selected(&["--service".into()]).unwrap().is_none());
++        for bad in [
++            vec![FLAG.into()],
++            vec![FLAG.into(), "--root".into(), ROOT.into()],
++            vec![
++                FLAG.into(),
++                PIN_FLAG.into(),
++                pin.clone(),
++                "--private".into(),
++            ],
++            vec![FLAG.into(), PIN_FLAG.into(), "x".into()],
++        ] {
++            assert!(selected(&bad).is_err());
++        }
++    }
++    #[test]
++    fn actual_mount_parser_and_pins_reject_wrong_view_or_shared_propagation() {
++        let line = "42 1 0:33 /network /var/lib/zolana-vat-085-r1/network rw,nosuid - tmpfs tmpfs rw,size=25165824k";
++        let all = mounts(line.as_bytes()).unwrap();
++        let pin = MountPin {
++            mount_id: 42,
++            line_sha256: sha(line.as_bytes()),
++        };
++        pinned_mount(&all, &pin, Path::new(ROOT)).unwrap();
++        assert!(pinned_mount(&all, &pin, Path::new("/wrong")).is_err());
++        let mut wrong = pin.clone();
++        wrong.line_sha256 = "0".repeat(64);
++        assert!(pinned_mount(&all, &wrong, Path::new(ROOT)).is_err());
++        let line = line.replace(" rw,nosuid -", " rw,nosuid shared:1 -");
++        let all = mounts(line.as_bytes()).unwrap();
++        let pin = MountPin {
++            mount_id: 42,
++            line_sha256: sha(line.as_bytes()),
++        };
++        assert!(pinned_mount(&all, &pin, Path::new(ROOT)).is_err());
++    }
++    #[test]
++    fn overlay_must_have_all_three_fixed_layers_and_no_indirection() {
++        let line = format!(
++            "43 42 0:34 / {ROOT}/{}/rocksdb rw - overlay overlay rw,lowerdir={BASE}/lowers/peer-0,upperdir={RAM}/upper/peer-0,workdir={RAM}/work/peer-0",
++            LEDGERS[0]
++        );
++        let all = mounts(line.as_bytes()).unwrap();
++        overlay_shape(all.get(&43).unwrap(), 0).unwrap();
++        assert!(overlay_shape(all.get(&43).unwrap(), 1).is_err());
++        let all = mounts((line + ",metacopy=on").as_bytes()).unwrap();
++        assert!(overlay_shape(all.get(&43).unwrap(), 0).is_err());
++    }
++    #[test]
++    fn copy_file_paths_cannot_escape_or_enter_any_original_rocksdb() {
++        for p in [
++            "../identity-0.json",
++            "/identity-0.json",
++            "./resume.json",
++            "ledgers/../resume.json",
++        ] {
++            assert!(relative(p).is_err());
++        }
++        for p in LEDGERS {
++            assert!(relative(&format!("{p}/rocksdb/000001.sst")).is_err());
++        }
++        assert!(mandatory_paths().contains("funding.json"));
++        assert!(immutable_paths().contains("resume.json"));
++        assert!(!immutable_paths().contains(&format!(
++            "{}/vote_history-{}.bin",
++            LEDGERS[0], IDENTITIES[0]
++        )));
++    }
++}
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -11,6 +11,10 @@
+ mod build_info;
+ mod offline_probe;
+ mod offline_canonical;
++mod offline_metadata;
++mod offline_ssd;
++mod offline_overlay_canary;
++mod copy_runtime;
+ mod restart_snapshots;
+ mod resume;
+ mod service;
+@@ -1146,6 +1150,18 @@
+ }
+ 
+ fn main() -> Result<()> {
++    if copy_runtime::maybe_run()? {
++        return Ok(());
++    }
++    if offline_overlay_canary::maybe_run()? {
++        return Ok(());
++    }
++    if offline_ssd::maybe_run()? {
++        return Ok(());
++    }
++    if offline_metadata::maybe_run()? {
++        return Ok(());
++    }
+     if offline_canonical::maybe_run()? {
+         return Ok(());
+     }
+diff --git a/zolana-fast-check/src/offline_metadata.rs b/zolana-fast-check/src/offline_metadata.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/offline_metadata.rs
+@@ -0,0 +1,733 @@
++//! Fixed paused-pilot FULL SlotMeta preparation into a fresh RAM namespace.
++//! No validator, replay, account, key, signed-history or retention-policy API.
++//! Stopped actors, key inaccessibility and read-only source mounts are external gates.
++use {
++    crate::{ancestry, ancestry_archive},
++    anyhow::{Context, Result, ensure},
++    serde_json::{Value, json},
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++    },
++    solana_pubkey::Pubkey,
++    solana_transaction_status::ConfirmedBlock,
++    std::{
++        fs::{self, DirBuilder, File, OpenOptions},
++        io::{Read, Write},
++        os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
++        path::Path,
++        time::{Duration, Instant},
++    },
++};
++
++const FLAG: &str = "--offline-pilot-metadata-export";
++const ROOT: &str = "/var/lib/zolana-vat-085-r1/network";
++const OUTPUT: &str = "/dev/shm/zolana-pilot-metadata-096-export-r1/data";
++const OWNER: u32 = 995;
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++const RESUME_SHA: &str = "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a";
++const ORIGINAL_SLOT: u64 = 44;
++const ORIGINAL_BANK: &str = "4KPfPytMfQtVoHrT3buic6vACAvww5DQbhZyFLvnW1JV";
++const CANONICAL_SLOT: u64 = 522_202;
++const CANONICAL_HEIGHT: u64 = 521_886;
++const CANONICAL_BLOCKHASH: &str = "A3nGXWqPUYcXtofE77sV7Pwuvgj7y7ArAvwnWkXy7Kjk";
++const CANONICAL_SQLITE_SHA: &str =
++    "46c7a8609a75cfede99c8ddd0a6ec08bb661c9701f84384dbeab853ad641b212";
++const CANONICAL_RECEIPT_SHA: &str =
++    "d29631aa5eedd0ecde2605da7146b73a816ba0969d66427110ec152f17da4262";
++const GENERATION: &str = "pilot096-r1";
++const SNAPSHOT_SLOTS: [u64; 2] = [520_508, 521_532];
++const SNAPSHOT_NAMES: [&str; 2] = [
++    "snapshot-520508-CZu7jPfXYrwpFzztzWg8vR3jAtUYHy5GU8x6Y5PqHgQ8.tar.zst",
++    "snapshot-521532-AFZP8sCmsTr9TDh1MBgs9kBNciqayAC4uB5USTroNum5.tar.zst",
++];
++const LEDGERS: [&str; 3] = [
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-HjbHskvn6Tos8quAv6VjvCwxFDykuBF7KiPYvmmnbaWU",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-A52FF9Tk89Fx9E2NYqvtGBr7SE9gVMPWgWLzjf6i5WxD",
++];
++const IDENTITIES: [&str; 3] = [
++    "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
++    "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
++    "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
++];
++const VOTERS: [&str; 3] = [
++    "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++    "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++    "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++];
++const SNAPSHOT_BYTES: [[u64; 2]; 3] = [[203_393, 203_028], [202_870, 202_890], [202_932, 202_540]];
++const SNAPSHOT_SHA: [[&str; 2]; 3] = [
++    [
++        "a3f63b91d4cd619059bc5b95d33f9a77f7dd2c12fdd21627dfd2dab5524f431b",
++        "7c29339d22ebd66f6b1a59089405f85a22175c5304971f9e801caee31b46d719",
++    ],
++    [
++        "dac1f2fe402f8a6085d93c58a2d4deabbb6385cd5b670da0629d1112ebc84b30",
++        "82dae0f70740be3d37aed3260d503477d508a9152bb8ca0bfdf528c574dee1b9",
++    ],
++    [
++        "1edb2fc7d30190575693ee2ed7c7481c25cbc561568e3d12758769a015ff2990",
++        "512ac99b322778cdd0dddcf013c52679b21a86c1c0c938c112bee3ca1dd7884d",
++    ],
++];
++const LIFETIME: Duration = Duration::from_secs(600);
++
++fn hex(bytes: &[u8; 32]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn bytes32(value: &str) -> Result<[u8; 32]> {
++    Ok(value.parse::<Pubkey>()?.to_bytes())
++}
++
++fn deadline(end: Instant) -> Result<()> {
++    ensure!(
++        Instant::now() < end,
++        "fixed metadata export deadline exceeded"
++    );
++    Ok(())
++}
++
++fn selected(args: &[String]) -> Result<bool> {
++    let present = args.iter().any(|arg| arg == FLAG);
++    if present {
++        ensure!(args.len() == 1, "metadata export takes only its fixed flag");
++    }
++    Ok(present)
++}
++
++fn directory(path: &Path, owner: u32, private: bool) -> Result<()> {
++    let meta = fs::symlink_metadata(path)?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == owner
++            && meta.mode() & (if private { 0o077 } else { 0o022 }) == 0,
++        "fixed canonical owned directory required"
++    );
++    Ok(())
++}
++
++// Bounded public files only. Record identity before and after reading; never
++// follow links or accept multiple links, devices, changing files or an overrun.
++fn private_bytes(path: &Path, owner: u32, maximum: u64) -> Result<Vec<u8>> {
++    let mut file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(path)?;
++    let meta = file.metadata()?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_file()
++            && meta.uid() == owner
++            && meta.nlink() == 1
++            && meta.mode() & 0o077 == 0
++            && meta.len() > 0
++            && meta.len() <= maximum,
++        "fixed bounded single-link private public file required"
++    );
++    let mut raw = Vec::new();
++    Read::by_ref(&mut file)
++        .take(maximum + 1)
++        .read_to_end(&mut raw)?;
++    let after = file.metadata()?;
++    ensure!(
++        raw.len() as u64 == meta.len()
++            && (
++                meta.dev(),
++                meta.ino(),
++                meta.len(),
++                meta.mode(),
++                meta.uid(),
++                meta.nlink(),
++                meta.mtime(),
++                meta.mtime_nsec(),
++                meta.ctime(),
++                meta.ctime_nsec()
++            ) == (
++                after.dev(),
++                after.ino(),
++                after.len(),
++                after.mode(),
++                after.uid(),
++                after.nlink(),
++                after.mtime(),
++                after.mtime_nsec(),
++                after.ctime(),
++                after.ctime_nsec()
++            ),
++        "bounded public input changed during read"
++    );
++    Ok(raw)
++}
++
++fn validate_public_resume(value: &Value) -> Result<()> {
++    ensure!(
++        value["genesis_hash"] == GENESIS,
++        "original public genesis differs"
++    );
++    let peers = value["nodes"]
++        .as_array()
++        .context("public peer array missing")?;
++    ensure!(peers.len() == 3, "exact original three peers required");
++    for (i, peer) in peers.iter().enumerate() {
++        ensure!(
++            peer["identity"] == IDENTITIES[i]
++                && peer["voter"] == VOTERS[i]
++                && peer["ledger"] == LEDGERS[i]
++                && peer["root_slot"].as_u64() == Some(ORIGINAL_SLOT)
++                && peer["root_bank_hash"] == ORIGINAL_BANK,
++            "original public identity/voter/ledger/checkpoint differs"
++        );
++    }
++    Ok(())
++}
++
++fn public_resume() -> Result<[u8; 32]> {
++    let raw = private_bytes(&Path::new(ROOT).join("resume.json"), OWNER, 65_536)?;
++    ensure!(
++        hex(&solana_sha256_hasher::hash(&raw).to_bytes()) == RESUME_SHA,
++        "original complete public resume SHA differs"
++    );
++    // Do not load a Manifest, Keypair, signed vote history or any filename
++    // stored in the public JSON. Only fixed public fields are inspected.
++    validate_public_resume(&serde_json::from_slice(&raw)?)?;
++    Ok(solana_sha256_hasher::hash(&raw).to_bytes())
++}
++
++fn fixed_snapshot_inventory(names: &[String], incrementals: usize) -> Result<()> {
++    let mut names = names.to_vec();
++    names.sort();
++    ensure!(
++        names == SNAPSHOT_NAMES.map(str::to_owned) && incrementals == 0,
++        "exact two inventoried full snapshots and no incremental input required"
++    );
++    Ok(())
++}
++
++fn snapshot_pins(ledger: &Path, peer: usize) -> Result<Value> {
++    let snapshots = ledger.join("native-snapshots");
++    let full = snapshots.join("full");
++    let incremental = snapshots.join("incremental");
++    for path in [&snapshots, &full, &incremental] {
++        directory(path, OWNER, false)?;
++    }
++    let names: Vec<String> = fs::read_dir(&full)?
++        .take(3)
++        .map(|entry| {
++            Ok(entry?
++                .file_name()
++                .into_string()
++                .map_err(|_| anyhow::anyhow!("non-UTF8 snapshot filename"))?)
++        })
++        .collect::<Result<_>>()?;
++    fixed_snapshot_inventory(
++        &names,
++        usize::from(fs::read_dir(&incremental)?.next().transpose()?.is_some()),
++    )?;
++    let mut pins = Vec::new();
++    for index in 0..2 {
++        let raw = private_bytes(&full.join(SNAPSHOT_NAMES[index]), OWNER, 1024 * 1024)?;
++        ensure!(
++            raw.len() as u64 == SNAPSHOT_BYTES[peer][index]
++                && hex(&solana_sha256_hasher::hash(&raw).to_bytes()) == SNAPSHOT_SHA[peer][index],
++            "actual snapshot bytes differ from fixed census pin"
++        );
++        pins.push(
++            json!({"filename":SNAPSHOT_NAMES[index],"slot":SNAPSHOT_SLOTS[index],
++            "bytes":raw.len(),"sha256":SNAPSHOT_SHA[peer][index]}),
++        );
++    }
++    Ok(json!(pins))
++}
++
++fn certified_head(
++    mut slot: u64,
++    original: u64,
++    end: Instant,
++    mut parent: impl FnMut(u64) -> Result<Option<u64>>,
++    mut certified: impl FnMut(u64) -> Result<bool>,
++) -> Result<u64> {
++    let mut checked = 0usize;
++    loop {
++        deadline(end)?;
++        ensure!(
++            slot > original,
++            "no certified head strictly above immutable checkpoint"
++        );
++        ensure!(
++            checked < ancestry_archive::MAX_INDEXED_RECORDS,
++            "head search exceeds indexed bound"
++        );
++        checked += 1;
++        if certified(slot)? {
++            deadline(end)?;
++            return Ok(slot);
++        }
++        let next = parent(slot)?.context("snapshot parent ancestry is incomplete")?;
++        ensure!(
++            original < next && next < slot,
++            "snapshot parent chain is not strictly above original"
++        );
++        slot = next;
++    }
++}
++
++fn manifest_evidence(
++    raw: &[u8],
++    pin: [u8; 32],
++    binding: &ancestry_archive::ArchiveBinding,
++) -> Result<Value> {
++    ensure!(
++        raw.len() <= 65_536 && solana_sha256_hasher::hash(raw).to_bytes() == pin,
++        "published complete manifest differs from independent pin"
++    );
++    let value: Value = serde_json::from_slice(raw)?;
++    ensure!(
++        value["format"] == "zolana095-native-ancestry-indexed-zstd-v2"
++            && value["binding"] == serde_json::to_value(binding)?
++            && value["codec"] == "zstd-one-frame-level-1"
++            && value["record_count"]
++                .as_u64()
++                .is_some_and(|n| n > 0 && n <= 1_048_576)
++            && value["encoded_metadata_bytes"]
++                .as_u64()
++                .is_some_and(|n| n > 0 && n <= 512 * 1024 * 1024)
++            && value["decoded_metadata_bytes"]
++                .as_u64()
++                .is_some_and(|n| n > 0 && n <= 8 * 1024 * 1024 * 1024),
++        "published full V2 evidence/bounds differ"
++    );
++    Ok(value)
++}
++
++fn new_directory(path: &Path) -> Result<()> {
++    DirBuilder::new().mode(0o700).create(path)?;
++    directory(path, OWNER, true)?;
++    File::open(path.parent().context("output parent missing")?)?.sync_all()?;
++    Ok(())
++}
++
++fn run(end: Instant) -> Result<()> {
++    ensure!(
++        unsafe { libc::geteuid() } == OWNER,
++        "fixed keyless UID995 required"
++    );
++    let root = Path::new(ROOT);
++    let output = Path::new(OUTPUT);
++    directory(root, OWNER, false)?;
++    directory(output, OWNER, true)?;
++    ensure!(
++        fs::read_dir(output)?.next().is_none(),
++        "fresh empty fixed RAM output required; never adopt or overwrite"
++    );
++    let resume_pin = public_resume()?;
++    let mut reports = Vec::new();
++    let mut common_canonical_bank = None;
++    for peer in 0..3 {
++        let started = Instant::now();
++        let peer_end = end.min(started + Duration::from_secs(180));
++        deadline(peer_end)?;
++        let ledger = root.join(LEDGERS[peer]);
++        directory(&ledger, OWNER, false)?;
++        directory(&ledger.join("rocksdb"), OWNER, false)?;
++        let snapshots = snapshot_pins(&ledger, peer)?;
++        ensure!(
++            GenesisConfig::load(&ledger)?.hash().to_string() == GENESIS,
++            "fixed original genesis differs"
++        );
++        let store = Blockstore::open_with_options(
++            &ledger,
++            BlockstoreOptions {
++                access_type: AccessType::ReadOnly,
++                ..BlockstoreOptions::default()
++            },
++        )?;
++        ensure!(
++            !store.is_primary_access(),
++            "true read-only original Blockstore required"
++        );
++        let current = store.max_root();
++        ensure!(
++            current >= CANONICAL_SLOT && SNAPSHOT_SLOTS[1] <= current,
++            "current root does not cover pinned canonical export and snapshots"
++        );
++        let current_evidence = ancestry_archive::capture_root_evidence(&store, current)?;
++        let original = ancestry_archive::capture_root_evidence(&store, ORIGINAL_SLOT)?;
++        ensure!(
++            original.certified_bank_hash == bytes32(ORIGINAL_BANK)?,
++            "immutable original BANK differs"
++        );
++        let canonical = ancestry_archive::capture_root_evidence(&store, CANONICAL_SLOT)?;
++        if let Some(bank) = common_canonical_bank {
++            ensure!(
++                bank == canonical.certified_bank_hash,
++                "all-three canonical E BANK hashes differ"
++            );
++        } else {
++            common_canonical_bank = Some(canonical.certified_bank_hash);
++        }
++        let block: ConfirmedBlock = store.get_complete_block(CANONICAL_SLOT, true)?.into();
++        ensure!(
++            block.blockhash == CANONICAL_BLOCKHASH && block.block_height == Some(CANONICAL_HEIGHT),
++            "fixed complete canonical E blockhash/height differs"
++        );
++        for snapshot_slot in SNAPSHOT_SLOTS {
++            ancestry_archive::capture_root_evidence(&store, snapshot_slot)?;
++            ancestry::verify_path(&store, current, snapshot_slot, peer_end, || false)?;
++        }
++        let snapshot_meta = store
++            .meta(SNAPSHOT_SLOTS[0])?
++            .context("older snapshot full SlotMeta missing")?;
++        ensure!(
++            snapshot_meta.slot == SNAPSHOT_SLOTS[0],
++            "older snapshot SlotMeta identifies another slot"
++        );
++        let parent = snapshot_meta
++            .parent_slot
++            .context("older snapshot canonical parent missing")?;
++        ensure!(
++            ORIGINAL_SLOT < parent && parent < SNAPSHOT_SLOTS[0],
++            "real older snapshot parent bounds differ"
++        );
++        let head = certified_head(
++            parent,
++            ORIGINAL_SLOT,
++            peer_end,
++            |slot| Ok(store.meta(slot)?.map(|meta| meta.parent_slot).flatten()),
++            |slot| Ok(store.is_root(slot) && store.get_optimistic_slot(slot)?.is_some()),
++        )?;
++        let cutoff = head.checked_sub(1).context("head cannot be zero")?;
++        ensure!(
++            ORIGINAL_SLOT <= cutoff && cutoff < CANONICAL_SLOT,
++            "cutoff outside complete canonical E"
++        );
++        let full_path = ancestry::verify_path(&store, current, ORIGINAL_SLOT, peer_end, || false)?;
++        let binding = ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: zolana_native_check::TEST_SLOT_NETWORK,
++                genesis_hash: bytes32(GENESIS)?,
++                identity: bytes32(IDENTITIES[peer])?,
++                voter: bytes32(VOTERS[peer])?,
++                resume_sha256: resume_pin,
++                ledger_relative_path: LEDGERS[peer].to_owned(),
++            },
++            original,
++            head: ancestry_archive::capture_root_evidence(&store, head)?,
++            prune_through: cutoff,
++            snapshot_parent_slot: parent,
++            snapshot_slot: SNAPSHOT_SLOTS[0],
++            captured_current_root_slot: current,
++            canonical_export_through: CANONICAL_SLOT,
++        };
++        let peer_output = output.join(IDENTITIES[peer]);
++        new_directory(&peer_output)?;
++        let published = ancestry_archive::publish_indexed(
++            &peer_output,
++            GENERATION,
++            OWNER,
++            &binding,
++            &store,
++            peer_end,
++            || false,
++        )?;
++        let loaded = ancestry_archive::load(
++            &peer_output,
++            GENERATION,
++            OWNER,
++            published.manifest_sha256,
++            &binding,
++            peer_end,
++            || false,
++        )?;
++        loaded.check_original_root(&store, ORIGINAL_SLOT, bytes32(ORIGINAL_BANK)?)?;
++        let merged_path = loaded.verify(&store, current, peer_end, || false)?;
++        ensure!(
++            full_path.entries == merged_path.entries,
++            "full/loaded original-root paths differ"
++        );
++        let raw_manifest = private_bytes(
++            &peer_output.join(GENERATION).join("manifest.json"),
++            OWNER,
++            65_536,
++        )?;
++        let manifest = manifest_evidence(&raw_manifest, published.manifest_sha256, &binding)?;
++        ensure!(
++            snapshot_pins(&ledger, peer)? == snapshots,
++            "source snapshots changed during export"
++        );
++        ensure!(
++            store.max_root() == current
++                && ancestry_archive::capture_root_evidence(&store, current)? == current_evidence,
++            "source current root changed during export"
++        );
++        public_resume()?;
++        deadline(peer_end)?;
++        let report = json!({"identity":IDENTITIES[peer],"ledger":LEDGERS[peer],
++            "generation":GENERATION,"manifest_sha256":hex(&published.manifest_sha256),
++            "manifest":manifest,"binding":binding,"current_root":current_evidence,
++            "canonical_E":canonical,"snapshots":snapshots,
++            "highest_stored_slot":store.highest_slot()?,"signed_frontier":null,
++            "full_current_to_original_entries":full_path.entries,
++            "loaded_current_to_original_entries":merged_path.entries,
++            "ordinary_full_snapshot_verification_performed":false,
++            "peer_elapsed_ms":started.elapsed().as_millis()});
++        println!(
++            "{}",
++            json!({"event":"pilot_metadata_peer_prepared","peer":report})
++        );
++        reports.push(report);
++        // Drop the per-peer read-only DB and bounded V2 index before opening the next peer.
++    }
++    public_resume()?;
++    deadline(end)?;
++    let report = json!({"format":"zolana096-original-pilot-metadata-preparation-v1",
++        "status":"prepared-and-reloaded","preparation_only":true,"source_root":ROOT,
++        "source_access":"ReadOnly","uid":OWNER,"output_root":OUTPUT,
++        "output_is_volatile_RAM":true,"durability_claim":false,
++        "original_resume_sha256":RESUME_SHA,"canonical_export_E":CANONICAL_SLOT,
++        "canonical_export_blockhash":CANONICAL_BLOCKHASH,"canonical_export_height":CANONICAL_HEIGHT,
++        "canonical_export_external_sqlite_sha256":CANONICAL_SQLITE_SHA,
++        "canonical_export_external_receipt_sha256":CANONICAL_RECEIPT_SHA,
++        "canonical_sqlite_file_opened":false,"retention_policy_written":false,
++        "pruning_performed":false,"validators_started":false,"keys_or_signed_history_opened":false,
++        "snapshot_binding_uses_older_slot":SNAPSHOT_SLOTS[0],"peers":reports});
++    let raw = serde_json::to_vec(&report)?;
++    ensure!(
++        raw.len() <= 256 * 1024,
++        "public export receipt exceeds bound"
++    );
++    let mut file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW)
++        .open(output.join("export.json"))?;
++    file.write_all(&raw)?;
++    file.sync_all()?;
++    File::open(output)?.sync_all()?;
++    println!(
++        "{}",
++        json!({"event":"pilot_metadata_export_prepared","report":report,
++        "export_json_sha256":hex(&solana_sha256_hasher::hash(&raw).to_bytes())})
++    );
++    Ok(())
++}
++
++pub(super) fn maybe_run() -> Result<bool> {
++    if !selected(&std::env::args().skip(1).collect::<Vec<_>>())? {
++        return Ok(false);
++    }
++    run(Instant::now() + LIFETIME)?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::{
++        os::unix::fs::symlink,
++        sync::atomic::{AtomicU64, Ordering},
++    };
++    static NEXT: AtomicU64 = AtomicU64::new(0);
++    fn resume() -> Value {
++        json!({"genesis_hash":GENESIS,"nodes":(0..3).map(|i|json!({
++            "identity":IDENTITIES[i],"voter":VOTERS[i],"ledger":LEDGERS[i],
++            "root_slot":ORIGINAL_SLOT,"root_bank_hash":ORIGINAL_BANK})).collect::<Vec<_>>()})
++    }
++    fn binding() -> ancestry_archive::ArchiveBinding {
++        let root = ancestry_archive::RootEvidence {
++            slot: ORIGINAL_SLOT,
++            is_root: true,
++            certified_bank_hash: [3; 32],
++            certified_timestamp: 1,
++            replay_bank_hash: None,
++        };
++        ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: [67; 32],
++                genesis_hash: bytes32(GENESIS).unwrap(),
++                identity: bytes32(IDENTITIES[0]).unwrap(),
++                voter: bytes32(VOTERS[0]).unwrap(),
++                resume_sha256: [4; 32],
++                ledger_relative_path: LEDGERS[0].into(),
++            },
++            original: root.clone(),
++            head: ancestry_archive::RootEvidence {
++                slot: 520_507,
++                ..root
++            },
++            prune_through: 520_506,
++            snapshot_parent_slot: 520_507,
++            snapshot_slot: 520_508,
++            captured_current_root_slot: 522_202,
++            canonical_export_through: 522_202,
++        }
++    }
++    #[test]
++    fn fixed_export_flag_cannot_mix_with_live_or_path_options() {
++        assert!(selected(&[FLAG.into()]).unwrap());
++        assert!(!selected(&["--service".into()]).unwrap());
++        for arg in ["--service", "--root", "--resume", FLAG, "/tmp/alternate"] {
++            assert!(selected(&[FLAG.into(), arg.into()]).is_err());
++        }
++    }
++    #[test]
++    fn public_resume_rejects_changed_network_peer_voter_or_original_root() {
++        validate_public_resume(&resume()).unwrap();
++        for field in ["identity", "voter", "ledger", "root_slot", "root_bank_hash"] {
++            let mut value = resume();
++            value["nodes"][1][field] = json!("changed");
++            assert!(validate_public_resume(&value).is_err());
++        }
++        let mut value = resume();
++        value["genesis_hash"] = json!("changed");
++        assert!(validate_public_resume(&value).is_err());
++        let mut value = resume();
++        value["nodes"].as_array_mut().unwrap().pop();
++        assert!(validate_public_resume(&value).is_err());
++    }
++    #[test]
++    fn snapshot_inventory_requires_exact_two_fixed_pins_and_no_incremental_input() {
++        let names = SNAPSHOT_NAMES.map(str::to_owned);
++        fixed_snapshot_inventory(&names, 0).unwrap();
++        assert!(fixed_snapshot_inventory(&names, 1).is_err());
++        assert!(fixed_snapshot_inventory(&names[..1], 0).is_err());
++        let mut wrong = names.to_vec();
++        wrong[0].push_str(".other");
++        assert!(fixed_snapshot_inventory(&wrong, 0).is_err());
++        let mut extra = names.to_vec();
++        extra.push("snapshot-600000-substitute.tar.zst".into());
++        assert!(fixed_snapshot_inventory(&extra, 0).is_err());
++        for peer in 0..3 {
++            for pin in SNAPSHOT_SHA[peer] {
++                assert_eq!(pin.len(), 64);
++                assert!(
++                    pin.bytes()
++                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++                );
++            }
++        }
++    }
++    #[test]
++    fn bounded_private_reads_refuse_symlinks_hardlinks_and_oversize() {
++        let root = std::env::temp_dir().join(format!(
++            "zolana096-public-read-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ));
++        DirBuilder::new().mode(0o700).create(&root).unwrap();
++        let path = root.join("public");
++        let mut file = OpenOptions::new()
++            .create_new(true)
++            .write(true)
++            .mode(0o600)
++            .open(&path)
++            .unwrap();
++        file.write_all(b"public-only").unwrap();
++        drop(file);
++        let owner = unsafe { libc::geteuid() };
++        assert_eq!(private_bytes(&path, owner, 20).unwrap(), b"public-only");
++        assert!(private_bytes(&path, owner, 4).is_err());
++        let linked = root.join("symlink");
++        symlink(&path, &linked).unwrap();
++        assert!(private_bytes(&linked, owner, 20).is_err());
++        let hard = root.join("hardlink");
++        fs::hard_link(&path, &hard).unwrap();
++        assert!(private_bytes(&path, owner, 20).is_err());
++        fs::remove_dir_all(root).unwrap();
++    }
++    #[test]
++    fn certified_head_walk_requires_strict_complete_parent_path() {
++        let end = Instant::now() + Duration::from_secs(1);
++        assert_eq!(
++            certified_head(100, 44, end, |s| Ok(Some(s - 1)), |s| Ok(s == 98)).unwrap(),
++            98
++        );
++        assert!(certified_head(100, 44, end, |_| Ok(None), |_| Ok(false)).is_err());
++        assert!(certified_head(100, 44, end, |s| Ok(Some(s)), |_| Ok(false)).is_err());
++        assert!(certified_head(100, 44, end, |s| Ok(Some(s + 1)), |_| Ok(false)).is_err());
++        assert!(
++            certified_head(
++                100,
++                44,
++                end,
++                |_| anyhow::bail!("source read failed"),
++                |_| Ok(false)
++            )
++            .is_err()
++        );
++    }
++    #[test]
++    fn certified_head_walk_obeys_deadline_and_original_boundary() {
++        assert!(
++            certified_head(100, 44, Instant::now(), |s| Ok(Some(s - 1)), |_| Ok(true)).is_err()
++        );
++        assert!(
++            certified_head(
++                44,
++                44,
++                Instant::now() + Duration::from_secs(1),
++                |_| Ok(None),
++                |_| Ok(true)
++            )
++            .is_err()
++        );
++        assert!(
++            certified_head(
++                45,
++                44,
++                Instant::now() + Duration::from_secs(1),
++                |_| Ok(Some(44)),
++                |_| Ok(false)
++            )
++            .is_err()
++        );
++    }
++    #[test]
++    fn published_manifest_requires_independent_sha_and_full_v2_binding() {
++        let binding = binding();
++        let value = json!({"format":"zolana095-native-ancestry-indexed-zstd-v2","binding":binding,
++            "codec":"zstd-one-frame-level-1","record_count":520000,
++            "encoded_metadata_bytes":30000000,"decoded_metadata_bytes":2000000000u64});
++        let raw = serde_json::to_vec(&value).unwrap();
++        let pin = solana_sha256_hasher::hash(&raw).to_bytes();
++        manifest_evidence(&raw, pin, &binding).unwrap();
++        assert!(manifest_evidence(&raw, [0; 32], &binding).is_err());
++        let mut changed = binding.clone();
++        changed.snapshot_slot = 521_532;
++        assert!(manifest_evidence(&raw, pin, &changed).is_err());
++        let mut value = value;
++        value["record_count"] = json!(1_048_577);
++        let raw = serde_json::to_vec(&value).unwrap();
++        let pin = solana_sha256_hasher::hash(&raw).to_bytes();
++        assert!(manifest_evidence(&raw, pin, &binding).is_err());
++    }
++    #[test]
++    fn metadata_export_domain_keeps_original_and_older_snapshot_bounds() {
++        let binding = binding();
++        assert_eq!(binding.original.slot, 44);
++        assert_eq!(binding.snapshot_slot, SNAPSHOT_SLOTS[0]);
++        assert!(
++            binding.original.slot <= binding.prune_through
++                && binding.prune_through < binding.head.slot
++                && binding.head.slot <= binding.snapshot_parent_slot
++                && binding.snapshot_parent_slot < binding.snapshot_slot
++                && binding.snapshot_slot < SNAPSHOT_SLOTS[1]
++                && SNAPSHOT_SLOTS[1] <= binding.captured_current_root_slot
++                && binding.prune_through < CANONICAL_SLOT
++        );
++        for identity in IDENTITIES {
++            bytes32(identity).unwrap();
++        }
++        for voter in VOTERS {
++            bytes32(voter).unwrap();
++        }
++        bytes32(GENESIS).unwrap();
++        bytes32(ORIGINAL_BANK).unwrap();
++        bytes32(CANONICAL_BLOCKHASH).unwrap();
++    }
++}
+diff --git a/zolana-fast-check/src/offline_overlay_canary.rs b/zolana-fast-check/src/offline_overlay_canary.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/offline_overlay_canary.rs
+@@ -0,0 +1,300 @@
++//! Fixed disposable genuine-RocksDB OverlayFS diagnostic, never pilot state.
++//! The operator provides a new private lower/upper/work/merged mount namespace.
++//! This utility does not mount, copy keys, launch validators or authorize a pilot copy.
++use {
++    anyhow::{Context, Result, ensure},
++    serde_json::{Value, json},
++    solana_ledger::{
++        blockstore::{Blockstore, blockstore_purge::PurgeType},
++        blockstore_meta::SlotMeta,
++    },
++    std::{
++        fs,
++        io::{Write, stdout},
++        os::unix::fs::MetadataExt,
++        path::{Path, PathBuf},
++        time::{Duration, Instant},
++    },
++};
++
++const FLAG: &str = "--offline-overlay-canary";
++const BASE: &str = "/dev/shm/zolana-ssd-recovery-097-canary-r2";
++const OWNER: u32 = 995;
++const HOLD: Duration = Duration::from_secs(10);
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Mode {
++    Init,
++    MutateHold,
++    PurgeHold,
++    InspectMutated,
++    InspectPurged,
++}
++
++fn name(mode: Mode) -> &'static str {
++    match mode {
++        Mode::Init => "init",
++        Mode::MutateHold => "mutate-hold",
++        Mode::PurgeHold => "purge-hold",
++        Mode::InspectMutated => "inspect-mutated",
++        Mode::InspectPurged => "inspect-purged",
++    }
++}
++
++fn selected(args: &[String]) -> Result<Option<Mode>> {
++    if !args.iter().any(|arg| arg == FLAG) {
++        return Ok(None);
++    }
++    ensure!(
++        args.len() == 2 && args[0] == FLAG,
++        "canary takes one fixed mode only"
++    );
++    Ok(Some(match args[1].as_str() {
++        "init" => Mode::Init,
++        "mutate-hold" => Mode::MutateHold,
++        "purge-hold" => Mode::PurgeHold,
++        "inspect-mutated" => Mode::InspectMutated,
++        "inspect-purged" => Mode::InspectPurged,
++        _ => anyhow::bail!("unknown fixed disposable canary mode"),
++    }))
++}
++
++fn directory(path: &Path) -> Result<()> {
++    let meta = fs::symlink_metadata(path)?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == OWNER
++            && meta.mode() & 0o077 == 0,
++        "fixed real private UID995 canary directory required"
++    );
++    Ok(())
++}
++
++fn ledger(mode: Mode) -> PathBuf {
++    Path::new(BASE)
++        .join(if mode == Mode::Init {
++            "lower"
++        } else {
++            "merged"
++        })
++        .join("ledger")
++}
++
++fn full_meta(slot: u64, tag: u64) -> SlotMeta {
++    let mut meta = SlotMeta {
++        slot,
++        parent_slot: (slot > 1).then_some(slot - 1),
++        consumed: 3,
++        received: 3,
++        last_index: Some(2),
++        first_shred_timestamp: tag,
++        ..SlotMeta::default()
++    };
++    meta.completed_data_indexes.insert(2);
++    meta.next_slots.push(slot + 1);
++    meta
++}
++
++fn emit(value: Value) -> Result<()> {
++    let mut output = stdout().lock();
++    serde_json::to_writer(&mut output, &value)?;
++    output.write_all(b"\n")?;
++    output.flush()?;
++    Ok(())
++}
++
++fn initial(store: &Blockstore) -> Result<()> {
++    ensure!(
++        store.meta(1)? == Some(full_meta(1, 101))
++            && store.meta(2)? == Some(full_meta(2, 102))
++            && store.meta(3)?.is_none()
++            && store.is_root(1)
++            && store.is_root(2)
++            && store.max_root() == 2,
++        "exact initial disposable full metadata/root state required"
++    );
++    Ok(())
++}
++
++fn mutated(store: &Blockstore) -> Result<()> {
++    ensure!(
++        store.meta(1)? == Some(full_meta(1, 101))
++            && store.meta(2)? == Some(full_meta(2, 102))
++            && store.meta(3)? == Some(full_meta(3, 903))
++            && store.is_root(1)
++            && store.is_root(2)
++            && store.is_root(3)
++            && store.max_root() == 3,
++        "mutated disposable full metadata/root state differs"
++    );
++    Ok(())
++}
++
++fn purged(store: &Blockstore) -> Result<()> {
++    ensure!(
++        store.meta(1)?.is_none()
++            && store.meta(2)?.is_none()
++            && store.meta(3)? == Some(full_meta(3, 903))
++            && !store.is_root(1)
++            && !store.is_root(2)
++            && store.is_root(3)
++            && store.max_root() == 3,
++        "purged disposable full metadata/root state differs"
++    );
++    Ok(())
++}
++
++fn run(mode: Mode) -> Result<()> {
++    ensure!(
++        unsafe { libc::geteuid() } == OWNER,
++        "fixed UID995 disposable canary required"
++    );
++    let path = ledger(mode);
++    directory(path.parent().context("fixed canary parent missing")?)?;
++    directory(&path)?;
++    if mode == Mode::Init {
++        ensure!(
++            fs::read_dir(&path)?.next().is_none(),
++            "initial canary ledger must be fresh and empty"
++        );
++    } else {
++        directory(&path.join("rocksdb"))?;
++    }
++    let store = Blockstore::open(&path)?;
++    ensure!(
++        store.is_primary_access(),
++        "only new disposable canary may open primary"
++    );
++    match mode {
++        Mode::Init => {
++            store.put_meta(1, &full_meta(1, 101))?;
++            store.put_meta(2, &full_meta(2, 102))?;
++            store.set_roots([1, 2].iter())?;
++            store.flush_overlay_canary_metadata()?;
++            ensure!(
++                store.live_files_metadata()?.len() >= 2,
++                "synchronous metadata/root flush did not produce genuine SSTs"
++            );
++            initial(&store)?;
++        }
++        Mode::MutateHold => {
++            initial(&store)?;
++            store.put_meta(3, &full_meta(3, 903))?;
++            store.set_roots([3].iter())?;
++            mutated(&store)?;
++        }
++        Mode::PurgeHold => {
++            mutated(&store)?;
++            store.purge_slots(0, 2, PurgeType::Exact)?;
++            purged(&store)?;
++        }
++        Mode::InspectMutated => mutated(&store)?,
++        Mode::InspectPurged => purged(&store)?,
++    }
++    if matches!(mode, Mode::MutateHold | Mode::PurgeHold) {
++        emit(
++            json!({"event":"overlay_canary_hold_ready","mode":name(mode),
++            "pid":std::process::id(),"ledger":path,"max_root":store.max_root(),
++            "hold_seconds":10,"full_metadata_verified":true,"pilot_access":false}),
++        )?;
++        let end = Instant::now() + HOLD;
++        while Instant::now() < end {
++            std::thread::sleep(Duration::from_millis(50));
++        }
++    }
++    drop(store); // Init/inspect cleanly close; hold modes remain killable above.
++    emit(json!({"event":"overlay_canary_complete","mode":name(mode),
++        "ledger":path,"pilot_access":false,"keys_read":false,"validators_started":false}))
++}
++
++pub(super) fn maybe_run() -> Result<bool> {
++    let Some(mode) = selected(&std::env::args().skip(1).collect::<Vec<_>>())? else {
++        return Ok(false);
++    };
++    run(mode)?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn overlay_canary_accepts_only_fixed_modes_without_paths_or_live_flags() {
++        for (name, mode) in [
++            ("init", Mode::Init),
++            ("mutate-hold", Mode::MutateHold),
++            ("purge-hold", Mode::PurgeHold),
++            ("inspect-mutated", Mode::InspectMutated),
++            ("inspect-purged", Mode::InspectPurged),
++        ] {
++            assert_eq!(selected(&[FLAG.into(), name.into()]).unwrap(), Some(mode));
++        }
++        for args in [
++            vec![FLAG.into()],
++            vec![FLAG.into(), "--root".into()],
++            vec![FLAG.into(), "init".into(), "--service".into()],
++            vec!["init".into(), FLAG.into()],
++        ] {
++            assert!(selected(&args).is_err());
++        }
++        assert_eq!(selected(&["--service".into()]).unwrap(), None);
++    }
++    #[test]
++    fn overlay_canary_distinguishes_full_native_metadata_not_parent_projection() {
++        let original = full_meta(3, 103);
++        let mutated = full_meta(3, 903);
++        assert_eq!(original.slot, mutated.slot);
++        assert_eq!(original.parent_slot, mutated.parent_slot);
++        assert_ne!(original, mutated);
++        assert!(mutated.is_full());
++        assert_eq!(mutated.completed_data_indexes.iter().count(), 1);
++    }
++    #[test]
++    fn overlay_canary_genuine_store_reopens_and_preserves_exact_purge() {
++        use std::os::unix::fs::DirBuilderExt;
++        let path = std::env::temp_dir().join(format!(
++            "zolana097-canary-unit-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
++        let store = Blockstore::open(&path).unwrap();
++        store.put_meta(1, &full_meta(1, 101)).unwrap();
++        store.put_meta(2, &full_meta(2, 102)).unwrap();
++        store.set_roots([1, 2].iter()).unwrap();
++        store.flush_overlay_canary_metadata().unwrap();
++        assert!(store.live_files_metadata().unwrap().len() >= 2);
++        initial(&store).unwrap();
++        drop(store);
++        let readonly = Blockstore::open_with_options(
++            &path,
++            solana_ledger::blockstore_options::BlockstoreOptions {
++                access_type: solana_ledger::blockstore_options::AccessType::ReadOnly,
++                ..solana_ledger::blockstore_options::BlockstoreOptions::default()
++            },
++        )
++        .unwrap();
++        assert!(readonly.flush_overlay_canary_metadata().is_err());
++        assert!(readonly.live_files_metadata().unwrap().len() >= 2);
++        drop(readonly);
++        let store = Blockstore::open(&path).unwrap();
++        initial(&store).unwrap();
++        store.put_meta(3, &full_meta(3, 903)).unwrap();
++        store.set_roots([3].iter()).unwrap();
++        drop(store);
++        let store = Blockstore::open(&path).unwrap();
++        mutated(&store).unwrap();
++        store.purge_slots(0, 2, PurgeType::Exact).unwrap();
++        purged(&store).unwrap();
++        drop(store);
++        let store = Blockstore::open(&path).unwrap();
++        purged(&store).unwrap();
++        drop(store);
++        fs::remove_dir_all(path).unwrap();
++    }
++}
+diff --git a/zolana-fast-check/src/offline_ssd.rs b/zolana-fast-check/src/offline_ssd.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/offline_ssd.rs
+@@ -0,0 +1,642 @@
++//! Fresh fixed-SSD V2 load and original-root path verification.
++//! No publication, policy, pruning, key, account, snapshot replay or validator API.
++//! Original pilot and SSD namespace must be kernel read-only with keys inaccessible.
++use {
++    crate::{ancestry, ancestry_archive},
++    anyhow::{Context, Result, ensure},
++    serde_json::{Value, json},
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++    },
++    solana_pubkey::Pubkey,
++    solana_transaction_status::ConfirmedBlock,
++    std::{
++        fs::{self, OpenOptions},
++        io::{Read, Write, stdout},
++        os::unix::{
++            ffi::OsStrExt,
++            fs::{MetadataExt, OpenOptionsExt},
++        },
++        path::Path,
++        time::{Duration, Instant},
++    },
++};
++
++const FLAG: &str = "--offline-pilot-metadata-ssd-verify";
++const HOLD_FLAG: &str = "--offline-pilot-metadata-ssd-crash-hold";
++const ROOT: &str = "/var/lib/zolana-vat-085-r1/network";
++const OUTPUT: &str = "/var/lib/zolana-metadata-096-r1/data";
++const EXPORT_SHA: &str = "40fe0ec0acb088390f6c2580f0f2b6ad7936aae7cd878a32e79a39893e64cd68";
++const MANIFEST_SHA: [&str; 3] = [
++    "9c3147861ff1c59e4b7b3027691ebe8a9c2bbf79ea4bbcb5b26040668de42b75",
++    "d3b6f9de44b81069dc98b7860ad8e85d9da01d83c4793aa9f2aaec1db5a478d1",
++    "0ddf102931b9d628d26578982b06a85eaec246a9dbd2d774b4e2491583afc866",
++];
++const OWNER: u32 = 995;
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++const RESUME_SHA: &str = "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a";
++const ORIGINAL_SLOT: u64 = 44;
++const ORIGINAL_BANK: &str = "4KPfPytMfQtVoHrT3buic6vACAvww5DQbhZyFLvnW1JV";
++const CANONICAL_SLOT: u64 = 522_202;
++const CANONICAL_HEIGHT: u64 = 521_886;
++const CANONICAL_BLOCKHASH: &str = "A3nGXWqPUYcXtofE77sV7Pwuvgj7y7ArAvwnWkXy7Kjk";
++const CANONICAL_SQLITE_SHA: &str =
++    "46c7a8609a75cfede99c8ddd0a6ec08bb661c9701f84384dbeab853ad641b212";
++const CANONICAL_RECEIPT_SHA: &str =
++    "d29631aa5eedd0ecde2605da7146b73a816ba0969d66427110ec152f17da4262";
++const GENERATION: &str = "pilot096-r1";
++const SNAPSHOT_SLOTS: [u64; 2] = [520_508, 521_532];
++const SNAPSHOT_NAMES: [&str; 2] = [
++    "snapshot-520508-CZu7jPfXYrwpFzztzWg8vR3jAtUYHy5GU8x6Y5PqHgQ8.tar.zst",
++    "snapshot-521532-AFZP8sCmsTr9TDh1MBgs9kBNciqayAC4uB5USTroNum5.tar.zst",
++];
++const LEDGERS: [&str; 3] = [
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-HjbHskvn6Tos8quAv6VjvCwxFDykuBF7KiPYvmmnbaWU",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-A52FF9Tk89Fx9E2NYqvtGBr7SE9gVMPWgWLzjf6i5WxD",
++];
++const IDENTITIES: [&str; 3] = [
++    "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
++    "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
++    "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
++];
++const VOTERS: [&str; 3] = [
++    "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++    "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++    "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++];
++const SNAPSHOT_BYTES: [[u64; 2]; 3] = [[203_393, 203_028], [202_870, 202_890], [202_932, 202_540]];
++const SNAPSHOT_SHA: [[&str; 2]; 3] = [
++    [
++        "a3f63b91d4cd619059bc5b95d33f9a77f7dd2c12fdd21627dfd2dab5524f431b",
++        "7c29339d22ebd66f6b1a59089405f85a22175c5304971f9e801caee31b46d719",
++    ],
++    [
++        "dac1f2fe402f8a6085d93c58a2d4deabbb6385cd5b670da0629d1112ebc84b30",
++        "82dae0f70740be3d37aed3260d503477d508a9152bb8ca0bfdf528c574dee1b9",
++    ],
++    [
++        "1edb2fc7d30190575693ee2ed7c7481c25cbc561568e3d12758769a015ff2990",
++        "512ac99b322778cdd0dddcf013c52679b21a86c1c0c938c112bee3ca1dd7884d",
++    ],
++];
++const LIFETIME: Duration = Duration::from_secs(600);
++
++fn hex(bytes: &[u8; 32]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn bytes32(value: &str) -> Result<[u8; 32]> {
++    Ok(value.parse::<Pubkey>()?.to_bytes())
++}
++
++fn deadline(end: Instant) -> Result<()> {
++    ensure!(
++        Instant::now() < end,
++        "fixed SSD verification deadline exceeded"
++    );
++    Ok(())
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Mode {
++    Verify,
++    CrashHold,
++}
++fn selected(args: &[String]) -> Result<Option<Mode>> {
++    let present = args.iter().any(|arg| arg == FLAG || arg == HOLD_FLAG);
++    if !present {
++        return Ok(None);
++    }
++    ensure!(
++        args.len() == 1,
++        "SSD verification takes only one fixed diagnostic flag"
++    );
++    match args[0].as_str() {
++        FLAG => Ok(Some(Mode::Verify)),
++        HOLD_FLAG => Ok(Some(Mode::CrashHold)),
++        _ => anyhow::bail!("fixed SSD mode required"),
++    }
++}
++
++fn directory(path: &Path, owner: u32, private: bool) -> Result<()> {
++    let meta = fs::symlink_metadata(path)?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == owner
++            && meta.mode() & (if private { 0o077 } else { 0o022 }) == 0,
++        "fixed canonical owned directory required"
++    );
++    Ok(())
++}
++
++// Bounded public files only. Record identity before and after reading; never
++// follow links or accept multiple links, devices, changing files or an overrun.
++fn private_bytes(path: &Path, owner: u32, maximum: u64) -> Result<Vec<u8>> {
++    let mut file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(path)?;
++    let meta = file.metadata()?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_file()
++            && meta.uid() == owner
++            && meta.nlink() == 1
++            && meta.mode() & 0o077 == 0
++            && meta.len() > 0
++            && meta.len() <= maximum,
++        "fixed bounded single-link private public file required"
++    );
++    let mut raw = Vec::new();
++    Read::by_ref(&mut file)
++        .take(maximum + 1)
++        .read_to_end(&mut raw)?;
++    let after = file.metadata()?;
++    ensure!(
++        raw.len() as u64 == meta.len()
++            && (
++                meta.dev(),
++                meta.ino(),
++                meta.len(),
++                meta.mode(),
++                meta.uid(),
++                meta.nlink(),
++                meta.mtime(),
++                meta.mtime_nsec(),
++                meta.ctime(),
++                meta.ctime_nsec()
++            ) == (
++                after.dev(),
++                after.ino(),
++                after.len(),
++                after.mode(),
++                after.uid(),
++                after.nlink(),
++                after.mtime(),
++                after.mtime_nsec(),
++                after.ctime(),
++                after.ctime_nsec()
++            ),
++        "bounded public input changed during read"
++    );
++    Ok(raw)
++}
++
++fn validate_public_resume(value: &Value) -> Result<()> {
++    ensure!(
++        value["genesis_hash"] == GENESIS,
++        "original public genesis differs"
++    );
++    let peers = value["nodes"]
++        .as_array()
++        .context("public peer array missing")?;
++    ensure!(peers.len() == 3, "exact original three peers required");
++    for (i, peer) in peers.iter().enumerate() {
++        ensure!(
++            peer["identity"] == IDENTITIES[i]
++                && peer["voter"] == VOTERS[i]
++                && peer["ledger"] == LEDGERS[i]
++                && peer["root_slot"].as_u64() == Some(ORIGINAL_SLOT)
++                && peer["root_bank_hash"] == ORIGINAL_BANK,
++            "original public identity/voter/ledger/checkpoint differs"
++        );
++    }
++    Ok(())
++}
++
++fn public_resume() -> Result<[u8; 32]> {
++    let raw = private_bytes(&Path::new(ROOT).join("resume.json"), OWNER, 65_536)?;
++    ensure!(
++        hex(&solana_sha256_hasher::hash(&raw).to_bytes()) == RESUME_SHA,
++        "original complete public resume SHA differs"
++    );
++    // Do not load a Manifest, Keypair, signed vote history or any filename
++    // stored in the public JSON. Only fixed public fields are inspected.
++    validate_public_resume(&serde_json::from_slice(&raw)?)?;
++    Ok(solana_sha256_hasher::hash(&raw).to_bytes())
++}
++
++fn fixed_snapshot_inventory(names: &[String], incrementals: usize) -> Result<()> {
++    let mut names = names.to_vec();
++    names.sort();
++    ensure!(
++        names == SNAPSHOT_NAMES.map(str::to_owned) && incrementals == 0,
++        "exact two inventoried full snapshots and no incremental input required"
++    );
++    Ok(())
++}
++
++fn snapshot_pins(ledger: &Path, peer: usize) -> Result<Value> {
++    let snapshots = ledger.join("native-snapshots");
++    let full = snapshots.join("full");
++    let incremental = snapshots.join("incremental");
++    for path in [&snapshots, &full, &incremental] {
++        directory(path, OWNER, false)?;
++    }
++    let names: Vec<String> = fs::read_dir(&full)?
++        .take(3)
++        .map(|entry| {
++            Ok(entry?
++                .file_name()
++                .into_string()
++                .map_err(|_| anyhow::anyhow!("non-UTF8 snapshot filename"))?)
++        })
++        .collect::<Result<_>>()?;
++    fixed_snapshot_inventory(
++        &names,
++        usize::from(fs::read_dir(&incremental)?.next().transpose()?.is_some()),
++    )?;
++    let mut pins = Vec::new();
++    for index in 0..2 {
++        let raw = private_bytes(&full.join(SNAPSHOT_NAMES[index]), OWNER, 1024 * 1024)?;
++        ensure!(
++            raw.len() as u64 == SNAPSHOT_BYTES[peer][index]
++                && hex(&solana_sha256_hasher::hash(&raw).to_bytes()) == SNAPSHOT_SHA[peer][index],
++            "actual snapshot bytes differ from fixed census pin"
++        );
++        pins.push(
++            json!({"filename":SNAPSHOT_NAMES[index],"slot":SNAPSHOT_SLOTS[index],
++            "bytes":raw.len(),"sha256":SNAPSHOT_SHA[peer][index]}),
++        );
++    }
++    Ok(json!(pins))
++}
++
++fn sha32(value: &str) -> Result<[u8; 32]> {
++    ensure!(
++        value.len() == 64
++            && value
++                .bytes()
++                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
++        "fixed lowercase SHA256 required"
++    );
++    let mut result = [0u8; 32];
++    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
++        result[index] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
++    }
++    Ok(result)
++}
++
++fn emit(value: Value) -> Result<()> {
++    let mut output = stdout().lock();
++    serde_json::to_writer(&mut output, &value)?;
++    output.write_all(b"\n")?;
++    output.flush()?;
++    Ok(())
++}
++
++fn ext4_filesystem(path: &Path) -> Result<i64> {
++    #[cfg(target_os = "linux")]
++    {
++        let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
++        let mut data = std::mem::MaybeUninit::<libc::statfs>::uninit();
++        ensure!(
++            unsafe { libc::statfs(name.as_ptr(), data.as_mut_ptr()) } == 0,
++            "cannot identify fixed SSD filesystem"
++        );
++        let data = unsafe { data.assume_init() };
++        ensure!(
++            data.f_type == 0xEF53,
++            "fixed SSD load requires ext4, never tmpfs"
++        );
++        Ok(data.f_type as i64)
++    }
++    #[cfg(not(target_os = "linux"))]
++    anyhow::bail!("fixed SSD diagnostic is Linux only")
++}
++
++fn validate_export(raw: &[u8], expected: [u8; 32]) -> Result<Value> {
++    ensure!(
++        raw.len() <= 256 * 1024 && solana_sha256_hasher::hash(raw).to_bytes() == expected,
++        "independent complete SSD export receipt SHA differs"
++    );
++    let value: Value = serde_json::from_slice(raw)?;
++    ensure!(
++        value["format"] == "zolana096-original-pilot-metadata-preparation-v1"
++            && value["status"] == "prepared-and-reloaded"
++            && value["source_root"] == ROOT
++            && value["source_access"] == "ReadOnly"
++            && value["uid"].as_u64() == Some(995)
++            && value["output_root"] == "/dev/shm/zolana-pilot-metadata-096-export-r1/data"
++            && value["original_resume_sha256"] == RESUME_SHA
++            && value["canonical_export_E"].as_u64() == Some(CANONICAL_SLOT)
++            && value["canonical_export_height"].as_u64() == Some(CANONICAL_HEIGHT)
++            && value["canonical_export_blockhash"] == CANONICAL_BLOCKHASH
++            && value["canonical_export_external_sqlite_sha256"] == CANONICAL_SQLITE_SHA
++            && value["canonical_export_external_receipt_sha256"] == CANONICAL_RECEIPT_SHA
++            && value["snapshot_binding_uses_older_slot"].as_u64() == Some(SNAPSHOT_SLOTS[0])
++            && value["peers"]
++                .as_array()
++                .is_some_and(|peers| peers.len() == 3),
++        "fixed original SSD export receipt domain differs"
++    );
++    Ok(value)
++}
++
++fn peer_binding(value: &Value, peer: usize) -> Result<ancestry_archive::ArchiveBinding> {
++    ensure!(
++        peer < 3
++            && value["identity"] == IDENTITIES[peer]
++            && value["ledger"] == LEDGERS[peer]
++            && value["generation"] == GENERATION
++            && value["manifest_sha256"] == MANIFEST_SHA[peer],
++        "fixed SSD peer/generation/manifest differs"
++    );
++    let binding: ancestry_archive::ArchiveBinding =
++        serde_json::from_value(value["binding"].clone())?;
++    let domain = &binding.domain;
++    ensure!(
++        domain.network == zolana_native_check::TEST_SLOT_NETWORK
++            && domain.genesis_hash == bytes32(GENESIS)?
++            && domain.identity == bytes32(IDENTITIES[peer])?
++            && domain.voter == bytes32(VOTERS[peer])?
++            && domain.resume_sha256 == sha32(RESUME_SHA)?
++            && domain.ledger_relative_path == LEDGERS[peer]
++            && binding.original.slot == ORIGINAL_SLOT
++            && binding.original.is_root
++            && binding.original.certified_bank_hash == bytes32(ORIGINAL_BANK)?
++            && binding.head.slot == 520_507
++            && binding.head.is_root
++            && binding.prune_through == 520_506
++            && binding.snapshot_parent_slot == 520_507
++            && binding.snapshot_slot == SNAPSHOT_SLOTS[0]
++            && binding.captured_current_root_slot == CANONICAL_SLOT
++            && binding.canonical_export_through == CANONICAL_SLOT,
++        "fixed complete SSD peer binding differs"
++    );
++    Ok(binding)
++}
++
++fn run(mode: Mode, end: Instant) -> Result<()> {
++    ensure!(
++        unsafe { libc::geteuid() } == OWNER,
++        "fixed keyless UID995 required"
++    );
++    let root = Path::new(ROOT);
++    let ssd = Path::new(OUTPUT);
++    directory(root, OWNER, false)?;
++    directory(ssd, OWNER, true)?;
++    let filesystem = ext4_filesystem(ssd)?;
++    let disk_identity = fs::metadata(ssd)?;
++    let resume_pin = public_resume()?;
++    let raw_export = private_bytes(&ssd.join("export.json"), OWNER, 256 * 1024)?;
++    let export = validate_export(&raw_export, sha32(EXPORT_SHA)?)?;
++    let expected_peers = export["peers"].as_array().context("fixed peers missing")?;
++    emit(
++        json!({"event":"pilot_metadata_ssd_verify_started","pid":std::process::id(),
++        "fixed_ssd_root":OUTPUT,"filesystem_magic":filesystem,"device":disk_identity.dev(),
++        "export_sha256":EXPORT_SHA,"mode":if mode==Mode::CrashHold {"crash-hold"} else {"verify"},
++        "keys_or_signed_history_opened":false,"writes_performed":false}),
++    )?;
++    let mut reports = Vec::new();
++    let mut agreed_bank = None;
++    for peer in 0..3 {
++        let started = Instant::now();
++        let peer_end = end.min(started + Duration::from_secs(180));
++        deadline(peer_end)?;
++        let expected = &expected_peers[peer];
++        let binding = peer_binding(expected, peer)?;
++        ensure!(
++            binding.domain.resume_sha256 == resume_pin,
++            "current public resume pin differs"
++        );
++        let ledger = root.join(LEDGERS[peer]);
++        directory(&ledger, OWNER, false)?;
++        directory(&ledger.join("rocksdb"), OWNER, false)?;
++        ensure!(
++            snapshot_pins(&ledger, peer)? == expected["snapshots"],
++            "live protected snapshot pins differ"
++        );
++        ensure!(
++            GenesisConfig::load(&ledger)?.hash().to_string() == GENESIS,
++            "original genesis differs"
++        );
++        let store = Blockstore::open_with_options(
++            &ledger,
++            BlockstoreOptions {
++                access_type: AccessType::ReadOnly,
++                ..BlockstoreOptions::default()
++            },
++        )?;
++        ensure!(
++            !store.is_primary_access() && store.max_root() == CANONICAL_SLOT,
++            "fixed read-only current source root required"
++        );
++        let current: ancestry_archive::RootEvidence =
++            serde_json::from_value(expected["current_root"].clone())?;
++        ensure!(
++            current.slot == CANONICAL_SLOT
++                && ancestry_archive::capture_root_evidence(&store, CANONICAL_SLOT)? == current
++                && ancestry_archive::capture_root_evidence(&store, ORIGINAL_SLOT)?
++                    == binding.original
++                && ancestry_archive::capture_root_evidence(&store, binding.head.slot)?
++                    == binding.head,
++            "live original/head/current certified evidence differs from fixed SSD receipt"
++        );
++        if let Some(bank) = agreed_bank {
++            ensure!(
++                bank == current.certified_bank_hash,
++                "all-three current BANK hashes differ"
++            );
++        } else {
++            agreed_bank = Some(current.certified_bank_hash);
++        }
++        let block: ConfirmedBlock = store.get_complete_block(CANONICAL_SLOT, true)?.into();
++        ensure!(
++            block.blockhash == CANONICAL_BLOCKHASH && block.block_height == Some(CANONICAL_HEIGHT),
++            "fixed current complete block header differs"
++        );
++        let peer_root = ssd.join(IDENTITIES[peer]);
++        directory(&peer_root, OWNER, true)?;
++        directory(&peer_root.join(GENERATION), OWNER, true)?;
++        let payload = fs::symlink_metadata(peer_root.join(GENERATION).join("prefix.bin"))?;
++        ensure!(
++            payload.dev() == disk_identity.dev(),
++            "SSD payload switched filesystems"
++        );
++        let loaded = ancestry_archive::load(
++            &peer_root,
++            GENERATION,
++            OWNER,
++            sha32(MANIFEST_SHA[peer])?,
++            &binding,
++            peer_end,
++            || false,
++        )?;
++        loaded.check_original_root(&store, ORIGINAL_SLOT, bytes32(ORIGINAL_BANK)?)?;
++        let full =
++            ancestry::verify_path(&store, CANONICAL_SLOT, ORIGINAL_SLOT, peer_end, || false)?;
++        let merged = loaded.verify(&store, CANONICAL_SLOT, peer_end, || false)?;
++        ensure!(
++            full.entries == 521_846 && merged.entries == full.entries,
++            "fresh SSD live/loaded complete ancestry count differs"
++        );
++        ensure!(
++            snapshot_pins(&ledger, peer)? == expected["snapshots"]
++                && store.max_root() == CANONICAL_SLOT
++                && ancestry_archive::capture_root_evidence(&store, CANONICAL_SLOT)? == current,
++            "original source changed during SSD load"
++        );
++        public_resume()?;
++        deadline(peer_end)?;
++        let report = json!({"identity":IDENTITIES[peer],"manifest_sha256":MANIFEST_SHA[peer],
++            "fixed_ssd_peer_root":peer_root,"payload_device":payload.dev(),"payload_inode":payload.ino(),
++            "payload_bytes":payload.len(),"filesystem_magic":filesystem,"head":binding.head,
++            "current_root":current,"original":binding.original,"full_live_entries":full.entries,
++            "fresh_loaded_entries":merged.entries,"fresh_process_pid":std::process::id(),
++            "elapsed_ms":started.elapsed().as_millis(),"keys_or_signed_history_opened":false,
++            "source_writes":false,"ssd_writes":false});
++        emit(json!({"event":"pilot_metadata_ssd_peer_verified","peer":report}))?;
++        reports.push(report);
++        if peer == 0 && mode == Mode::CrashHold {
++            emit(
++                json!({"event":"pilot_metadata_ssd_crash_hold_ready","pid":std::process::id(),
++                "first_peer_fully_loaded_and_verified":true,"manifest_sha256":MANIFEST_SHA[0],
++                "full_live_entries":full.entries,"fresh_loaded_entries":merged.entries,
++                "fixed_ssd_root":OUTPUT,"hold_seconds":10,"writes_performed":false}),
++            )?;
++            let hold_end = Instant::now() + Duration::from_secs(10);
++            while Instant::now() < hold_end {
++                deadline(peer_end)?;
++                std::thread::sleep(Duration::from_millis(50));
++            }
++        }
++    }
++    ensure!(
++        private_bytes(&ssd.join("export.json"), OWNER, 256 * 1024)? == raw_export,
++        "immutable SSD export receipt changed during verification"
++    );
++    public_resume()?;
++    deadline(end)?;
++    emit(json!({"event":"pilot_metadata_ssd_verify_complete",
++        "format":"zolana097-fresh-process-ssd-metadata-verification-v1","status":"verified",
++        "pid":std::process::id(),"ssd_root":OUTPUT,"filesystem_magic":filesystem,
++        "export_sha256":EXPORT_SHA,"peers":reports,"source_access":"ReadOnly",
++        "ssd_files_published_or_changed":false,"keys_or_signed_history_opened":false,
++        "validators_started":false,"retention_policy_written":false,"pruning_performed":false,
++        "ordinary_full_snapshot_load_performed":false,"host_reboot_or_powerloss_tested":false}))
++}
++
++pub(super) fn maybe_run() -> Result<bool> {
++    let Some(mode) = selected(&std::env::args().skip(1).collect::<Vec<_>>())? else {
++        return Ok(false);
++    };
++    run(mode, Instant::now() + LIFETIME)?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn peer() -> Value {
++        let evidence = ancestry_archive::RootEvidence {
++            slot: ORIGINAL_SLOT,
++            is_root: true,
++            certified_bank_hash: bytes32(ORIGINAL_BANK).unwrap(),
++            certified_timestamp: 1,
++            replay_bank_hash: None,
++        };
++        let binding = ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: zolana_native_check::TEST_SLOT_NETWORK,
++                genesis_hash: bytes32(GENESIS).unwrap(),
++                identity: bytes32(IDENTITIES[0]).unwrap(),
++                voter: bytes32(VOTERS[0]).unwrap(),
++                resume_sha256: sha32(RESUME_SHA).unwrap(),
++                ledger_relative_path: LEDGERS[0].into(),
++            },
++            original: evidence.clone(),
++            head: ancestry_archive::RootEvidence {
++                slot: 520507,
++                ..evidence
++            },
++            prune_through: 520506,
++            snapshot_parent_slot: 520507,
++            snapshot_slot: 520508,
++            captured_current_root_slot: 522202,
++            canonical_export_through: 522202,
++        };
++        json!({"identity":IDENTITIES[0],"ledger":LEDGERS[0],"generation":GENERATION,
++            "manifest_sha256":MANIFEST_SHA[0],"binding":binding})
++    }
++    #[test]
++    fn ssd_modes_are_fixed_and_reject_live_or_path_arguments() {
++        assert_eq!(selected(&[FLAG.into()]).unwrap(), Some(Mode::Verify));
++        assert_eq!(
++            selected(&[HOLD_FLAG.into()]).unwrap(),
++            Some(Mode::CrashHold)
++        );
++        assert_eq!(selected(&["--service".into()]).unwrap(), None);
++        for argument in [HOLD_FLAG, "--root", "--service", "/tmp/substitute"] {
++            assert!(selected(&[FLAG.into(), argument.into()]).is_err());
++        }
++    }
++    #[test]
++    fn ssd_independent_receipt_pin_is_checked_before_json_or_bindings() {
++        assert!(validate_export(b"not JSON", sha32(EXPORT_SHA).unwrap()).is_err());
++        let raw = serde_json::to_vec(&json!({"format":"other"})).unwrap();
++        assert!(validate_export(&raw, solana_sha256_hasher::hash(&raw).to_bytes()).is_err());
++        for value in [String::from("x"), "G".repeat(64), "00".repeat(33)] {
++            assert!(sha32(&value).is_err());
++        }
++    }
++    #[test]
++    fn ssd_fixed_peer_rejects_manifest_identity_and_genesis_substitution() {
++        peer_binding(&peer(), 0).unwrap();
++        for field in ["identity", "ledger", "generation", "manifest_sha256"] {
++            let mut value = peer();
++            value[field] = json!("substituted");
++            assert!(peer_binding(&value, 0).is_err());
++        }
++        let mut value = peer();
++        value["binding"]["domain"]["genesis_hash"] = json!([0u8; 32].to_vec());
++        assert!(peer_binding(&value, 0).is_err());
++    }
++    #[test]
++    fn ssd_current_original_and_snapshot_bounds_cannot_move() {
++        for field in [
++            "prune_through",
++            "snapshot_parent_slot",
++            "snapshot_slot",
++            "captured_current_root_slot",
++            "canonical_export_through",
++        ] {
++            let mut value = peer();
++            value["binding"][field] = json!(1);
++            assert!(peer_binding(&value, 0).is_err());
++        }
++        let mut value = peer();
++        value["binding"]["original"]["slot"] = json!(45);
++        assert!(peer_binding(&value, 0).is_err());
++        assert!(peer_binding(&peer(), 1).is_err());
++    }
++    #[test]
++    fn ssd_corrupt_unknown_typed_binding_does_not_fallback() {
++        let mut value = peer();
++        value["binding"]["unknown"] = json!(true);
++        assert!(peer_binding(&value, 0).is_err());
++        let mut value = peer();
++        value["binding"]["domain"]["voter"] = json!([1, 2]);
++        assert!(peer_binding(&value, 0).is_err());
++    }
++    #[test]
++    fn ssd_fixed_pins_remain_distinct_and_ram_filesystem_is_refused() {
++        for pin in MANIFEST_SHA {
++            sha32(pin).unwrap();
++        }
++        assert_ne!(MANIFEST_SHA[0], MANIFEST_SHA[1]);
++        assert_ne!(MANIFEST_SHA[1], MANIFEST_SHA[2]);
++        assert_eq!(
++            Path::new(OUTPUT),
++            Path::new("/var/lib/zolana-metadata-096-r1/data")
++        );
++        assert_eq!(SNAPSHOT_SLOTS, [520508, 521532]);
++        assert_eq!(GENERATION, "pilot096-r1");
++        assert!(ext4_filesystem(Path::new("/dev/shm")).is_err());
++    }
++}

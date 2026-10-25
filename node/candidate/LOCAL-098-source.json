@@ -1,0 +1,275 @@
+{
+  "CLI": {
+    "flag": "--durable-copy-098",
+    "modes": [
+      "baseline-service",
+      "validate",
+      "prune",
+      "prune-hold",
+      "resume-prune",
+      "service"
+    ],
+    "pins": "--provenance-sha256 mandatory; --policy-sha256 except baseline-service; --journal-sha256 only resume-prune/service; no path or reset options"
+  },
+  "actual098_evidence": {
+    "durable_partial_prune_SIGKILL_and_explicit_resume": {
+      "result": null,
+      "status": "pending"
+    },
+    "final_preservation_and_closed_actor_check": {
+      "result": null,
+      "status": "pending"
+    },
+    "full_close_unmount_remount_and_validator_restart": {
+      "result": null,
+      "status": "pending"
+    },
+    "native_build_and_120_tests": {
+      "collection": {
+        "bytes": 6297,
+        "path": ".local/durable-pruning-098/build-r1/collection.json",
+        "sha256": "7e550cb38e6eb934fe37e0802b41485a7821a8d83ac97f5c94d4c4c5709d1e6f"
+      },
+      "collection_defect": "The frozen collector successfully copied/hash-checked all raw evidence and wrote collection.json, then rejected its stale104-count local assertion. The native120 test/build/seal had passed; a new local-only validator checks120 and the unchanged complete receipts without recollection/rerun/overwrite.",
+      "commands_seconds": {
+        "compile": 38.00620336399879,
+        "list": 1.0003078120062128,
+        "runner-compile": 6.001207976019941,
+        "runtime-build-info": 1.0003207279951312,
+        "tests": 12.001050997001585
+      },
+      "compiled_source_manifest": {
+        "bytes": 255596,
+        "path": ".local/durable-pruning-098/build-r1/evidence/compiled-source-manifest.json",
+        "sha256": "2131b202e67cb4729caf582c0c1a60a596d3451def4e91930cb9bb17dc9ca80d"
+      },
+      "corrective_validator_source": {
+        "bytes": 8461,
+        "path": ".local/durable-pruning-098/build-r1/acceptance/collector-validation-r2.py",
+        "sha256": "fccbb46d3466ce4b89489ec92bf95bde1f3a2a6f7914327b4d571db380130131"
+      },
+      "full_source_restored_sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d",
+      "local_postcollection_validation": {
+        "bytes": 1658,
+        "path": ".local/durable-pruning-098/build-r1/acceptance/collector-validation-r2.json",
+        "sha256": "be3213c01542a597576810c30fe97794a99d8237002b9320ea65d5acffc87bcd"
+      },
+      "native_summary": "test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.16s",
+      "old_seals_preserved": true,
+      "postflight": {
+        "bytes": 718,
+        "path": ".local/durable-pruning-098/build-r1/evidence/postflight.json",
+        "sha256": "871f964b010ef978078bcdd7607eb646b3220a2c90ade89686b1b0504eeed677"
+      },
+      "result": {
+        "bytes": 22793,
+        "path": ".local/durable-pruning-098/build-r1/evidence/result.json",
+        "sha256": "3e4344a88c4973f6ec7e8d51ddfbb2c5870a81570d8c773c679532b2c35d5a82"
+      },
+      "runtime_binary_sha256": "1d187e7eeb11ca14b2db9f6d32cc1c53f1efeff45759c43fd669f8a8ec62cc7c",
+      "runtime_bytes": 94056024,
+      "separate_root0555_seal": "/dev/shm/zolana-durable-pruning-098-sealed-r1/zolana-fast-check",
+      "status": "passed"
+    }
+  },
+  "application": {
+    "automatic_preparer_changed": false,
+    "baseline": "exact LOCAL095 compiled after-state; includes and replaces the separate096/097 slices when applied to this baseline",
+    "baseline_manifest": {
+      "bytes": 254750,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/compiled-source-manifest.json",
+      "sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d"
+    },
+    "baseline_runtime_sha256": "5c99ead8b97ebcb9427b8d5874ab3f966b31786b85b15d1fbe52e17cad20ab54",
+    "changed_or_added_files": 10,
+    "do_not_stack_after_LOCAL096_or_LOCAL097": true,
+    "existing_modified": 4,
+    "expected_full_after_manifest_sha256": "2131b202e67cb4729caf582c0c1a60a596d3451def4e91930cb9bb17dc9ca80d",
+    "expected_manifest_is_not_an_actual_compiled_receipt": true,
+    "new_initially_absent_modules": 6,
+    "patch": {
+      "bytes": 204511,
+      "path": "node/candidate/agave-4.3.2-LOCAL-098.patch",
+      "sha256": "225faa3cf4286744879bc072311e67d0fdec3fae39a8f781ba4ed948beb79776"
+    },
+    "reconstruction_execution": "passed, source-only disposable git apply --check/apply",
+    "reconstruction_receipt": {
+      "bytes": 2708,
+      "path": "node/candidate/LOCAL-098-reconstruction.json",
+      "sha256": "a3fd55646b972cc19f55f2231a154e332867766a7ed0ef4a0fddb92e0dea668c"
+    },
+    "reconstruction_script": {
+      "bytes": 2925,
+      "path": "node/candidate/LOCAL-098-reconstruct.py",
+      "sha256": "2e0c026bf89eca701eb835d1c1d2fd04b845146a573bd6884b3280f66403fed8"
+    },
+    "source_only_no_installation": true
+  },
+  "build_preparation": {
+    "bytes": 2232,
+    "path": ".local/durable-pruning-098/build-r1/preparation.json",
+    "sha256": "ccf13673af0a4a47bd15ce6faeca2af5caa49cbae361458cdc9eb23e42be37ef"
+  },
+  "files": {
+    "ledger/src/blockstore.rs": {
+      "after": {
+        "bytes": 265202,
+        "sha256": "4eb6d456441d1b649f0158dc4289a9954705682d1617efdac0174c93ca8c49e4"
+      },
+      "before": {
+        "bytes": 264405,
+        "sha256": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e"
+      }
+    },
+    "ledger/src/blockstore_db.rs": {
+      "after": {
+        "bytes": 55792,
+        "sha256": "661ad1c956622bd521c5ab10805586aa77b40803bcc64bebdcb21496589f6279"
+      },
+      "before": {
+        "bytes": 53199,
+        "sha256": "d3b083b5b0f5f0bf471ea5dc3bb89de1235a23f52dec234a24e9767208e911c7"
+      }
+    },
+    "zolana-fast-check/src/copy_retention_098.rs": {
+      "after": {
+        "bytes": 31902,
+        "sha256": "d86453af7dab5ec608cec6a0bf0152eed77ef083ecdb2bf2f8b03a35cc2c39e0"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/copy_runtime.rs": {
+      "after": {
+        "bytes": 39167,
+        "sha256": "de7c42584f6edad0cc822b75d75bb62ff5bd3ad145f198a22b81b9160cf11761"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/durable_copy_guard.rs": {
+      "after": {
+        "bytes": 54599,
+        "sha256": "88af33a9cca8325f9186fd12002a321f25d77e2b628d6ec566dca10b5c41eabe"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after": {
+        "bytes": 52390,
+        "sha256": "c44e1267f50ad0fe9d22efb89b013634bef999fdc41efc7f663ff24557ea973b"
+      },
+      "before": {
+        "bytes": 51938,
+        "sha256": "6516a7881f86fb9b11cb91ec3b9c5ba02570941b040f054c111b3f606b82b81e"
+      }
+    },
+    "zolana-fast-check/src/offline_metadata.rs": {
+      "after": {
+        "bytes": 28326,
+        "sha256": "fdb3c362dcffe7a256315f0f16d323949dc34426485f9ca021232e9ae8a27fb9"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/offline_overlay_canary.rs": {
+      "after": {
+        "bytes": 9903,
+        "sha256": "e46720cd5fab2bfa3d668f6d5e4b4c64543a84b2c6e3d093390c5aeca233554c"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/offline_ssd.rs": {
+      "after": {
+        "bytes": 25839,
+        "sha256": "e81d21d83cde9bec2037ee6a3f29f7c9f996d7b3cd11be77f03cef659083fcad"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "after": {
+        "bytes": 62162,
+        "sha256": "89db30cab1271d485a85e9de352dfdcc55e25034eec942a327ccc3526a43d228"
+      },
+      "before": {
+        "bytes": 60813,
+        "sha256": "90953ca578af785f314fb3b6dd94724470fd026caf82c188a433e7b9432a1e5e"
+      }
+    }
+  },
+  "format": "zolana098-dependent-durable-COW-native-candidate-v1",
+  "planned_native_tests": {
+    "baseline095": 79,
+    "inherited_relative095": 25,
+    "names_added_relative095": [
+      "offline_metadata::tests::fixed_export_flag_cannot_mix_with_live_or_path_options",
+      "offline_metadata::tests::public_resume_rejects_changed_network_peer_voter_or_original_root",
+      "offline_metadata::tests::snapshot_inventory_requires_exact_two_fixed_pins_and_no_incremental_input",
+      "offline_metadata::tests::bounded_private_reads_refuse_symlinks_hardlinks_and_oversize",
+      "offline_metadata::tests::certified_head_walk_requires_strict_complete_parent_path",
+      "offline_metadata::tests::certified_head_walk_obeys_deadline_and_original_boundary",
+      "offline_metadata::tests::published_manifest_requires_independent_sha_and_full_v2_binding",
+      "offline_metadata::tests::metadata_export_domain_keeps_original_and_older_snapshot_bounds",
+      "offline_ssd::tests::ssd_modes_are_fixed_and_reject_live_or_path_arguments",
+      "offline_ssd::tests::ssd_independent_receipt_pin_is_checked_before_json_or_bindings",
+      "offline_ssd::tests::ssd_fixed_peer_rejects_manifest_identity_and_genesis_substitution",
+      "offline_ssd::tests::ssd_current_original_and_snapshot_bounds_cannot_move",
+      "offline_ssd::tests::ssd_corrupt_unknown_typed_binding_does_not_fallback",
+      "offline_ssd::tests::ssd_fixed_pins_remain_distinct_and_ram_filesystem_is_refused",
+      "offline_overlay_canary::tests::overlay_canary_accepts_only_fixed_modes_without_paths_or_live_flags",
+      "offline_overlay_canary::tests::overlay_canary_distinguishes_full_native_metadata_not_parent_projection",
+      "offline_overlay_canary::tests::overlay_canary_genuine_store_reopens_and_preserves_exact_purge",
+      "copy_runtime::tests::provenance_refuses_host_namespace_original_alias_and_missing_key",
+      "copy_runtime::tests::generated_origins_are_limited_to_new_mutable_copy_outputs",
+      "copy_runtime::tests::private_file_descriptor_checks_reject_public_mode_and_unlisted_hardlink",
+      "copy_runtime::tests::complete_new_account_alias_groups_never_admit_authority_aliases",
+      "copy_runtime::tests::fixed_copy_service_rejects_every_alternate_path_or_extra_operation",
+      "copy_runtime::tests::actual_mount_parser_and_pins_reject_wrong_view_or_shared_propagation",
+      "copy_runtime::tests::overlay_must_have_all_three_fixed_layers_and_no_indirection",
+      "copy_runtime::tests::copy_file_paths_cannot_escape_or_enter_any_original_rocksdb",
+      "durable_copy_guard::tests::provenance_refuses_host_namespace_original_alias_and_missing_key",
+      "durable_copy_guard::tests::generated_origins_are_limited_to_new_mutable_copy_outputs",
+      "durable_copy_guard::tests::private_file_descriptor_checks_reject_public_mode_and_unlisted_hardlink",
+      "durable_copy_guard::tests::complete_new_account_alias_groups_never_admit_authority_aliases",
+      "durable_copy_guard::tests::actual_mount_parser_and_pins_reject_wrong_view_or_shared_propagation",
+      "durable_copy_guard::tests::overlay_must_have_all_three_fixed_layers_and_no_indirection",
+      "durable_copy_guard::tests::copy_file_paths_cannot_escape_or_enter_any_original_rocksdb",
+      "durable_copy_guard::tests::phases_bind_exact_policy_and_journal_presence_and_hashes",
+      "durable_copy_guard::tests::durable_image_canonical_and_large_inputs_cannot_be_substituted",
+      "resume::copy_retention_098::tests::every_exact_journal_prefix_distinguishes_done_pending_and_complete",
+      "resume::copy_retention_098::tests::torn_empty_oversized_and_extra_record_journals_refuse",
+      "resume::copy_retention_098::tests::journal_changed_policy_resume_peer_order_and_hash_chain_refuse",
+      "resume::copy_retention_098::tests::journal_unknown_fields_and_empty_interior_lines_refuse",
+      "resume::copy_retention_098::tests::genuine_purged_store_reopens_with_archive_and_rejects_changed_current_bank",
+      "resume::copy_retention_098::tests::durable_journal_append_reopen_requires_exact_unchanged_prefix",
+      "resume::copy_retention_098::command_tests::fixed_copy_commands_require_exact_phase_pins_and_no_alternate_paths"
+    ],
+    "new_guard": 9,
+    "new_retention": 7,
+    "required_total": 120,
+    "status": "actual120-test unfiltered native suite passed; no failed, ignored or filtered tests"
+  },
+  "policy_template": {
+    "bytes": 24934,
+    "path": ".local/durable-pruning-098/native-r1/retention-copy-098.template.json",
+    "sha256": "5935a4d857286bc3225d127dc72128e17923c84982901838a18b9e96e75a0c3a"
+  },
+  "preparation": {
+    "bytes": 9050,
+    "path": ".local/durable-pruning-098/native-r1/preparation.json",
+    "sha256": "f217ec09f20fba8d4f87d29cecd0115b8516e896bc37a5c46e19d976f069318a"
+  },
+  "qualifications": [
+    "This is durable SSD OverlayFS upper storage dependent on preserved original read-only lower Blockstores, not an independent compact database.",
+    "No original pilot pruning, original395GB space-reclamation, independent-clone, power-loss or public-launch claim.",
+    "Original wallet, keys, resume and old093/095/096/097 frozen artifacts are outside this patch. Operator copies/mounts/key custody remain separately reviewed prerequisites.",
+    "Prune-hold intentionally pauses after fsynced verified done(peer0); ordinary prune/resume/service have no diagnostic delay.",
+    "No automatic retry, missing/corrupt archive fallback, eligibility rewrite, reset or genesis fallback.",
+    "Actual098 native120-test build and source reconstruction pass; durable pruning, full unmount/remount/restart and final-preservation gates remain pending until collected evidence is added."
+  ],
+  "scope": [
+    "New durable_copy_guard authority proves fixed ext4 image, namespace/overlay/source isolation and externally pinned phase/policy/journal BEFORE mutable setup.",
+    "Main early098 fixed CLI dispatch; old097 and ordinary093 entry semantics remain unchanged.",
+    "Shared strict095 archive/canonical/snapshot loader; distinct098 copy policy attaches only through verified private capability, without changing original resume bytes or093 fixture eligibility.",
+    "Copy-only Exact purge with all3 preflight, eight-record/16KiB append-only fsynced hash-chain journal, captured current BANK evidence, explicit done-prefix resume and ambiguous begin refusal.",
+    "Dev-context-only exact24+empty-default schema validation and synchronous all-known-CF flush followed by WALsync; no automatic ordinary runtime calls."
+  ],
+  "status": "frozen source slice with actual120-test Linux build and disposable reconstruction verified; durable prune/remount/restart gates pending"
+}

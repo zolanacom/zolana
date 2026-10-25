@@ -1,0 +1,1440 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -14500,6 +14500,7 @@
+  "solana-unified-scheduler-pool",
+  "wincode",
+  "zolana-native-check",
++ "zstd",
+ ]
+ 
+ [[package]]
+diff --git a/zolana-fast-check/Cargo.toml b/zolana-fast-check/Cargo.toml
+--- a/zolana-fast-check/Cargo.toml
++++ b/zolana-fast-check/Cargo.toml
+@@ -48,6 +48,7 @@
+ solana-transaction-status-client-types = { workspace = true }
+ solana-transaction-status = { workspace = true }
+ wincode = { workspace = true }
++zstd = { workspace = true }
+ 
+ solana-shred-version = { workspace = true }
+ solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
+diff --git a/zolana-fast-check/src/ancestry.rs b/zolana-fast-check/src/ancestry.rs
+--- a/zolana-fast-check/src/ancestry.rs
++++ b/zolana-fast-check/src/ancestry.rs
+@@ -103,7 +103,7 @@
+ 
+ /// Same complete metadata predicate for a fallible FULL SlotMeta reader.
+ /// Callers do not replace missing records with parent-slot projections.
+-fn verify_path_from<E: fmt::Display>(
++pub(crate) fn verify_path_from<E: fmt::Display>(
+     mut read_meta: impl FnMut(u64) -> Result<Option<SlotMeta>, E>,
+     start_slot: u64,
+     target_slot: u64,
+diff --git a/zolana-fast-check/src/ancestry_archive.rs b/zolana-fast-check/src/ancestry_archive.rs
+--- a/zolana-fast-check/src/ancestry_archive.rs
++++ b/zolana-fast-check/src/ancestry_archive.rs
+@@ -103,8 +103,20 @@
+ 
+ pub(crate) struct LoadedArchive {
+     binding: ArchiveBinding,
+-    prefix: ValidatedPrefix,
+-}
++    backing: Backing,
++}
++
++enum Backing {
++    V1(ValidatedPrefix),
++    V2(indexed::IndexedPrefix),
++}
++
++#[path = "ancestry_archive_indexed.rs"]
++mod indexed;
++pub(crate) use indexed::{
++    MAX_INDEX_BYTES, MAX_METADATA_BYTES as MAX_INDEXED_METADATA_BYTES,
++    MAX_RECORDS as MAX_INDEXED_RECORDS, publish_indexed,
++};
+ 
+ fn digest(raw: &[u8]) -> [u8; 32] {
+     solana_sha256_hasher::hash(raw).to_bytes()
+@@ -472,6 +484,23 @@
+     if digest(&raw_manifest) != expected_manifest_sha256 {
+         bail!("externally pinned archive manifest digest differs");
+     }
++    // Format selection happens only AFTER the independent complete manifest
++    // pin is checked. Each actual decoder still denies unknown/duplicate fields.
++    let kind: serde_json::Value = serde_json::from_slice(&raw_manifest)?;
++    if kind.get("format").and_then(|v| v.as_str()) == Some(indexed::FORMAT) {
++        let prefix = indexed::load_verified(
++            &directory,
++            owner_uid,
++            &raw_manifest,
++            expected,
++            deadline,
++            &mut cancelled,
++        )?;
++        return Ok(LoadedArchive {
++            binding: expected.clone(),
++            backing: Backing::V2(prefix),
++        });
++    }
+     let manifest: Manifest = serde_json::from_slice(&raw_manifest)?;
+     if manifest.format != FORMAT
+         || &manifest.binding != expected
+@@ -501,7 +530,7 @@
+     budget(deadline, &mut cancelled)?;
+     Ok(LoadedArchive {
+         binding: expected.clone(),
+-        prefix,
++        backing: Backing::V1(prefix),
+     })
+ }
+ 
+@@ -515,7 +544,10 @@
+         store: &Blockstore,
+         slot: u64,
+     ) -> Result<Option<SlotMeta>, String> {
+-        self.prefix.read_meta(store, slot)
++        match &self.backing {
++            Backing::V1(prefix) => prefix.read_meta(store, slot),
++            Backing::V2(prefix) => prefix.read_meta(store, slot),
++        }
+     }
+ 
+     pub(crate) fn verify(
+@@ -525,7 +557,10 @@
+         deadline: Instant,
+         cancelled: impl FnMut() -> bool,
+     ) -> Result<AncestryReport, AncestryError> {
+-        self.prefix.verify(store, start, deadline, cancelled)
++        match &self.backing {
++            Backing::V1(prefix) => prefix.verify(store, start, deadline, cancelled),
++            Backing::V2(prefix) => prefix.verify(store, start, deadline, cancelled),
++        }
+     }
+ 
+     pub(crate) fn check_original_root(
+@@ -542,8 +577,7 @@
+             bail!("archive does not preserve the caller's original checkpoint");
+         }
+         // Full metadata conflict or a live read/decode error always fails.
+-        self.prefix
+-            .read_meta(store, original_slot)
++        self.read_meta(store, original_slot)
+             .map_err(|e| anyhow!(e))?
+             .ok_or_else(|| anyhow!("original checkpoint metadata unavailable"))?;
+         if store.meta(original_slot)?.is_some() {
+diff --git a/zolana-fast-check/src/ancestry_archive_indexed.rs b/zolana-fast-check/src/ancestry_archive_indexed.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_archive_indexed.rs
+@@ -0,0 +1,595 @@
++//! V2 full native ancestry: streaming immutable publication and bounded index.
++//! The index pins each verified frame digest; mutable file headers cannot
++//! re-authorize a post-load body rewrite. No complete SlotMeta collection lives
++//! in memory. Publication/trust/domain/root rules remain the parent module's.
++use {
++    super::{
++        ArchiveBinding, ArchiveError, MAX_MANIFEST, MAX_META_BYTES, PublishedArchive, budget,
++        c_name, capture_root_evidence, check_owner, checked_fd, decode_full_meta, digest,
++        encode_full_meta, open_child, open_root, valid_binding, valid_generation, write_new,
++    },
++    crate::ancestry::{AncestryError, AncestryReport},
++    anyhow::{Context, anyhow, bail, ensure},
++    serde::{Deserialize, Serialize},
++    solana_ledger::{blockstore::Blockstore, blockstore_meta::SlotMeta},
++    std::{
++        fmt,
++        fs::File,
++        io::{BufReader, BufWriter, Read, Write},
++        os::{
++            fd::AsRawFd,
++            unix::fs::{FileExt, MetadataExt},
++        },
++        path::Path,
++        time::Instant,
++    },
++};
++
++pub(super) const FORMAT: &str = "zolana095-native-ancestry-indexed-zstd-v2";
++const MAGIC: &[u8; 8] = b"ZANCZ002";
++const FRAME_BYTES: u64 = 48;
++const CODEC: &str = "zstd-one-frame-level-1";
++const MAX_ENCODED_META_BYTES: usize = MAX_META_BYTES + 1024;
++pub(crate) const MAX_DECODED_METADATA_BYTES: u64 = 8 * 1024 * 1024 * 1024;
++pub(crate) const MAX_RECORDS: usize = 1_048_576;
++pub(crate) const MAX_METADATA_BYTES: u64 = 512 * 1024 * 1024;
++pub(crate) const MAX_INDEX_BYTES: usize = MAX_RECORDS * 48;
++const MAX_PAYLOAD_BYTES: u64 = MAX_METADATA_BYTES + MAX_RECORDS as u64 * FRAME_BYTES + 8;
++
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Manifest {
++    format: String,
++    binding: ArchiveBinding,
++    record_count: usize,
++    codec: String,
++    encoded_metadata_bytes: u64,
++    decoded_metadata_bytes: u64,
++    payload_bytes: u64,
++    payload_sha256: [u8; 32],
++}
++
++#[derive(Clone, Copy, Debug)]
++struct Entry {
++    slot: u64,
++    offset: u64,
++    // Bound to the independently pinned complete payload at load time.
++    // A digest obtained afresh from a mutable frame is not an authority.
++    digest: [u8; 32],
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct Identity {
++    device: u64,
++    inode: u64,
++    bytes: u64,
++    modified: (i64, i64),
++    changed: (i64, i64),
++    owner: u32,
++    mode: u32,
++    links: u64,
++}
++
++impl Identity {
++    fn capture(file: &File) -> Result<Self, ArchiveError> {
++        let m = file.metadata()?;
++        ensure!(
++            m.is_file() && m.nlink() == 1,
++            "indexed payload is not a single-link regular file"
++        );
++        Ok(Self {
++            device: m.dev(),
++            inode: m.ino(),
++            bytes: m.len(),
++            modified: (m.mtime(), m.mtime_nsec()),
++            changed: (m.ctime(), m.ctime_nsec()),
++            owner: m.uid(),
++            mode: m.mode(),
++            links: m.nlink(),
++        })
++    }
++}
++
++pub(super) struct IndexedPrefix {
++    file: File,
++    identity: Identity,
++    entries: Vec<Entry>,
++    original: u64,
++    prune_through: u64,
++}
++
++fn next_slot(meta: &SlotMeta, original: u64) -> Result<Option<u64>, ArchiveError> {
++    if meta.slot == original {
++        return Ok(None); // Original root's own parent is deliberately not walked.
++    }
++    let next = meta
++        .parent_slot
++        .context("indexed ancestry parent missing")?;
++    ensure!(
++        original <= next && next < meta.slot,
++        "indexed ancestry parent skips original root or is not decreasing"
++    );
++    Ok(Some(next))
++}
++
++fn create_payload(directory: &File, owner: u32) -> Result<File, ArchiveError> {
++    let file = checked_fd(
++        unsafe {
++            libc::openat(
++                directory.as_raw_fd(),
++                c"prefix.bin".as_ptr(),
++                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
++                0o600,
++            )
++        },
++        "create exclusive indexed ancestry payload",
++    )?;
++    check_owner(&file, owner, false)?;
++    Ok(file)
++}
++
++/// Actual Blockstore entrypoint. The caller still pins genesis/domain/resume,
++/// protected snapshots and the separate complete canonical transaction export.
++pub(crate) fn publish_indexed(
++    root: &Path,
++    generation: &str,
++    owner_uid: u32,
++    binding: &ArchiveBinding,
++    store: &Blockstore,
++    deadline: Instant,
++    mut cancelled: impl FnMut() -> bool,
++) -> Result<PublishedArchive, ArchiveError> {
++    for expected in [&binding.original, &binding.head] {
++        budget(deadline, &mut cancelled)?;
++        ensure!(
++            capture_root_evidence(store, expected.slot)?.certified_bank_hash
++                == expected.certified_bank_hash,
++            "indexed source root BANK evidence differs"
++        );
++    }
++    publish_from(
++        root,
++        generation,
++        owner_uid,
++        binding,
++        |slot| store.meta(slot),
++        deadline,
++        cancelled,
++    )
++}
++
++/// Generic FULL reader is private to this implementation and its fixtures.
++fn publish_from<E: fmt::Display>(
++    root: &Path,
++    generation: &str,
++    owner_uid: u32,
++    binding: &ArchiveBinding,
++    mut read: impl FnMut(u64) -> Result<Option<SlotMeta>, E>,
++    deadline: Instant,
++    mut cancelled: impl FnMut() -> bool,
++) -> Result<PublishedArchive, ArchiveError> {
++    budget(deadline, &mut cancelled)?;
++    valid_generation(generation)?;
++    valid_binding(binding)?;
++    let parent = open_root(root, owner_uid)?;
++    let pending = format!(".pending-{generation}");
++    let pending_c = c_name(pending.as_bytes())?;
++    if unsafe { libc::mkdirat(parent.as_raw_fd(), pending_c.as_ptr(), 0o700) } != 0 {
++        return Err(std::io::Error::last_os_error())
++            .context("create exclusive pending indexed generation");
++    }
++    parent.sync_all()?;
++    let directory = open_child(&parent, &pending, owner_uid, true)?;
++    let mut writer =
++        BufWriter::with_capacity(MAX_META_BYTES, create_payload(&directory, owner_uid)?);
++    let mut hasher = solana_sha256_hasher::Hasher::default();
++    writer.write_all(MAGIC)?;
++    hasher.hash(MAGIC);
++    let mut slot = binding.head.slot;
++    let mut count = 0usize;
++    let mut encoded_metadata_bytes = 0u64;
++    let mut decoded_metadata_bytes = 0u64;
++    let mut payload_bytes = MAGIC.len() as u64;
++    let mut compressor = zstd::bulk::Compressor::new(1)?;
++    loop {
++        budget(deadline, &mut cancelled)?;
++        ensure!(
++            count < MAX_RECORDS,
++            "indexed ancestry record bound exceeded"
++        );
++        let meta = read(slot)
++            .map_err(|e| anyhow!("cannot read full indexed ancestry at {slot}: {e}"))?
++            .context("full indexed ancestry metadata missing")?;
++        budget(deadline, &mut cancelled)?;
++        ensure!(
++            meta.slot == slot,
++            "indexed source metadata slot substitution"
++        );
++        let raw = encode_full_meta(&meta)?;
++        ensure!(
++            decode_full_meta(slot, &raw)? == meta,
++            "full indexed metadata roundtrip differs"
++        );
++        let next = next_slot(&meta, binding.original.slot)?;
++        let encoded = compressor.compress(&raw)?;
++        ensure!(
++            !encoded.is_empty() && encoded.len() <= MAX_ENCODED_META_BYTES,
++            "indexed compressed metadata record exceeds bound"
++        );
++        encoded_metadata_bytes = encoded_metadata_bytes
++            .checked_add(encoded.len() as u64)
++            .context("indexed stored metadata byte overflow")?;
++        decoded_metadata_bytes = decoded_metadata_bytes
++            .checked_add(raw.len() as u64)
++            .context("indexed decoded metadata byte overflow")?;
++        payload_bytes = payload_bytes
++            .checked_add(FRAME_BYTES + encoded.len() as u64)
++            .context("indexed payload byte overflow")?;
++        ensure!(
++            encoded_metadata_bytes <= MAX_METADATA_BYTES
++                && decoded_metadata_bytes <= MAX_DECODED_METADATA_BYTES
++                && payload_bytes <= MAX_PAYLOAD_BYTES,
++            "indexed ancestry payload bound exceeded"
++        );
++        let mut frame = [0u8; FRAME_BYTES as usize];
++        frame[..8].copy_from_slice(&slot.to_le_bytes());
++        frame[8..12].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
++        frame[12..16].copy_from_slice(&(raw.len() as u32).to_le_bytes());
++        frame[16..].copy_from_slice(&digest(&raw));
++        writer.write_all(&frame)?;
++        writer.write_all(&encoded)?;
++        hasher.hash(&frame);
++        hasher.hash(&encoded);
++        count += 1;
++        budget(deadline, &mut cancelled)?;
++        match next {
++            Some(next) => slot = next,
++            None => break,
++        }
++    }
++    writer.flush()?;
++    writer.get_ref().sync_all()?;
++    ensure!(
++        writer.get_ref().metadata()?.len() == payload_bytes,
++        "indexed written payload size differs"
++    );
++    drop(writer);
++    let manifest = serde_json::to_vec(&Manifest {
++        format: FORMAT.into(),
++        binding: binding.clone(),
++        record_count: count,
++        codec: CODEC.into(),
++        encoded_metadata_bytes,
++        decoded_metadata_bytes,
++        payload_bytes,
++        payload_sha256: hasher.result().to_bytes(),
++    })?;
++    ensure!(
++        manifest.len() <= MAX_MANIFEST,
++        "indexed manifest exceeds bound"
++    );
++    budget(deadline, &mut cancelled)?;
++    write_new(&directory, "manifest.json", owner_uid, &manifest)?;
++    directory.sync_all()?;
++    budget(deadline, &mut cancelled)?;
++    #[cfg(test)]
++    super::publication_hook(super::PublicationPoint::BeforeRename);
++    let final_c = c_name(generation.as_bytes())?;
++    #[cfg(target_os = "linux")]
++    if unsafe {
++        libc::renameat2(
++            parent.as_raw_fd(),
++            pending_c.as_ptr(),
++            parent.as_raw_fd(),
++            final_c.as_ptr(),
++            libc::RENAME_NOREPLACE,
++        )
++    } != 0
++    {
++        return Err(std::io::Error::last_os_error())
++            .context("publish exclusive indexed generation");
++    }
++    #[cfg(not(target_os = "linux"))]
++    bail!("exclusive indexed ancestry publication requires Linux");
++    parent.sync_all()?;
++    #[cfg(test)]
++    super::publication_hook(super::PublicationPoint::AfterCommit);
++    budget(deadline, &mut cancelled)?;
++    Ok(PublishedArchive {
++        manifest_sha256: digest(&manifest),
++    })
++}
++
++pub(super) fn load_verified(
++    directory: &File,
++    owner_uid: u32,
++    raw_manifest: &[u8],
++    expected: &ArchiveBinding,
++    deadline: Instant,
++    cancelled: &mut impl FnMut() -> bool,
++) -> Result<IndexedPrefix, ArchiveError> {
++    let manifest: Manifest = serde_json::from_slice(raw_manifest)?;
++    ensure!(
++        manifest.format == FORMAT
++            && &manifest.binding == expected
++            && manifest.record_count > 0
++            && manifest.record_count <= MAX_RECORDS
++            && manifest.codec == CODEC
++            && manifest.encoded_metadata_bytes > 0
++            && manifest.encoded_metadata_bytes <= MAX_METADATA_BYTES
++            && manifest.decoded_metadata_bytes > 0
++            && manifest.decoded_metadata_bytes <= MAX_DECODED_METADATA_BYTES
++            && manifest.payload_bytes > 8
++            && manifest.payload_bytes <= MAX_PAYLOAD_BYTES
++            && std::mem::size_of::<Entry>() == 48,
++        "indexed manifest format/binding/bounds differ"
++    );
++    let index_bytes = manifest
++        .record_count
++        .checked_mul(std::mem::size_of::<Entry>())
++        .context("indexed memory byte overflow")?;
++    ensure!(
++        index_bytes <= MAX_INDEX_BYTES,
++        "indexed memory byte bound exceeded"
++    );
++    budget(deadline, cancelled)?;
++    let file = open_child(directory, "prefix.bin", owner_uid, false)?;
++    let identity = Identity::capture(&file)?;
++    ensure!(
++        identity.bytes == manifest.payload_bytes,
++        "indexed payload file size differs"
++    );
++    let mut reader = BufReader::with_capacity(MAX_META_BYTES, file);
++    let mut entries = Vec::new();
++    entries
++        .try_reserve_exact(manifest.record_count)
++        .context("cannot allocate bounded ancestry index")?;
++    let mut magic = [0u8; 8];
++    reader.read_exact(&mut magic)?;
++    ensure!(&magic == MAGIC, "indexed payload magic differs");
++    let mut hasher = solana_sha256_hasher::Hasher::default();
++    hasher.hash(&magic);
++    let mut offset = 8u64;
++    let mut encoded_metadata_bytes = 0u64;
++    let mut decoded_metadata_bytes = 0u64;
++    let mut expected_slot = Some(expected.head.slot);
++    for _ in 0..manifest.record_count {
++        budget(deadline, cancelled)?;
++        let mut frame = [0u8; FRAME_BYTES as usize];
++        reader.read_exact(&mut frame)?;
++        let slot = u64::from_le_bytes(frame[..8].try_into().unwrap());
++        let size = u32::from_le_bytes(frame[8..12].try_into().unwrap()) as usize;
++        let decoded_size = u32::from_le_bytes(frame[12..16].try_into().unwrap()) as usize;
++        let pin: [u8; 32] = frame[16..].try_into().unwrap();
++        ensure!(
++            Some(slot) == expected_slot
++                && size > 0
++                && size <= MAX_ENCODED_META_BYTES
++                && decoded_size > 0
++                && decoded_size <= MAX_META_BYTES,
++            "indexed frame slot/order/record bound differs"
++        );
++        let next_offset = offset
++            .checked_add(FRAME_BYTES + size as u64)
++            .context("indexed offset overflow")?;
++        encoded_metadata_bytes = encoded_metadata_bytes
++            .checked_add(size as u64)
++            .context("indexed stored metadata overflow")?;
++        decoded_metadata_bytes = decoded_metadata_bytes
++            .checked_add(decoded_size as u64)
++            .context("indexed decoded metadata overflow")?;
++        ensure!(
++            next_offset <= manifest.payload_bytes
++                && encoded_metadata_bytes <= MAX_METADATA_BYTES
++                && decoded_metadata_bytes <= MAX_DECODED_METADATA_BYTES,
++            "indexed frame/total payload bound exceeded"
++        );
++        let mut encoded = vec![0u8; size];
++        reader.read_exact(&mut encoded)?;
++        let raw = decode_frame(&encoded, decoded_size)?;
++        ensure!(digest(&raw) == pin, "indexed frame digest differs");
++        let meta = decode_full_meta(slot, &raw)?;
++        expected_slot = next_slot(&meta, expected.original.slot)?;
++        entries.push(Entry {
++            slot,
++            offset,
++            digest: pin,
++        });
++        offset = next_offset;
++        hasher.hash(&frame);
++        hasher.hash(&encoded);
++        budget(deadline, cancelled)?;
++    }
++    ensure!(
++        expected_slot.is_none()
++            && offset == manifest.payload_bytes
++            && encoded_metadata_bytes == manifest.encoded_metadata_bytes
++            && decoded_metadata_bytes == manifest.decoded_metadata_bytes
++            && hasher.result().to_bytes() == manifest.payload_sha256,
++        "indexed complete path/count/global digest differs"
++    );
++    let mut trailing = [0u8; 1];
++    ensure!(
++        reader.read(&mut trailing)? == 0,
++        "trailing indexed payload bytes"
++    );
++    let file = reader.into_inner();
++    ensure!(
++        Identity::capture(&file)? == identity,
++        "indexed payload changed during validation"
++    );
++    budget(deadline, cancelled)?;
++    Ok(IndexedPrefix {
++        file,
++        identity,
++        entries,
++        original: expected.original.slot,
++        prune_through: expected.prune_through,
++    })
++}
++
++/// One bounded zstd frame only: no concatenated/trailing/skippable payload
++/// can supply another body, and declared size never controls an unbounded allocation.
++fn decode_frame(encoded: &[u8], decoded_size: usize) -> Result<Vec<u8>, ArchiveError> {
++    ensure!(
++        !encoded.is_empty()
++            && encoded.len() <= MAX_ENCODED_META_BYTES
++            && decoded_size > 0
++            && decoded_size <= MAX_META_BYTES,
++        "indexed zstd encoded/decoded record bound differs"
++    );
++    let frame_size = zstd::zstd_safe::find_frame_compressed_size(encoded)
++        .map_err(|code| anyhow!("invalid indexed zstd frame: {code}"))?;
++    ensure!(
++        frame_size == encoded.len(),
++        "indexed zstd trailing or concatenated frame bytes"
++    );
++    let decoded = zstd::bulk::decompress(encoded, decoded_size)?;
++    ensure!(
++        decoded.len() == decoded_size,
++        "indexed zstd decoded size differs"
++    );
++    Ok(decoded)
++}
++
++impl IndexedPrefix {
++    fn read_entry(&self, position: usize) -> Result<SlotMeta, ArchiveError> {
++        ensure!(
++            Identity::capture(&self.file)? == self.identity,
++            "loaded indexed payload identity changed"
++        );
++        let entry = self
++            .entries
++            .get(position)
++            .context("indexed lookup out of range")?;
++        let mut frame = [0u8; FRAME_BYTES as usize];
++        self.file.read_exact_at(&mut frame, entry.offset)?;
++        let slot = u64::from_le_bytes(frame[..8].try_into().unwrap());
++        let size = u32::from_le_bytes(frame[8..12].try_into().unwrap()) as usize;
++        let decoded_size = u32::from_le_bytes(frame[12..16].try_into().unwrap()) as usize;
++        ensure!(
++            slot == entry.slot
++                && size > 0
++                && size <= MAX_ENCODED_META_BYTES
++                && decoded_size > 0
++                && decoded_size <= MAX_META_BYTES
++                && frame[16..] == entry.digest
++                && entry
++                    .offset
++                    .checked_add(FRAME_BYTES + size as u64)
++                    .is_some_and(|end| end <= self.identity.bytes),
++            "loaded indexed frame/header/digest pin differs"
++        );
++        let mut encoded = vec![0u8; size];
++        self.file
++            .read_exact_at(&mut encoded, entry.offset + FRAME_BYTES)?;
++        let raw = decode_frame(&encoded, decoded_size)?;
++        ensure!(
++            digest(&raw) == entry.digest,
++            "loaded indexed metadata digest differs"
++        );
++        let meta = decode_full_meta(slot, &raw)?;
++        ensure!(
++            Identity::capture(&self.file)? == self.identity,
++            "indexed payload changed during lookup"
++        );
++        Ok(meta)
++    }
++
++    fn find(&self, slot: u64) -> Option<usize> {
++        self.entries
++            .binary_search_by(|entry| entry.slot.cmp(&slot).reverse())
++            .ok()
++    }
++
++    fn lookup(
++        &self,
++        slot: u64,
++        cursor: Option<&mut usize>,
++    ) -> Result<Option<SlotMeta>, ArchiveError> {
++        let position = match cursor {
++            Some(cursor) => {
++                let position = if self
++                    .entries
++                    .get(*cursor)
++                    .is_some_and(|entry| entry.slot == slot)
++                {
++                    Some(*cursor)
++                } else {
++                    self.find(slot)
++                };
++                if let Some(position) = position {
++                    *cursor = position + 1;
++                }
++                position
++            }
++            None => self.find(slot),
++        };
++        position
++            .map(|position| self.read_entry(position))
++            .transpose()
++    }
++
++    fn merge(
++        &self,
++        slot: u64,
++        live: Option<SlotMeta>,
++        old: Option<SlotMeta>,
++    ) -> Result<Option<SlotMeta>, String> {
++        match (live, old) {
++            (Some(live), Some(old)) if live != old => {
++                Err("live/archive full metadata conflicts".into())
++            }
++            (Some(live), _) => Ok(Some(live)),
++            (None, Some(old)) if slot <= self.prune_through => Ok(Some(old)),
++            (None, _) => Ok(None),
++        }
++    }
++
++    fn read_from<E: fmt::Display>(
++        &self,
++        slot: u64,
++        mut read_live: impl FnMut(u64) -> Result<Option<SlotMeta>, E>,
++    ) -> Result<Option<SlotMeta>, String> {
++        // A live read/decode error is fatal before consulting the archive.
++        let live = read_live(slot).map_err(|e| e.to_string())?;
++        let old = self.lookup(slot, None).map_err(|e| e.to_string())?;
++        self.merge(slot, live, old)
++    }
++
++    pub(super) fn read_meta(
++        &self,
++        store: &Blockstore,
++        slot: u64,
++    ) -> Result<Option<SlotMeta>, String> {
++        self.read_from(slot, |slot| store.meta(slot))
++    }
++
++    pub(super) fn verify(
++        &self,
++        store: &Blockstore,
++        start: u64,
++        deadline: Instant,
++        cancelled: impl FnMut() -> bool,
++    ) -> Result<AncestryReport, AncestryError> {
++        let mut cursor = 0usize;
++        crate::ancestry::verify_path_from(
++            |slot| {
++                let live = store.meta(slot).map_err(|e| e.to_string())?;
++                let old = self
++                    .lookup(slot, Some(&mut cursor))
++                    .map_err(|e| e.to_string())?;
++                self.merge(slot, live, old)
++            },
++            start,
++            self.original,
++            deadline,
++            cancelled,
++            |_, _| {},
++        )
++    }
++}
++
++#[cfg(test)]
++#[path = "ancestry_archive_indexed_tests.rs"]
++mod tests;
+diff --git a/zolana-fast-check/src/ancestry_archive_indexed_tests.rs b/zolana-fast-check/src/ancestry_archive_indexed_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/ancestry_archive_indexed_tests.rs
+@@ -0,0 +1,646 @@
++//! Disposable native index/SlotMeta fixtures. No real pilot, keys or validators.
++use {
++    super::*,
++    crate::ancestry_archive::{self, Domain, RootEvidence},
++    std::{
++        fs::{self, DirBuilder, OpenOptions},
++        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
++        path::PathBuf,
++        sync::atomic::{AtomicU64, Ordering},
++        time::Duration,
++    },
++};
++
++static SEQUENCE: AtomicU64 = AtomicU64::new(0);
++struct Fixture(PathBuf);
++impl Fixture {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!(
++            "zolana095-indexed-{}-{}",
++            std::process::id(),
++            SEQUENCE.fetch_add(1, Ordering::Relaxed)
++        ));
++        DirBuilder::new().mode(0o700).create(&path).unwrap();
++        Self(path)
++    }
++}
++impl Drop for Fixture {
++    fn drop(&mut self) {
++        fs::remove_dir_all(&self.0).unwrap();
++    }
++}
++fn owner() -> u32 {
++    unsafe { libc::geteuid() }
++}
++fn end() -> Instant {
++    Instant::now() + Duration::from_secs(180)
++}
++fn meta(slot: u64) -> SlotMeta {
++    let mut value = SlotMeta {
++        slot,
++        parent_slot: (slot > 1).then_some(slot - 1),
++        consumed: 3,
++        received: 3,
++        last_index: Some(2),
++        ..SlotMeta::default()
++    };
++    value.next_slots.push(slot + 1);
++    value.completed_data_indexes.insert(2);
++    value
++}
++fn evidence(slot: u64) -> RootEvidence {
++    RootEvidence {
++        slot,
++        is_root: true,
++        certified_bank_hash: digest(&slot.to_le_bytes()),
++        certified_timestamp: slot as i64,
++        replay_bank_hash: Some(digest(&slot.to_le_bytes())),
++    }
++}
++fn binding(head: u64) -> ArchiveBinding {
++    ArchiveBinding {
++        domain: Domain {
++            network: [7; 32],
++            genesis_hash: [11; 32],
++            identity: [1; 32],
++            voter: [2; 32],
++            resume_sha256: [3; 32],
++            ledger_relative_path: "peer-0/ledger".into(),
++        },
++        original: evidence(1),
++        head: evidence(head),
++        prune_through: head - 1,
++        snapshot_parent_slot: head + 1,
++        snapshot_slot: head + 2,
++        captured_current_root_slot: head + 3,
++        canonical_export_through: head + 3,
++    }
++}
++fn publish(root: &Path, name: &str, expected: &ArchiveBinding) -> PublishedArchive {
++    publish_from(
++        root,
++        name,
++        owner(),
++        expected,
++        |slot| Ok::<_, String>(Some(meta(slot))),
++        end(),
++        || false,
++    )
++    .unwrap()
++}
++fn load(
++    root: &Path,
++    name: &str,
++    pin: [u8; 32],
++    expected: &ArchiveBinding,
++) -> Result<IndexedPrefix, ArchiveError> {
++    let directory = open_child(&open_root(root, owner())?, name, owner(), true)?;
++    let raw = fs::read(root.join(name).join("manifest.json"))?;
++    ensure!(digest(&raw) == pin, "test independent manifest pin differs");
++    load_verified(&directory, owner(), &raw, expected, end(), &mut || false)
++}
++fn expected_bytes(expected: &ArchiveBinding) -> (Vec<u8>, Vec<u8>) {
++    let mut raw = MAGIC.to_vec();
++    let mut encoded_metadata_bytes = 0;
++    let mut decoded_metadata_bytes = 0;
++    let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
++    for slot in (expected.original.slot..=expected.head.slot).rev() {
++        let body = encode_full_meta(&meta(slot)).unwrap();
++        let encoded = compressor.compress(&body).unwrap();
++        raw.extend_from_slice(&slot.to_le_bytes());
++        raw.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
++        raw.extend_from_slice(&(body.len() as u32).to_le_bytes());
++        raw.extend_from_slice(&digest(&body));
++        raw.extend_from_slice(&encoded);
++        encoded_metadata_bytes += encoded.len() as u64;
++        decoded_metadata_bytes += body.len() as u64;
++    }
++    let manifest = serde_json::to_vec(&Manifest {
++        format: FORMAT.into(),
++        binding: expected.clone(),
++        record_count: (expected.head.slot - expected.original.slot + 1) as usize,
++        codec: CODEC.into(),
++        encoded_metadata_bytes,
++        decoded_metadata_bytes,
++        payload_bytes: raw.len() as u64,
++        payload_sha256: digest(&raw),
++    })
++    .unwrap();
++    (raw, manifest)
++}
++
++#[test]
++fn pilot_scale_streams_1000003_full_records_and_keeps_only_bounded_digest_index() {
++    let root = Fixture::new();
++    let expected = binding(1_000_003);
++    let began = Instant::now();
++    let published = publish(&root.0, "large", &expected);
++    let published_ms = began.elapsed().as_secs_f64() * 1000.0;
++    let loaded = load(&root.0, "large", published.manifest_sha256, &expected).unwrap();
++    let loaded_ms = began.elapsed().as_secs_f64() * 1000.0;
++    let manifest: Manifest =
++        serde_json::from_slice(&fs::read(root.0.join("large/manifest.json")).unwrap()).unwrap();
++    assert_eq!(loaded.entries.len(), 1_000_003);
++    // Full canonical V3 metadata has a fixed 4KiB completed-shred bitmap.
++    // Do not manufacture abbreviated records to hide the decoded work/size.
++    assert!(manifest.decoded_metadata_bytes > 4_000_000_000);
++    assert!(manifest.decoded_metadata_bytes <= MAX_DECODED_METADATA_BYTES);
++    assert!(manifest.encoded_metadata_bytes <= MAX_METADATA_BYTES);
++    assert_eq!(std::mem::size_of::<Entry>(), 48);
++    assert!(loaded.entries.capacity() * 48 <= MAX_INDEX_BYTES);
++    assert!(loaded.identity.bytes <= MAX_PAYLOAD_BYTES);
++    for slot in [1, 2, 4096, 500_000, 1_000_003] {
++        assert_eq!(loaded.lookup(slot, None).unwrap(), Some(meta(slot)));
++    }
++    assert!(loaded.lookup(1_000_004, None).unwrap().is_none());
++    let db = Fixture::new();
++    let store = Blockstore::open(&db.0).unwrap();
++    // The archive must not replace the retained head above cutoff.
++    store
++        .put_meta(expected.head.slot, &meta(expected.head.slot))
++        .unwrap();
++    assert_eq!(
++        loaded
++            .verify(&store, expected.head.slot, end(), || false)
++            .unwrap()
++            .entries,
++        1_000_003
++    );
++    println!(
++        "{}",
++        serde_json::json!({
++            "event": "indexed_full_slot_meta_scale", "records": loaded.entries.len(),
++            "decoded_metadata_bytes": manifest.decoded_metadata_bytes,
++            "encoded_metadata_bytes": manifest.encoded_metadata_bytes,
++            "payload_bytes": manifest.payload_bytes,
++            "index_bytes": loaded.entries.capacity() * std::mem::size_of::<Entry>(),
++            "publish_ms": published_ms, "publish_and_load_ms": loaded_ms,
++            "publish_load_and_verify_ms": began.elapsed().as_secs_f64() * 1000.0,
++            "full_canonical_slot_meta": true, "validators_started": false,
++        })
++    );
++}
++
++#[test]
++fn v2_dispatch_retains_full_overlap_conflicts_live_errors_and_missing_tail_refusal() {
++    let root = Fixture::new();
++    let expected = binding(9);
++    let published = publish(&root.0, "one", &expected);
++    let loaded = load(&root.0, "one", published.manifest_sha256, &expected).unwrap();
++    assert_eq!(
++        loaded.read_from(3, |_| Ok::<_, String>(None)).unwrap(),
++        Some(meta(3))
++    );
++    assert!(
++        loaded
++            .read_from(9, |_| Ok::<_, String>(None))
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        loaded
++            .read_from(3, |_| Err::<Option<SlotMeta>, _>("corrupt live metadata"))
++            .is_err()
++    );
++    let mut conflict = meta(3);
++    conflict.received += 1;
++    assert!(
++        loaded
++            .read_from(3, |_| Ok::<_, String>(Some(conflict.clone())))
++            .is_err()
++    );
++    assert_eq!(
++        loaded
++            .read_from(3, |_| Ok::<_, String>(Some(meta(3))))
++            .unwrap(),
++        Some(meta(3))
++    );
++    let db = Fixture::new();
++    let store = Blockstore::open(&db.0).unwrap();
++    let outer = ancestry_archive::load(
++        &root.0,
++        "one",
++        owner(),
++        published.manifest_sha256,
++        &expected,
++        end(),
++        || false,
++    )
++    .unwrap();
++    assert!(outer.verify(&store, 9, end(), || false).is_err());
++    store.put_meta(9, &meta(9)).unwrap();
++    store.put_meta(10, &meta(10)).unwrap();
++    assert_eq!(
++        outer.verify(&store, 10, end(), || false).unwrap().entries,
++        10
++    );
++    outer
++        .check_original_root(&store, 1, expected.original.certified_bank_hash)
++        .unwrap();
++    assert!(outer.verify(&store, 10, Instant::now(), || false).is_err());
++    assert!(outer.verify(&store, 10, end(), || true).is_err());
++    // Exercise the actual public Blockstore publisher as well as the generic
++    // streaming fixture seam. It must retain the certified original/head pins.
++    for slot in 1..=9 {
++        store.put_meta(slot, &meta(slot)).unwrap();
++    }
++    store.set_roots([1u64, 9].iter()).unwrap();
++    for slot in [1u64, 9] {
++        let hash = solana_sha256_hasher::hash(&slot.to_le_bytes());
++        store.insert_bank_hash(slot, hash, true);
++        store
++            .insert_optimistic_slot(slot, &hash, slot as i64)
++            .unwrap();
++    }
++    let from_store = publish_indexed(
++        &root.0,
++        "actual-db",
++        owner(),
++        &expected,
++        &store,
++        end(),
++        || false,
++    )
++    .unwrap();
++    ancestry_archive::load(
++        &root.0,
++        "actual-db",
++        owner(),
++        from_store.manifest_sha256,
++        &expected,
++        end(),
++        || false,
++    )
++    .unwrap();
++    let mut wrong = expected.clone();
++    wrong.head.certified_bank_hash[0] ^= 1;
++    assert!(
++        publish_indexed(
++            &root.0,
++            "wrong-certificate",
++            owner(),
++            &wrong,
++            &store,
++            end(),
++            || false
++        )
++        .is_err()
++    );
++}
++
++#[test]
++fn v2_external_pins_owner_binding_and_hostile_manifest_bounds_are_required() {
++    let root = Fixture::new();
++    let expected = binding(9);
++    let published = publish(&root.0, "one", &expected);
++    assert!(
++        ancestry_archive::load(&root.0, "one", owner(), [0; 32], &expected, end(), || false)
++            .is_err()
++    );
++    assert!(
++        ancestry_archive::load(
++            &root.0,
++            "one",
++            owner().wrapping_add(1),
++            published.manifest_sha256,
++            &expected,
++            end(),
++            || false
++        )
++        .is_err()
++    );
++    let mut changed = expected.clone();
++    changed.domain.identity[0] ^= 1;
++    assert!(
++        ancestry_archive::load(
++            &root.0,
++            "one",
++            owner(),
++            published.manifest_sha256,
++            &changed,
++            end(),
++            || false
++        )
++        .is_err()
++    );
++    let path = root.0.join("one/manifest.json");
++    let original = fs::read(&path).unwrap();
++    for (field, value) in [
++        ("record_count", MAX_RECORDS as u64 + 1),
++        ("encoded_metadata_bytes", MAX_METADATA_BYTES + 1),
++        ("decoded_metadata_bytes", MAX_DECODED_METADATA_BYTES + 1),
++        ("payload_bytes", MAX_PAYLOAD_BYTES + 1),
++    ] {
++        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
++        manifest[field] = value.into();
++        let raw = serde_json::to_vec(&manifest).unwrap();
++        fs::write(&path, &raw).unwrap();
++        assert!(
++            ancestry_archive::load(
++                &root.0,
++                "one",
++                owner(),
++                digest(&raw),
++                &expected,
++                end(),
++                || false
++            )
++            .is_err()
++        );
++    }
++}
++
++#[test]
++fn v2_truncated_corrupt_and_even_repinned_discontinuous_frames_never_load() {
++    let body = encode_full_meta(&meta(9)).unwrap();
++    let encoded = zstd::bulk::compress(&body, 1).unwrap();
++    assert_eq!(decode_frame(&encoded, body.len()).unwrap(), body);
++    for bad in [
++        vec![],
++        vec![1, 2, 3],
++        encoded[..encoded.len() - 1].to_vec(),
++        {
++            let mut value = encoded.clone();
++            value.push(0);
++            value
++        },
++        {
++            let mut value = encoded.clone();
++            value.extend_from_slice(&encoded);
++            value
++        },
++    ] {
++        assert!(decode_frame(&bad, body.len()).is_err());
++    }
++    for declared in [0, 1, body.len() - 1, body.len() + 1, MAX_META_BYTES + 1] {
++        assert!(decode_frame(&encoded, declared).is_err());
++    }
++    let bomb = zstd::bulk::compress(&vec![0; MAX_META_BYTES + 1], 1).unwrap();
++    assert!(decode_frame(&bomb, MAX_META_BYTES).is_err());
++
++    let root = Fixture::new();
++    let expected = binding(9);
++    let published = publish(&root.0, "one", &expected);
++    let path = root.0.join("one/prefix.bin");
++    let original = fs::read(&path).unwrap();
++    for raw in [original[..original.len() - 1].to_vec(), {
++        let mut b = original.clone();
++        *b.last_mut().unwrap() ^= 1;
++        b
++    }] {
++        fs::write(&path, raw).unwrap();
++        assert!(load(&root.0, "one", published.manifest_sha256, &expected).is_err());
++    }
++    let (mut raw, mut manifest) = expected_bytes(&expected);
++    // Re-pin a frame with a duplicate/wrong first lookup slot. A manifest pin
++    // never excuses incomplete or substituted typed ancestry.
++    raw[8..16].copy_from_slice(&8u64.to_le_bytes());
++    let mut parsed: Manifest = serde_json::from_slice(&manifest).unwrap();
++    parsed.payload_sha256 = digest(&raw);
++    manifest = serde_json::to_vec(&parsed).unwrap();
++    fs::write(&path, &raw).unwrap();
++    fs::write(root.0.join("one/manifest.json"), &manifest).unwrap();
++    assert!(load(&root.0, "one", digest(&manifest), &expected).is_err());
++    // An over-bound frame length must refuse before allocating that body.
++    raw[8..16].copy_from_slice(&9u64.to_le_bytes());
++    raw[16..20].copy_from_slice(&(MAX_ENCODED_META_BYTES as u32 + 1).to_le_bytes());
++    parsed.payload_sha256 = digest(&raw);
++    manifest = serde_json::to_vec(&parsed).unwrap();
++    fs::write(&path, &raw).unwrap();
++    fs::write(root.0.join("one/manifest.json"), &manifest).unwrap();
++    assert!(load(&root.0, "one", digest(&manifest), &expected).is_err());
++}
++
++#[test]
++fn v2_postload_body_and_digest_rewrite_cannot_replace_verified_memory_pin() {
++    let root = Fixture::new();
++    let expected = binding(9);
++    let published = publish(&root.0, "one", &expected);
++    let mut loaded = load(&root.0, "one", published.manifest_sha256, &expected).unwrap();
++    let path = root.0.join("one/prefix.bin");
++    let file = OpenOptions::new().write(true).open(&path).unwrap();
++    let mut changed = meta(9);
++    changed.received += 1;
++    let body = encode_full_meta(&changed).unwrap();
++    let encoded = zstd::bulk::compress(&body, 1).unwrap();
++    file.write_all_at(&(encoded.len() as u32).to_le_bytes(), 8 + 8)
++        .unwrap();
++    file.write_all_at(&(body.len() as u32).to_le_bytes(), 8 + 12)
++        .unwrap();
++    file.write_all_at(&digest(&body), 8 + 16).unwrap();
++    file.write_all_at(&encoded, 8 + FRAME_BYTES).unwrap();
++    file.sync_all().unwrap();
++    assert!(
++        loaded.lookup(9, None).is_err(),
++        "identity detects ordinary post-load writes"
++    );
++    // Even if timestamp/identity fast-fail were defeated, the independently
++    // verified in-memory frame digest still rejects body+header replacement.
++    loaded.identity = Identity::capture(&loaded.file).unwrap();
++    assert!(
++        loaded.lookup(9, None).is_err(),
++        "file-derived replacement digest must not become an authority"
++    );
++}
++
++#[test]
++fn v2_failed_preparation_is_never_adopted_or_overwritten() {
++    let root = Fixture::new();
++    let expected = binding(9);
++    let mut calls = 0;
++    assert!(
++        publish_from(
++            &root.0,
++            "partial",
++            owner(),
++            &expected,
++            |slot| {
++                calls += 1;
++                if calls == 3 {
++                    Err("read failure")
++                } else {
++                    Ok(Some(meta(slot)))
++                }
++            },
++            end(),
++            || false
++        )
++        .is_err()
++    );
++    assert!(!root.0.join("partial").exists());
++    assert!(root.0.join(".pending-partial/prefix.bin").exists());
++    assert!(
++        publish_from(
++            &root.0,
++            "partial",
++            owner(),
++            &expected,
++            |slot| Ok::<_, String>(Some(meta(slot))),
++            end(),
++            || false
++        )
++        .is_err()
++    );
++    let published = publish(&root.0, "one", &expected);
++    assert!(
++        publish_from(
++            &root.0,
++            "one",
++            owner(),
++            &expected,
++            |slot| Ok::<_, String>(Some(meta(slot))),
++            end(),
++            || false
++        )
++        .is_err()
++    );
++    load(&root.0, "one", published.manifest_sha256, &expected).unwrap();
++    assert!(
++        publish_from(
++            &root.0,
++            "cancelled",
++            owner(),
++            &expected,
++            |slot| Ok::<_, String>(Some(meta(slot))),
++            end(),
++            || true
++        )
++        .is_err()
++    );
++    assert!(!root.0.join("cancelled").exists());
++}
++
++fn kill_case(point: ancestry_archive::PublicationPoint, test_name: &str) {
++    use std::{
++        os::unix::process::ExitStatusExt,
++        process::{Child, Command, Stdio},
++        thread,
++    };
++    const CHILD: &str = "ZOLANA095_INDEXED_PUBLICATION";
++    const ROOT: &str = "ZOLANA095_INDEXED_ROOT";
++    let label = match point {
++        ancestry_archive::PublicationPoint::BeforeRename => "before",
++        ancestry_archive::PublicationPoint::AfterCommit => "after",
++    };
++    let expected = binding(9);
++    if let Some(value) = std::env::var_os(CHILD) {
++        assert_eq!(value.as_os_str(), std::ffi::OsStr::new(label));
++        let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
++        let marker = root.join("publication-point");
++        ancestry_archive::PUBLICATION_HOOK.with(|hook| {
++            *hook.borrow_mut() = Some(Box::new(move |seen| {
++                if seen == point {
++                    let mut file = OpenOptions::new()
++                        .write(true)
++                        .create_new(true)
++                        .mode(0o600)
++                        .open(&marker)
++                        .unwrap();
++                    file.write_all(b"seen").unwrap();
++                    file.sync_all().unwrap();
++                    loop {
++                        thread::park();
++                    }
++                }
++            }))
++        });
++        publish(&root, "new", &expected);
++        panic!("indexed hook not reached");
++    }
++    struct ChildGuard(Child);
++    impl Drop for ChildGuard {
++        fn drop(&mut self) {
++            if self.0.try_wait().ok().flatten().is_none() {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++    }
++    let root = Fixture::new();
++    let old = ancestry_archive::publish(
++        &root.0,
++        "old",
++        owner(),
++        &expected,
++        (1..=9).map(|s| (s, meta(s))).collect(),
++        end(),
++        || false,
++    )
++    .unwrap();
++    let (_, manifest) = expected_bytes(&expected);
++    let independent_pin = digest(&manifest);
++    let child = Command::new(std::env::current_exe().unwrap())
++        .arg(test_name)
++        .arg("--exact")
++        .arg("--nocapture")
++        .arg("--test-threads=1")
++        .env(CHILD, label)
++        .env(ROOT, &root.0)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++        .unwrap();
++    let mut child = ChildGuard(child);
++    let deadline = Instant::now() + Duration::from_secs(15);
++    while !root.0.join("publication-point").exists() {
++        assert!(child.0.try_wait().unwrap().is_none());
++        assert!(Instant::now() < deadline);
++        thread::sleep(Duration::from_millis(5));
++    }
++    child.0.kill().unwrap();
++    assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGKILL));
++    ancestry_archive::load(
++        &root.0,
++        "old",
++        owner(),
++        old.manifest_sha256,
++        &expected,
++        end(),
++        || false,
++    )
++    .unwrap();
++    let loaded = ancestry_archive::load(
++        &root.0,
++        "new",
++        owner(),
++        independent_pin,
++        &expected,
++        end(),
++        || false,
++    );
++    match point {
++        ancestry_archive::PublicationPoint::BeforeRename => {
++            assert!(loaded.is_err());
++            assert!(!root.0.join("new").exists());
++        }
++        ancestry_archive::PublicationPoint::AfterCommit => {
++            let loaded = loaded.unwrap();
++            let db = Fixture::new();
++            let store = Blockstore::open(&db.0).unwrap();
++            store.put_meta(9, &meta(9)).unwrap();
++            assert_eq!(
++                loaded.verify(&store, 9, end(), || false).unwrap().entries,
++                9
++            );
++            loaded
++                .check_original_root(&store, 1, expected.original.certified_bank_hash)
++                .unwrap();
++        }
++    }
++}
++
++#[test]
++fn indexed_sigkill_before_rename_never_publishes_partial_generation() {
++    kill_case(
++        ancestry_archive::PublicationPoint::BeforeRename,
++        "ancestry_archive::indexed::tests::indexed_sigkill_before_rename_never_publishes_partial_generation",
++    );
++}
++#[test]
++fn indexed_sigkill_after_commit_reloads_complete_generation_with_independent_pin() {
++    kill_case(
++        ancestry_archive::PublicationPoint::AfterCommit,
++        "ancestry_archive::indexed::tests::indexed_sigkill_after_commit_reloads_complete_generation_with_independent_pin",
++    );
++}
+diff --git a/zolana-fast-check/src/resume.rs b/zolana-fast-check/src/resume.rs
+--- a/zolana-fast-check/src/resume.rs
++++ b/zolana-fast-check/src/resume.rs
+@@ -165,7 +165,7 @@
+             == canonical.file_sha256,
+         "closed full canonical export bytes differ"
+     );
+-    let deadline = Instant::now() + Duration::from_secs(60);
++    let deadline = Instant::now() + Duration::from_secs(180);
+     let mut archives = Vec::new();
+     let mut seen = HashSet::new();
+     for peer in &policy.peers {
+@@ -1082,7 +1082,7 @@
+     );
+     let resume_sha =
+         solana_sha256_hasher::hash(&private_bytes(&root.join("resume.json"), 65536)?).to_bytes();
+-    let deadline = Instant::now() + Duration::from_secs(60);
++    let deadline = Instant::now() + Duration::from_secs(180);
+     let mut peers = Vec::new();
+     let archive_base = root.join("durable-ancestry");
+     owned_directory(&archive_base)?;
+@@ -1115,7 +1115,7 @@
+         let mut count = 0;
+         loop {
+             ensure!(
+-                Instant::now() < deadline && count < ancestry::prefix::MAX_RECORDS,
++                Instant::now() < deadline,
+                 "certified head search exceeded fixture budget"
+             );
+             if store.is_root(head) && store.get_optimistic_slot(head)?.is_some() {
+@@ -1138,7 +1138,6 @@
+             "prune cutoff not covered by full canonical export"
+         );
+         ancestry::verify_path(&store, current, node.root_slot, deadline, || false)?;
+-        let records = full_prefix(&store, head, node.root_slot, deadline)?;
+         let binding = ancestry_archive::ArchiveBinding {
+             domain: ancestry_archive::Domain {
+                 network: zolana_native_check::TEST_SLOT_NETWORK,
+@@ -1176,12 +1175,12 @@
+             .generation
+             .as_ref()
+             .context("archive generation missing")?;
+-        let published = ancestry_archive::publish(
++        let published = ancestry_archive::publish_indexed(
+             &archive_root,
+             generation,
+             uid(),
+             &binding,
+-            records,
++            &store,
+             deadline,
+             || false,
+         )?;
+@@ -1225,7 +1224,7 @@
+ 
+ fn purge_durable(root: &Path, expected_pin: [u8; 32], manifest: &Manifest) -> Result<Value> {
+     let loaded = load_durable(root, expected_pin, manifest)?;
+-    let deadline = Instant::now() + Duration::from_secs(60);
++    let deadline = Instant::now() + Duration::from_secs(180);
+     let mut stores = Vec::new();
+     // Preflight EVERY peer before the first purge. A partial failed mutation is
+     // left for forensic inspection; it is never automatically retried/reset.

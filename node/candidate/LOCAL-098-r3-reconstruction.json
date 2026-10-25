@@ -1,0 +1,77 @@
+{
+  "after": {
+    "ledger/src/blockstore.rs": {
+      "bytes": 265202,
+      "sha256": "4eb6d456441d1b649f0158dc4289a9954705682d1617efdac0174c93ca8c49e4"
+    },
+    "ledger/src/blockstore/blockstore_purge.rs": {
+      "bytes": 51926,
+      "sha256": "992662b0432454306a24221630c8a54889b6ed327273558f23d8d0309d386e2e"
+    },
+    "ledger/src/blockstore_db.rs": {
+      "bytes": 56014,
+      "sha256": "4bca81392ceef81e2f4ddbc0a02fb85c621cbe7d7dcf2f4debbb3f7fc2b2553c"
+    },
+    "zolana-fast-check/src/copy_retention_098.rs": {
+      "bytes": 40179,
+      "sha256": "3d14db5e27b5c69abdd36319bf28837d4bda8793e01382c51bbbdb1e4e445f29"
+    },
+    "zolana-fast-check/src/copy_runtime.rs": {
+      "bytes": 39167,
+      "sha256": "de7c42584f6edad0cc822b75d75bb62ff5bd3ad145f198a22b81b9160cf11761"
+    },
+    "zolana-fast-check/src/durable_copy_guard.rs": {
+      "bytes": 54599,
+      "sha256": "88af33a9cca8325f9186fd12002a321f25d77e2b628d6ec566dca10b5c41eabe"
+    },
+    "zolana-fast-check/src/main.rs": {
+      "bytes": 52390,
+      "sha256": "c44e1267f50ad0fe9d22efb89b013634bef999fdc41efc7f663ff24557ea973b"
+    },
+    "zolana-fast-check/src/offline_metadata.rs": {
+      "bytes": 28326,
+      "sha256": "fdb3c362dcffe7a256315f0f16d323949dc34426485f9ca021232e9ae8a27fb9"
+    },
+    "zolana-fast-check/src/offline_overlay_canary.rs": {
+      "bytes": 9903,
+      "sha256": "e46720cd5fab2bfa3d668f6d5e4b4c64543a84b2c6e3d093390c5aeca233554c"
+    },
+    "zolana-fast-check/src/offline_ssd.rs": {
+      "bytes": 25839,
+      "sha256": "e81d21d83cde9bec2037ee6a3f29f7c9f996d7b3cd11be77f03cef659083fcad"
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "bytes": 62162,
+      "sha256": "89db30cab1271d485a85e9de352dfdcc55e25034eec942a327ccc3526a43d228"
+    }
+  },
+  "commands": [
+    {
+      "argv": [
+        "git",
+        "apply",
+        "--check",
+        "<absolute LOCAL098 patch>"
+      ],
+      "exit_code": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "argv": [
+        "git",
+        "apply",
+        "<absolute LOCAL098 patch>"
+      ],
+      "exit_code": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "format": "zolana098-eleven-leaf-source-reconstruction-v1",
+  "native_preparation_sha256": "f00348398455c6b782f56dff3802ff742478db11c26561669a903fd2adf45bdc",
+  "native_test_build_install_or_host_actions": 0,
+  "patch_sha256": "68a3d48fc6f5c81509dee96eb300bf1a9435ea61dede683480f18ae86364cc02",
+  "qualification": "Only the five-baseline/six-new-file code delta is reconstructed, not the full workspace or a runtime installation.",
+  "status": "passed"
+}

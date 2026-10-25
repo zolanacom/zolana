@@ -1,0 +1,26 @@
+# LOCAL-097: fresh SSD verification and isolated unpruned recovery
+
+This is a frozen **source-only seven-leaf cumulative delta against the exact LOCAL-095 compiled after-state**. It includes the LOCAL-096 metadata exporter. Apply it to LOCAL-095, **not after the separate LOCAL-096 patch**. The older 095/096 artifacts remain unchanged. The existing candidate preparer is unchanged and does not apply 097 automatically. No installation or activation is performed by publishing this artifact.
+
+`agave-4.3.2-LOCAL-097.patch` SHA256: `9ccd65e5d1d34b0fe7ccd4213b5d2f13e4725463bbac0588c53a78d3190cd6ce`.
+[LOCAL-097-source.json](LOCAL-097-source.json) pins the three exact before files, four absent modules, all seven after files, full before/compiled inventories, preparation and actual receipts. A disposable seven-leaf reconstruction passed `git apply --check`, applied this patch and matched every after hash. Full workspace baseline verification remains mandatory.
+
+The main dispatch adds four fixed diagnostic modules. The isolated-copy provenance guard runs **first, before prepare_root can open process.lock or append events**. The metadata exporter is byte-identical to 096. The SSD utility verifies the three independently pinned ext4 V2 metadata exports with unchanged 095 full current-root/original-root/domain checks; its separate crash flag holds only after peer 0 has fully loaded and verified. The disposable canary uses a fixed canary-r2 path and never opens the original pilot.
+
+Two existing ledger source leaves add an explicit **dev-context-only, actual-Primary-only** flush API for the canary. It sets `FlushOptions::set_wait(true)` for both written column families, SlotMeta and Root. Init and its genuine native test require at least two SSTs. This corrects the prior WAL-only canary without weakening its SST gate. Ordinary validator startup, retention and read paths do not invoke this flush. Cargo, lockfile, dependencies, 095 V2 archive format/bounds, resume and snapshot verification remain unchanged.
+
+The explicit `--isolated-pilot-copy-service --provenance-sha256 <sealed root pin>` mode accepts only the fixed root-built private view. It verifies mount/network namespace separation, overlay lower/upper/work bindings, copied authority-file ownership/inodes/link groups, source/domain pins and unpruned provenance before writable runtime setup. It uses ordinary service resume and keeps the original certified O44/current-root/signed-history checks and normal full snapshot bank/accounts loading. It does not weaken 093 fixture eligibility or enable retention/pruning. Root-owned preparation, private mount construction and key custody remain external prerequisites; this patch is not a general clone installer.
+
+## Actual Linux evidence
+
+The cumulative offline/locked build passed **104 tests: baseline 79 plus 25 focused tests, zero failed, ignored or filtered**. The anchored native summary is 11.10s; the bounded command measured 12.001s. Result SHA256: `fcc935670d353c9f1c16846708678f85984bca3b08f1c44b1789e907283fed07`. Runtime SHA256: `8af761c22aa2176030aad0294bd11aede5d75650783b82312ef6e950ab74dc99` (93,683,376 bytes, separate root-owned mode 0555 seal). The complete warm scratch source was restored to baseline manifest `21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d`; 095/096/097 r1 sealed binaries were preserved.
+
+Three separate actual acceptance receipts establish bounded scopes:
+
+- **Fresh SSD native loading:** the loader was SIGKILLed only after peer 0 completed full SSD load/path checks. A new process then verified all three fixed ext4 exports and 521,846-entry current-to-original paths. SSD source fingerprints stayed exact; no keys or validators were opened. Receipt `5f00d7e6030ba5abafc1c13c6157c5a3fcb25f86371116b335c6eb1c98c87130`. This ran with 097 r1 runtime; its offline_ssd source and inherited 095 archive code are byte-identical here.
+- **Genuine SST canary:** two actual lower SSTs, two native SIGKILLs, mutation/Exact-purge restart inspection in the same COW view, unchanged lower files and no original-pilot access. Receipt `9ef98c6f68eacf8ff9ae55cbcc5103b664797abc649ad9a1074e5aca75109dac`. The failed WAL-only r1 evidence remains preserved.
+- **Large unpruned pilot view:** two ordinary full-snapshot resumes around one actual native SIGKILL, all three peers recovering current root 522202, immutable O44 and 521,846-entry ancestry with exact native-state digest. Receipt `b529361c83855213e5e0d2cbbe053aa29cb1638b4d922157541502c81a6e9ce2`. Original ledger writes, pruning and financial operations were all zero.
+
+The last test used the **same preserved mutable RAM COW view**, including private shared memory, over original read-only lower Blockstores. It is dependent on those preserved lower files. It proves process-crash recovery, not host reboot/power loss, an independent durable clone, metadata-only validator startup or pruned large-pilot recovery. The small canary purge is not an original-pilot pruning gate.
+
+The unchanged finite V2 limits remain 1,048,576 records, 8 GiB decoded metadata, 512 MiB stored metadata plus framing and 48 MiB index per peer. They are a bounded scale gate, not unbounded multi-year storage. There is no new wallet/payment/WAN speed, public-testnet launch, installed-gateway or competitor claim.

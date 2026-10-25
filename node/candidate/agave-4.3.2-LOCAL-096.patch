@@ -1,0 +1,759 @@
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -11,6 +11,7 @@
+ mod build_info;
+ mod offline_probe;
+ mod offline_canonical;
++mod offline_metadata;
+ mod restart_snapshots;
+ mod resume;
+ mod service;
+@@ -1146,6 +1147,9 @@
+ }
+ 
+ fn main() -> Result<()> {
++    if offline_metadata::maybe_run()? {
++        return Ok(());
++    }
+     if offline_canonical::maybe_run()? {
+         return Ok(());
+     }
+diff --git a/zolana-fast-check/src/offline_metadata.rs b/zolana-fast-check/src/offline_metadata.rs
+new file mode 100644
+--- /dev/null
++++ b/zolana-fast-check/src/offline_metadata.rs
+@@ -0,0 +1,733 @@
++//! Fixed paused-pilot FULL SlotMeta preparation into a fresh RAM namespace.
++//! No validator, replay, account, key, signed-history or retention-policy API.
++//! Stopped actors, key inaccessibility and read-only source mounts are external gates.
++use {
++    crate::{ancestry, ancestry_archive},
++    anyhow::{Context, Result, ensure},
++    serde_json::{Value, json},
++    solana_genesis_config::GenesisConfig,
++    solana_ledger::{
++        blockstore::Blockstore,
++        blockstore_options::{AccessType, BlockstoreOptions},
++    },
++    solana_pubkey::Pubkey,
++    solana_transaction_status::ConfirmedBlock,
++    std::{
++        fs::{self, DirBuilder, File, OpenOptions},
++        io::{Read, Write},
++        os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
++        path::Path,
++        time::{Duration, Instant},
++    },
++};
++
++const FLAG: &str = "--offline-pilot-metadata-export";
++const ROOT: &str = "/var/lib/zolana-vat-085-r1/network";
++const OUTPUT: &str = "/dev/shm/zolana-pilot-metadata-096-export-r1/data";
++const OWNER: u32 = 995;
++const GENESIS: &str = "Ehh8b8thLqA1jqUsskkfrmgRRxPuFsUETb7N4pjebv2p";
++const RESUME_SHA: &str = "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a";
++const ORIGINAL_SLOT: u64 = 44;
++const ORIGINAL_BANK: &str = "4KPfPytMfQtVoHrT3buic6vACAvww5DQbhZyFLvnW1JV";
++const CANONICAL_SLOT: u64 = 522_202;
++const CANONICAL_HEIGHT: u64 = 521_886;
++const CANONICAL_BLOCKHASH: &str = "A3nGXWqPUYcXtofE77sV7Pwuvgj7y7ArAvwnWkXy7Kjk";
++const CANONICAL_SQLITE_SHA: &str =
++    "46c7a8609a75cfede99c8ddd0a6ec08bb661c9701f84384dbeab853ad641b212";
++const CANONICAL_RECEIPT_SHA: &str =
++    "d29631aa5eedd0ecde2605da7146b73a816ba0969d66427110ec152f17da4262";
++const GENERATION: &str = "pilot096-r1";
++const SNAPSHOT_SLOTS: [u64; 2] = [520_508, 521_532];
++const SNAPSHOT_NAMES: [&str; 2] = [
++    "snapshot-520508-CZu7jPfXYrwpFzztzWg8vR3jAtUYHy5GU8x6Y5PqHgQ8.tar.zst",
++    "snapshot-521532-AFZP8sCmsTr9TDh1MBgs9kBNciqayAC4uB5USTroNum5.tar.zst",
++];
++const LEDGERS: [&str; 3] = [
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-349-CkuahbEd65BRUw4LqCC8vCF2KwAaTKHLm6v2hcCxM711",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-HjbHskvn6Tos8quAv6VjvCwxFDykuBF7KiPYvmmnbaWU",
++    "ledgers/ledger/local-cluster/src/local_cluster.rs-747-A52FF9Tk89Fx9E2NYqvtGBr7SE9gVMPWgWLzjf6i5WxD",
++];
++const IDENTITIES: [&str; 3] = [
++    "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
++    "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
++    "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
++];
++const VOTERS: [&str; 3] = [
++    "7WHFCYkHZZ8L9FoKteoM8yRKJsFJSU3bMrVm1xCQWAYn",
++    "Fx4LYYr8xmnz8d7N2L4D5eJKsAyb8jAmNsBtkuPGxWFX",
++    "GEmo5tnbeEHXo7fqoWQSEzimS2Udb8dRR7y9xVu5evju",
++];
++const SNAPSHOT_BYTES: [[u64; 2]; 3] = [[203_393, 203_028], [202_870, 202_890], [202_932, 202_540]];
++const SNAPSHOT_SHA: [[&str; 2]; 3] = [
++    [
++        "a3f63b91d4cd619059bc5b95d33f9a77f7dd2c12fdd21627dfd2dab5524f431b",
++        "7c29339d22ebd66f6b1a59089405f85a22175c5304971f9e801caee31b46d719",
++    ],
++    [
++        "dac1f2fe402f8a6085d93c58a2d4deabbb6385cd5b670da0629d1112ebc84b30",
++        "82dae0f70740be3d37aed3260d503477d508a9152bb8ca0bfdf528c574dee1b9",
++    ],
++    [
++        "1edb2fc7d30190575693ee2ed7c7481c25cbc561568e3d12758769a015ff2990",
++        "512ac99b322778cdd0dddcf013c52679b21a86c1c0c938c112bee3ca1dd7884d",
++    ],
++];
++const LIFETIME: Duration = Duration::from_secs(600);
++
++fn hex(bytes: &[u8; 32]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn bytes32(value: &str) -> Result<[u8; 32]> {
++    Ok(value.parse::<Pubkey>()?.to_bytes())
++}
++
++fn deadline(end: Instant) -> Result<()> {
++    ensure!(
++        Instant::now() < end,
++        "fixed metadata export deadline exceeded"
++    );
++    Ok(())
++}
++
++fn selected(args: &[String]) -> Result<bool> {
++    let present = args.iter().any(|arg| arg == FLAG);
++    if present {
++        ensure!(args.len() == 1, "metadata export takes only its fixed flag");
++    }
++    Ok(present)
++}
++
++fn directory(path: &Path, owner: u32, private: bool) -> Result<()> {
++    let meta = fs::symlink_metadata(path)?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_dir()
++            && !meta.file_type().is_symlink()
++            && meta.uid() == owner
++            && meta.mode() & (if private { 0o077 } else { 0o022 }) == 0,
++        "fixed canonical owned directory required"
++    );
++    Ok(())
++}
++
++// Bounded public files only. Record identity before and after reading; never
++// follow links or accept multiple links, devices, changing files or an overrun.
++fn private_bytes(path: &Path, owner: u32, maximum: u64) -> Result<Vec<u8>> {
++    let mut file = OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
++        .open(path)?;
++    let meta = file.metadata()?;
++    ensure!(
++        path.canonicalize()? == path
++            && meta.is_file()
++            && meta.uid() == owner
++            && meta.nlink() == 1
++            && meta.mode() & 0o077 == 0
++            && meta.len() > 0
++            && meta.len() <= maximum,
++        "fixed bounded single-link private public file required"
++    );
++    let mut raw = Vec::new();
++    Read::by_ref(&mut file)
++        .take(maximum + 1)
++        .read_to_end(&mut raw)?;
++    let after = file.metadata()?;
++    ensure!(
++        raw.len() as u64 == meta.len()
++            && (
++                meta.dev(),
++                meta.ino(),
++                meta.len(),
++                meta.mode(),
++                meta.uid(),
++                meta.nlink(),
++                meta.mtime(),
++                meta.mtime_nsec(),
++                meta.ctime(),
++                meta.ctime_nsec()
++            ) == (
++                after.dev(),
++                after.ino(),
++                after.len(),
++                after.mode(),
++                after.uid(),
++                after.nlink(),
++                after.mtime(),
++                after.mtime_nsec(),
++                after.ctime(),
++                after.ctime_nsec()
++            ),
++        "bounded public input changed during read"
++    );
++    Ok(raw)
++}
++
++fn validate_public_resume(value: &Value) -> Result<()> {
++    ensure!(
++        value["genesis_hash"] == GENESIS,
++        "original public genesis differs"
++    );
++    let peers = value["nodes"]
++        .as_array()
++        .context("public peer array missing")?;
++    ensure!(peers.len() == 3, "exact original three peers required");
++    for (i, peer) in peers.iter().enumerate() {
++        ensure!(
++            peer["identity"] == IDENTITIES[i]
++                && peer["voter"] == VOTERS[i]
++                && peer["ledger"] == LEDGERS[i]
++                && peer["root_slot"].as_u64() == Some(ORIGINAL_SLOT)
++                && peer["root_bank_hash"] == ORIGINAL_BANK,
++            "original public identity/voter/ledger/checkpoint differs"
++        );
++    }
++    Ok(())
++}
++
++fn public_resume() -> Result<[u8; 32]> {
++    let raw = private_bytes(&Path::new(ROOT).join("resume.json"), OWNER, 65_536)?;
++    ensure!(
++        hex(&solana_sha256_hasher::hash(&raw).to_bytes()) == RESUME_SHA,
++        "original complete public resume SHA differs"
++    );
++    // Do not load a Manifest, Keypair, signed vote history or any filename
++    // stored in the public JSON. Only fixed public fields are inspected.
++    validate_public_resume(&serde_json::from_slice(&raw)?)?;
++    Ok(solana_sha256_hasher::hash(&raw).to_bytes())
++}
++
++fn fixed_snapshot_inventory(names: &[String], incrementals: usize) -> Result<()> {
++    let mut names = names.to_vec();
++    names.sort();
++    ensure!(
++        names == SNAPSHOT_NAMES.map(str::to_owned) && incrementals == 0,
++        "exact two inventoried full snapshots and no incremental input required"
++    );
++    Ok(())
++}
++
++fn snapshot_pins(ledger: &Path, peer: usize) -> Result<Value> {
++    let snapshots = ledger.join("native-snapshots");
++    let full = snapshots.join("full");
++    let incremental = snapshots.join("incremental");
++    for path in [&snapshots, &full, &incremental] {
++        directory(path, OWNER, false)?;
++    }
++    let names: Vec<String> = fs::read_dir(&full)?
++        .take(3)
++        .map(|entry| {
++            Ok(entry?
++                .file_name()
++                .into_string()
++                .map_err(|_| anyhow::anyhow!("non-UTF8 snapshot filename"))?)
++        })
++        .collect::<Result<_>>()?;
++    fixed_snapshot_inventory(
++        &names,
++        usize::from(fs::read_dir(&incremental)?.next().transpose()?.is_some()),
++    )?;
++    let mut pins = Vec::new();
++    for index in 0..2 {
++        let raw = private_bytes(&full.join(SNAPSHOT_NAMES[index]), OWNER, 1024 * 1024)?;
++        ensure!(
++            raw.len() as u64 == SNAPSHOT_BYTES[peer][index]
++                && hex(&solana_sha256_hasher::hash(&raw).to_bytes()) == SNAPSHOT_SHA[peer][index],
++            "actual snapshot bytes differ from fixed census pin"
++        );
++        pins.push(
++            json!({"filename":SNAPSHOT_NAMES[index],"slot":SNAPSHOT_SLOTS[index],
++            "bytes":raw.len(),"sha256":SNAPSHOT_SHA[peer][index]}),
++        );
++    }
++    Ok(json!(pins))
++}
++
++fn certified_head(
++    mut slot: u64,
++    original: u64,
++    end: Instant,
++    mut parent: impl FnMut(u64) -> Result<Option<u64>>,
++    mut certified: impl FnMut(u64) -> Result<bool>,
++) -> Result<u64> {
++    let mut checked = 0usize;
++    loop {
++        deadline(end)?;
++        ensure!(
++            slot > original,
++            "no certified head strictly above immutable checkpoint"
++        );
++        ensure!(
++            checked < ancestry_archive::MAX_INDEXED_RECORDS,
++            "head search exceeds indexed bound"
++        );
++        checked += 1;
++        if certified(slot)? {
++            deadline(end)?;
++            return Ok(slot);
++        }
++        let next = parent(slot)?.context("snapshot parent ancestry is incomplete")?;
++        ensure!(
++            original < next && next < slot,
++            "snapshot parent chain is not strictly above original"
++        );
++        slot = next;
++    }
++}
++
++fn manifest_evidence(
++    raw: &[u8],
++    pin: [u8; 32],
++    binding: &ancestry_archive::ArchiveBinding,
++) -> Result<Value> {
++    ensure!(
++        raw.len() <= 65_536 && solana_sha256_hasher::hash(raw).to_bytes() == pin,
++        "published complete manifest differs from independent pin"
++    );
++    let value: Value = serde_json::from_slice(raw)?;
++    ensure!(
++        value["format"] == "zolana095-native-ancestry-indexed-zstd-v2"
++            && value["binding"] == serde_json::to_value(binding)?
++            && value["codec"] == "zstd-one-frame-level-1"
++            && value["record_count"]
++                .as_u64()
++                .is_some_and(|n| n > 0 && n <= 1_048_576)
++            && value["encoded_metadata_bytes"]
++                .as_u64()
++                .is_some_and(|n| n > 0 && n <= 512 * 1024 * 1024)
++            && value["decoded_metadata_bytes"]
++                .as_u64()
++                .is_some_and(|n| n > 0 && n <= 8 * 1024 * 1024 * 1024),
++        "published full V2 evidence/bounds differ"
++    );
++    Ok(value)
++}
++
++fn new_directory(path: &Path) -> Result<()> {
++    DirBuilder::new().mode(0o700).create(path)?;
++    directory(path, OWNER, true)?;
++    File::open(path.parent().context("output parent missing")?)?.sync_all()?;
++    Ok(())
++}
++
++fn run(end: Instant) -> Result<()> {
++    ensure!(
++        unsafe { libc::geteuid() } == OWNER,
++        "fixed keyless UID995 required"
++    );
++    let root = Path::new(ROOT);
++    let output = Path::new(OUTPUT);
++    directory(root, OWNER, false)?;
++    directory(output, OWNER, true)?;
++    ensure!(
++        fs::read_dir(output)?.next().is_none(),
++        "fresh empty fixed RAM output required; never adopt or overwrite"
++    );
++    let resume_pin = public_resume()?;
++    let mut reports = Vec::new();
++    let mut common_canonical_bank = None;
++    for peer in 0..3 {
++        let started = Instant::now();
++        let peer_end = end.min(started + Duration::from_secs(180));
++        deadline(peer_end)?;
++        let ledger = root.join(LEDGERS[peer]);
++        directory(&ledger, OWNER, false)?;
++        directory(&ledger.join("rocksdb"), OWNER, false)?;
++        let snapshots = snapshot_pins(&ledger, peer)?;
++        ensure!(
++            GenesisConfig::load(&ledger)?.hash().to_string() == GENESIS,
++            "fixed original genesis differs"
++        );
++        let store = Blockstore::open_with_options(
++            &ledger,
++            BlockstoreOptions {
++                access_type: AccessType::ReadOnly,
++                ..BlockstoreOptions::default()
++            },
++        )?;
++        ensure!(
++            !store.is_primary_access(),
++            "true read-only original Blockstore required"
++        );
++        let current = store.max_root();
++        ensure!(
++            current >= CANONICAL_SLOT && SNAPSHOT_SLOTS[1] <= current,
++            "current root does not cover pinned canonical export and snapshots"
++        );
++        let current_evidence = ancestry_archive::capture_root_evidence(&store, current)?;
++        let original = ancestry_archive::capture_root_evidence(&store, ORIGINAL_SLOT)?;
++        ensure!(
++            original.certified_bank_hash == bytes32(ORIGINAL_BANK)?,
++            "immutable original BANK differs"
++        );
++        let canonical = ancestry_archive::capture_root_evidence(&store, CANONICAL_SLOT)?;
++        if let Some(bank) = common_canonical_bank {
++            ensure!(
++                bank == canonical.certified_bank_hash,
++                "all-three canonical E BANK hashes differ"
++            );
++        } else {
++            common_canonical_bank = Some(canonical.certified_bank_hash);
++        }
++        let block: ConfirmedBlock = store.get_complete_block(CANONICAL_SLOT, true)?.into();
++        ensure!(
++            block.blockhash == CANONICAL_BLOCKHASH && block.block_height == Some(CANONICAL_HEIGHT),
++            "fixed complete canonical E blockhash/height differs"
++        );
++        for snapshot_slot in SNAPSHOT_SLOTS {
++            ancestry_archive::capture_root_evidence(&store, snapshot_slot)?;
++            ancestry::verify_path(&store, current, snapshot_slot, peer_end, || false)?;
++        }
++        let snapshot_meta = store
++            .meta(SNAPSHOT_SLOTS[0])?
++            .context("older snapshot full SlotMeta missing")?;
++        ensure!(
++            snapshot_meta.slot == SNAPSHOT_SLOTS[0],
++            "older snapshot SlotMeta identifies another slot"
++        );
++        let parent = snapshot_meta
++            .parent_slot
++            .context("older snapshot canonical parent missing")?;
++        ensure!(
++            ORIGINAL_SLOT < parent && parent < SNAPSHOT_SLOTS[0],
++            "real older snapshot parent bounds differ"
++        );
++        let head = certified_head(
++            parent,
++            ORIGINAL_SLOT,
++            peer_end,
++            |slot| Ok(store.meta(slot)?.map(|meta| meta.parent_slot).flatten()),
++            |slot| Ok(store.is_root(slot) && store.get_optimistic_slot(slot)?.is_some()),
++        )?;
++        let cutoff = head.checked_sub(1).context("head cannot be zero")?;
++        ensure!(
++            ORIGINAL_SLOT <= cutoff && cutoff < CANONICAL_SLOT,
++            "cutoff outside complete canonical E"
++        );
++        let full_path = ancestry::verify_path(&store, current, ORIGINAL_SLOT, peer_end, || false)?;
++        let binding = ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: zolana_native_check::TEST_SLOT_NETWORK,
++                genesis_hash: bytes32(GENESIS)?,
++                identity: bytes32(IDENTITIES[peer])?,
++                voter: bytes32(VOTERS[peer])?,
++                resume_sha256: resume_pin,
++                ledger_relative_path: LEDGERS[peer].to_owned(),
++            },
++            original,
++            head: ancestry_archive::capture_root_evidence(&store, head)?,
++            prune_through: cutoff,
++            snapshot_parent_slot: parent,
++            snapshot_slot: SNAPSHOT_SLOTS[0],
++            captured_current_root_slot: current,
++            canonical_export_through: CANONICAL_SLOT,
++        };
++        let peer_output = output.join(IDENTITIES[peer]);
++        new_directory(&peer_output)?;
++        let published = ancestry_archive::publish_indexed(
++            &peer_output,
++            GENERATION,
++            OWNER,
++            &binding,
++            &store,
++            peer_end,
++            || false,
++        )?;
++        let loaded = ancestry_archive::load(
++            &peer_output,
++            GENERATION,
++            OWNER,
++            published.manifest_sha256,
++            &binding,
++            peer_end,
++            || false,
++        )?;
++        loaded.check_original_root(&store, ORIGINAL_SLOT, bytes32(ORIGINAL_BANK)?)?;
++        let merged_path = loaded.verify(&store, current, peer_end, || false)?;
++        ensure!(
++            full_path.entries == merged_path.entries,
++            "full/loaded original-root paths differ"
++        );
++        let raw_manifest = private_bytes(
++            &peer_output.join(GENERATION).join("manifest.json"),
++            OWNER,
++            65_536,
++        )?;
++        let manifest = manifest_evidence(&raw_manifest, published.manifest_sha256, &binding)?;
++        ensure!(
++            snapshot_pins(&ledger, peer)? == snapshots,
++            "source snapshots changed during export"
++        );
++        ensure!(
++            store.max_root() == current
++                && ancestry_archive::capture_root_evidence(&store, current)? == current_evidence,
++            "source current root changed during export"
++        );
++        public_resume()?;
++        deadline(peer_end)?;
++        let report = json!({"identity":IDENTITIES[peer],"ledger":LEDGERS[peer],
++            "generation":GENERATION,"manifest_sha256":hex(&published.manifest_sha256),
++            "manifest":manifest,"binding":binding,"current_root":current_evidence,
++            "canonical_E":canonical,"snapshots":snapshots,
++            "highest_stored_slot":store.highest_slot()?,"signed_frontier":null,
++            "full_current_to_original_entries":full_path.entries,
++            "loaded_current_to_original_entries":merged_path.entries,
++            "ordinary_full_snapshot_verification_performed":false,
++            "peer_elapsed_ms":started.elapsed().as_millis()});
++        println!(
++            "{}",
++            json!({"event":"pilot_metadata_peer_prepared","peer":report})
++        );
++        reports.push(report);
++        // Drop the per-peer read-only DB and bounded V2 index before opening the next peer.
++    }
++    public_resume()?;
++    deadline(end)?;
++    let report = json!({"format":"zolana096-original-pilot-metadata-preparation-v1",
++        "status":"prepared-and-reloaded","preparation_only":true,"source_root":ROOT,
++        "source_access":"ReadOnly","uid":OWNER,"output_root":OUTPUT,
++        "output_is_volatile_RAM":true,"durability_claim":false,
++        "original_resume_sha256":RESUME_SHA,"canonical_export_E":CANONICAL_SLOT,
++        "canonical_export_blockhash":CANONICAL_BLOCKHASH,"canonical_export_height":CANONICAL_HEIGHT,
++        "canonical_export_external_sqlite_sha256":CANONICAL_SQLITE_SHA,
++        "canonical_export_external_receipt_sha256":CANONICAL_RECEIPT_SHA,
++        "canonical_sqlite_file_opened":false,"retention_policy_written":false,
++        "pruning_performed":false,"validators_started":false,"keys_or_signed_history_opened":false,
++        "snapshot_binding_uses_older_slot":SNAPSHOT_SLOTS[0],"peers":reports});
++    let raw = serde_json::to_vec(&report)?;
++    ensure!(
++        raw.len() <= 256 * 1024,
++        "public export receipt exceeds bound"
++    );
++    let mut file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW)
++        .open(output.join("export.json"))?;
++    file.write_all(&raw)?;
++    file.sync_all()?;
++    File::open(output)?.sync_all()?;
++    println!(
++        "{}",
++        json!({"event":"pilot_metadata_export_prepared","report":report,
++        "export_json_sha256":hex(&solana_sha256_hasher::hash(&raw).to_bytes())})
++    );
++    Ok(())
++}
++
++pub(super) fn maybe_run() -> Result<bool> {
++    if !selected(&std::env::args().skip(1).collect::<Vec<_>>())? {
++        return Ok(false);
++    }
++    run(Instant::now() + LIFETIME)?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::{
++        os::unix::fs::symlink,
++        sync::atomic::{AtomicU64, Ordering},
++    };
++    static NEXT: AtomicU64 = AtomicU64::new(0);
++    fn resume() -> Value {
++        json!({"genesis_hash":GENESIS,"nodes":(0..3).map(|i|json!({
++            "identity":IDENTITIES[i],"voter":VOTERS[i],"ledger":LEDGERS[i],
++            "root_slot":ORIGINAL_SLOT,"root_bank_hash":ORIGINAL_BANK})).collect::<Vec<_>>()})
++    }
++    fn binding() -> ancestry_archive::ArchiveBinding {
++        let root = ancestry_archive::RootEvidence {
++            slot: ORIGINAL_SLOT,
++            is_root: true,
++            certified_bank_hash: [3; 32],
++            certified_timestamp: 1,
++            replay_bank_hash: None,
++        };
++        ancestry_archive::ArchiveBinding {
++            domain: ancestry_archive::Domain {
++                network: [67; 32],
++                genesis_hash: bytes32(GENESIS).unwrap(),
++                identity: bytes32(IDENTITIES[0]).unwrap(),
++                voter: bytes32(VOTERS[0]).unwrap(),
++                resume_sha256: [4; 32],
++                ledger_relative_path: LEDGERS[0].into(),
++            },
++            original: root.clone(),
++            head: ancestry_archive::RootEvidence {
++                slot: 520_507,
++                ..root
++            },
++            prune_through: 520_506,
++            snapshot_parent_slot: 520_507,
++            snapshot_slot: 520_508,
++            captured_current_root_slot: 522_202,
++            canonical_export_through: 522_202,
++        }
++    }
++    #[test]
++    fn fixed_export_flag_cannot_mix_with_live_or_path_options() {
++        assert!(selected(&[FLAG.into()]).unwrap());
++        assert!(!selected(&["--service".into()]).unwrap());
++        for arg in ["--service", "--root", "--resume", FLAG, "/tmp/alternate"] {
++            assert!(selected(&[FLAG.into(), arg.into()]).is_err());
++        }
++    }
++    #[test]
++    fn public_resume_rejects_changed_network_peer_voter_or_original_root() {
++        validate_public_resume(&resume()).unwrap();
++        for field in ["identity", "voter", "ledger", "root_slot", "root_bank_hash"] {
++            let mut value = resume();
++            value["nodes"][1][field] = json!("changed");
++            assert!(validate_public_resume(&value).is_err());
++        }
++        let mut value = resume();
++        value["genesis_hash"] = json!("changed");
++        assert!(validate_public_resume(&value).is_err());
++        let mut value = resume();
++        value["nodes"].as_array_mut().unwrap().pop();
++        assert!(validate_public_resume(&value).is_err());
++    }
++    #[test]
++    fn snapshot_inventory_requires_exact_two_fixed_pins_and_no_incremental_input() {
++        let names = SNAPSHOT_NAMES.map(str::to_owned);
++        fixed_snapshot_inventory(&names, 0).unwrap();
++        assert!(fixed_snapshot_inventory(&names, 1).is_err());
++        assert!(fixed_snapshot_inventory(&names[..1], 0).is_err());
++        let mut wrong = names.to_vec();
++        wrong[0].push_str(".other");
++        assert!(fixed_snapshot_inventory(&wrong, 0).is_err());
++        let mut extra = names.to_vec();
++        extra.push("snapshot-600000-substitute.tar.zst".into());
++        assert!(fixed_snapshot_inventory(&extra, 0).is_err());
++        for peer in 0..3 {
++            for pin in SNAPSHOT_SHA[peer] {
++                assert_eq!(pin.len(), 64);
++                assert!(
++                    pin.bytes()
++                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++                );
++            }
++        }
++    }
++    #[test]
++    fn bounded_private_reads_refuse_symlinks_hardlinks_and_oversize() {
++        let root = std::env::temp_dir().join(format!(
++            "zolana096-public-read-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ));
++        DirBuilder::new().mode(0o700).create(&root).unwrap();
++        let path = root.join("public");
++        let mut file = OpenOptions::new()
++            .create_new(true)
++            .write(true)
++            .mode(0o600)
++            .open(&path)
++            .unwrap();
++        file.write_all(b"public-only").unwrap();
++        drop(file);
++        let owner = unsafe { libc::geteuid() };
++        assert_eq!(private_bytes(&path, owner, 20).unwrap(), b"public-only");
++        assert!(private_bytes(&path, owner, 4).is_err());
++        let linked = root.join("symlink");
++        symlink(&path, &linked).unwrap();
++        assert!(private_bytes(&linked, owner, 20).is_err());
++        let hard = root.join("hardlink");
++        fs::hard_link(&path, &hard).unwrap();
++        assert!(private_bytes(&path, owner, 20).is_err());
++        fs::remove_dir_all(root).unwrap();
++    }
++    #[test]
++    fn certified_head_walk_requires_strict_complete_parent_path() {
++        let end = Instant::now() + Duration::from_secs(1);
++        assert_eq!(
++            certified_head(100, 44, end, |s| Ok(Some(s - 1)), |s| Ok(s == 98)).unwrap(),
++            98
++        );
++        assert!(certified_head(100, 44, end, |_| Ok(None), |_| Ok(false)).is_err());
++        assert!(certified_head(100, 44, end, |s| Ok(Some(s)), |_| Ok(false)).is_err());
++        assert!(certified_head(100, 44, end, |s| Ok(Some(s + 1)), |_| Ok(false)).is_err());
++        assert!(
++            certified_head(
++                100,
++                44,
++                end,
++                |_| anyhow::bail!("source read failed"),
++                |_| Ok(false)
++            )
++            .is_err()
++        );
++    }
++    #[test]
++    fn certified_head_walk_obeys_deadline_and_original_boundary() {
++        assert!(
++            certified_head(100, 44, Instant::now(), |s| Ok(Some(s - 1)), |_| Ok(true)).is_err()
++        );
++        assert!(
++            certified_head(
++                44,
++                44,
++                Instant::now() + Duration::from_secs(1),
++                |_| Ok(None),
++                |_| Ok(true)
++            )
++            .is_err()
++        );
++        assert!(
++            certified_head(
++                45,
++                44,
++                Instant::now() + Duration::from_secs(1),
++                |_| Ok(Some(44)),
++                |_| Ok(false)
++            )
++            .is_err()
++        );
++    }
++    #[test]
++    fn published_manifest_requires_independent_sha_and_full_v2_binding() {
++        let binding = binding();
++        let value = json!({"format":"zolana095-native-ancestry-indexed-zstd-v2","binding":binding,
++            "codec":"zstd-one-frame-level-1","record_count":520000,
++            "encoded_metadata_bytes":30000000,"decoded_metadata_bytes":2000000000u64});
++        let raw = serde_json::to_vec(&value).unwrap();
++        let pin = solana_sha256_hasher::hash(&raw).to_bytes();
++        manifest_evidence(&raw, pin, &binding).unwrap();
++        assert!(manifest_evidence(&raw, [0; 32], &binding).is_err());
++        let mut changed = binding.clone();
++        changed.snapshot_slot = 521_532;
++        assert!(manifest_evidence(&raw, pin, &changed).is_err());
++        let mut value = value;
++        value["record_count"] = json!(1_048_577);
++        let raw = serde_json::to_vec(&value).unwrap();
++        let pin = solana_sha256_hasher::hash(&raw).to_bytes();
++        assert!(manifest_evidence(&raw, pin, &binding).is_err());
++    }
++    #[test]
++    fn metadata_export_domain_keeps_original_and_older_snapshot_bounds() {
++        let binding = binding();
++        assert_eq!(binding.original.slot, 44);
++        assert_eq!(binding.snapshot_slot, SNAPSHOT_SLOTS[0]);
++        assert!(
++            binding.original.slot <= binding.prune_through
++                && binding.prune_through < binding.head.slot
++                && binding.head.slot <= binding.snapshot_parent_slot
++                && binding.snapshot_parent_slot < binding.snapshot_slot
++                && binding.snapshot_slot < SNAPSHOT_SLOTS[1]
++                && SNAPSHOT_SLOTS[1] <= binding.captured_current_root_slot
++                && binding.prune_through < CANONICAL_SLOT
++        );
++        for identity in IDENTITIES {
++            bytes32(identity).unwrap();
++        }
++        for voter in VOTERS {
++            bytes32(voter).unwrap();
++        }
++        bytes32(GENESIS).unwrap();
++        bytes32(ORIGINAL_BANK).unwrap();
++        bytes32(CANONICAL_BLOCKHASH).unwrap();
++    }
++}

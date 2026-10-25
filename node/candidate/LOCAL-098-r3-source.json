@@ -1,0 +1,406 @@
+{
+  "CLI": {
+    "flag": "--durable-copy-098",
+    "modes": [
+      "baseline-service",
+      "validate",
+      "prune",
+      "prune-hold",
+      "resume-prune",
+      "service"
+    ],
+    "pins": "--provenance-sha256 mandatory; --policy-sha256 except baseline-service; --journal-sha256 only resume-prune/service; no path or reset options"
+  },
+  "actual098_evidence": {
+    "durable_partial_prune_SIGKILL_and_explicit_resume": {
+      "actual_outer_exit_code": 1,
+      "complete_journal_sha256": "0cb5eb0007e32686531b56d8e513e50bbab81ff32ed0e43a91ec218cd8e2ef19",
+      "local_reconciliation": {
+        "bytes": 3460,
+        "path": ".local/durable-pruning-098/ops-r2/acceptance/result.json",
+        "sha256": "6fa3122f1c867723b03b88a8ed0fa316cdbe7ba33bee2d1a610c736afb95d842"
+      },
+      "native_phases": 5,
+      "native_sigkills": 2,
+      "partial_journal_sha256": "63acf4354439d60a83a6beb466cf6eb082ad601720ac2bea58f9913ce370c25a",
+      "partial_prune_sigkills": 1,
+      "qualification": "Both actual sessions/native phases passed. Sequential mount namespace inode was recycled after destruction; exact frozen outer uniqueness assertion failed after session2. Local independent reconciliation preserves raw exit1, requires sequential unshare creation/host isolation/full cleanup and is paired with final independent census; no native rerun or evidence rewrite.",
+      "raw_execution": {
+        "bytes": 887605,
+        "path": ".local/durable-pruning-098/ops-r2/execution.json",
+        "sha256": "2723f417d0407755e1ebc34aaf12cacf836d2a3f3cf180cd1eae38321393b8f2"
+      },
+      "reconciliation_source": {
+        "bytes": 16839,
+        "path": ".local/durable-pruning-098/ops-r2/acceptance/local-validation-r1.py",
+        "sha256": "0d47bb9b39a59b12d0f1f6ad96eba750c8f81dfa94dd93cc03060519b75315f6"
+      },
+      "semantic_negative_checks": {
+        "bytes": 1279,
+        "path": ".local/durable-pruning-098/ops-r2/acceptance/validation-checks.json",
+        "sha256": "3644110e9b8575bcb3599044b842544bbba34cd0389d138ad1e6324ddc011e43"
+      },
+      "status": "passed-native-phases-with-preserved-outer-instrumentation-defect",
+      "validator_sigkills": 1
+    },
+    "final_preservation_and_closed_actor_check": {
+      "SSD_files_unchanged": 7,
+      "extra": {
+        "bytes": 8792,
+        "path": ".local/durable-pruning-098/final-extra-r4.json",
+        "sha256": "65f630f5509680a7fc14cfaee5ebadbe2024174715966f7af4c9158664e81f88"
+      },
+      "failed_begin_only_image_preserved": {
+        "bytes": 5511,
+        "path": ".local/durable-pruning-098/final-failed-archive.json",
+        "sha256": "e6a12d1e2585428380e4e52225cee41f8ea6d4284cdd29fa5da6f00ab3b035b5"
+      },
+      "global_allocator_unchanged": true,
+      "mac_validators_running": false,
+      "old_seal_measurement": {
+        "bytes": 625,
+        "path": ".local/durable-pruning-098/old-seal-check-r1.json",
+        "sha256": "a9c2a1155eb39ebb857161ed751c999c3480dfb56812e8dac8a5d5d10d04ae29"
+      },
+      "original_census": {
+        "bytes": 36781,
+        "path": ".local/durable-pruning-098/final-census.json",
+        "sha256": "59fdebd7bf22a7d4b6e25f8248748bc169744d7c143215ec6a5e8e1d08664cdb"
+      },
+      "original_metadata_entries": 5321,
+      "original_metadata_sha256": "72c1a1bafdd77f2b2e033dc0c163f702889204ae724aed46a3bc101c3bfa2bdd",
+      "protected_UIDs_active": [],
+      "status": "passed",
+      "units_stopped": 30
+    },
+    "full_close_unmount_remount_and_validator_restart": {
+      "backing": 219000000,
+      "closed_image_sha256": "9f3d9a3d8721c477f4aabfa860818bf90b6417244342ccf71a7d5b05319b5b1e",
+      "closure": {
+        "bytes": 6081,
+        "path": ".local/durable-pruning-098/closure-meta.json",
+        "sha256": "abd89b9f6a14c2a6619517bef89b44b921e1e1ef808e836583ef9776d822f619"
+      },
+      "current_root_slot": 522202,
+      "host_reboot_tested": false,
+      "note_count": 192,
+      "ordinary_pruned_snapshot_resumes": 2,
+      "original_root_slot": 44,
+      "permanent_markers": 192,
+      "pool_lamports": 398957760,
+      "power_loss_tested": false,
+      "prune_through": 520506,
+      "same_image_identity": {
+        "bytes": 2147483648,
+        "device": 2304,
+        "inode": 50615695
+      },
+      "selected_snapshot_slot": 521532,
+      "stable_state_sha256": "84c6dee1844ddc3762abddfa59de5393f6dabd79518a0ff720bdb35724586e93",
+      "status": "passed"
+    },
+    "native_build_and_124_tests": {
+      "collection": {
+        "bytes": 6336,
+        "path": ".local/durable-pruning-098/build-r3/collection.json",
+        "sha256": "7b9bf1f56300509558be0d0cfee3fe4d6bf424cf475bf7f4ac48bf406b204887"
+      },
+      "commands_seconds": {
+        "compile": 38.00507865397958,
+        "list": 1.0003579769982025,
+        "runner-compile": 6.001032336964272,
+        "runtime-build-info": 1.000374021998141,
+        "tests": 12.001187983958516
+      },
+      "compiled_source_manifest": {
+        "bytes": 255596,
+        "path": ".local/durable-pruning-098/build-r3/evidence/compiled-source-manifest.json",
+        "sha256": "2299b966d3b9d877d67b19673ade42a9fcde9592c427bf9bc2e4e11b47c042fe"
+      },
+      "full_source_restored_sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d",
+      "native_summary": "test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.14s",
+      "old_seals_preserved": true,
+      "postflight": {
+        "bytes": 755,
+        "path": ".local/durable-pruning-098/build-r3/evidence/postflight.json",
+        "sha256": "35c8782c388aff42ecd9be36d40b2f5fd04bb7e0e9f2eca1ae08b2f731c2f2d4"
+      },
+      "result": {
+        "bytes": 23823,
+        "path": ".local/durable-pruning-098/build-r3/evidence/result.json",
+        "sha256": "4d83e1e8b064b05c3cc48d87726cc28a00f055afc64fffdc3af4dee48fabc15f"
+      },
+      "runtime_binary_sha256": "9899f5a486f6c4eb5a7b3e1184aeeacc81ff8cfe8f270d943c2649e024f4e7b7",
+      "runtime_bytes": 94082776,
+      "separate_root0555_seal": "/dev/shm/zolana-durable-pruning-098-sealed-r3/zolana-fast-check",
+      "status": "passed"
+    }
+  },
+  "application": {
+    "actual_compiled_manifest": {
+      "bytes": 255596,
+      "path": ".local/durable-pruning-098/build-r3/evidence/compiled-source-manifest.json",
+      "sha256": "2299b966d3b9d877d67b19673ade42a9fcde9592c427bf9bc2e4e11b47c042fe"
+    },
+    "automatic_preparer_changed": false,
+    "baseline": "exact LOCAL095 compiled after-state; includes and replaces the separate096/097 slices when applied to this baseline",
+    "baseline_manifest": {
+      "bytes": 254750,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/compiled-source-manifest.json",
+      "sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d"
+    },
+    "baseline_runtime_sha256": "5c99ead8b97ebcb9427b8d5874ab3f966b31786b85b15d1fbe52e17cad20ab54",
+    "changed_or_added_files": 11,
+    "do_not_stack_after_LOCAL096_or_LOCAL097": true,
+    "do_not_stack_after_LOCAL098_r1": true,
+    "existing_modified": 5,
+    "expected_full_after_manifest_sha256": "2299b966d3b9d877d67b19673ade42a9fcde9592c427bf9bc2e4e11b47c042fe",
+    "expected_manifest_is_not_an_actual_compiled_receipt": false,
+    "new_initially_absent_modules": 6,
+    "patch": {
+      "bytes": 219192,
+      "path": "node/candidate/agave-4.3.2-LOCAL-098-r3.patch",
+      "sha256": "68a3d48fc6f5c81509dee96eb300bf1a9435ea61dede683480f18ae86364cc02"
+    },
+    "reconstruction_execution": "passed, source-only disposable git apply --check/apply",
+    "reconstruction_receipt": {
+      "bytes": 2874,
+      "path": "node/candidate/LOCAL-098-r3-reconstruction.json",
+      "sha256": "f60c4d5043846daba39232fc644f6d16c8fcc3480d56b1dd843cce748650dff4"
+    },
+    "reconstruction_script": {
+      "bytes": 3088,
+      "path": "node/candidate/LOCAL-098-r3-reconstruct.py",
+      "sha256": "039ef65e8848ef091bfec37813e5f4e1ec3ee92f5f51632e9bc24c05df23b2ac"
+    },
+    "source_only_no_installation": true
+  },
+  "build_preparation": {
+    "bytes": 2307,
+    "path": ".local/durable-pruning-098/build-r3/preparation.json",
+    "sha256": "da93f19cde91c093dd791dd04aa15af80c7d67f70e166c2813365e1764c1b22a"
+  },
+  "files": {
+    "ledger/src/blockstore.rs": {
+      "after": {
+        "bytes": 265202,
+        "sha256": "4eb6d456441d1b649f0158dc4289a9954705682d1617efdac0174c93ca8c49e4"
+      },
+      "before": {
+        "bytes": 264405,
+        "sha256": "cfa1f2cdb13c16fb41ff1757d2f1b543ca0ec6339831dc715d9f34ca469fe41e"
+      }
+    },
+    "ledger/src/blockstore/blockstore_purge.rs": {
+      "after": {
+        "bytes": 51926,
+        "sha256": "992662b0432454306a24221630c8a54889b6ed327273558f23d8d0309d386e2e"
+      },
+      "before": {
+        "bytes": 46902,
+        "sha256": "4d1906aa1762307d2321275fcb9f6f29a9940f5b8035f6f3b0b5942035243f1a"
+      }
+    },
+    "ledger/src/blockstore_db.rs": {
+      "after": {
+        "bytes": 56014,
+        "sha256": "4bca81392ceef81e2f4ddbc0a02fb85c621cbe7d7dcf2f4debbb3f7fc2b2553c"
+      },
+      "before": {
+        "bytes": 53199,
+        "sha256": "d3b083b5b0f5f0bf471ea5dc3bb89de1235a23f52dec234a24e9767208e911c7"
+      }
+    },
+    "zolana-fast-check/src/copy_retention_098.rs": {
+      "after": {
+        "bytes": 40179,
+        "sha256": "3d14db5e27b5c69abdd36319bf28837d4bda8793e01382c51bbbdb1e4e445f29"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/copy_runtime.rs": {
+      "after": {
+        "bytes": 39167,
+        "sha256": "de7c42584f6edad0cc822b75d75bb62ff5bd3ad145f198a22b81b9160cf11761"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/durable_copy_guard.rs": {
+      "after": {
+        "bytes": 54599,
+        "sha256": "88af33a9cca8325f9186fd12002a321f25d77e2b628d6ec566dca10b5c41eabe"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/main.rs": {
+      "after": {
+        "bytes": 52390,
+        "sha256": "c44e1267f50ad0fe9d22efb89b013634bef999fdc41efc7f663ff24557ea973b"
+      },
+      "before": {
+        "bytes": 51938,
+        "sha256": "6516a7881f86fb9b11cb91ec3b9c5ba02570941b040f054c111b3f606b82b81e"
+      }
+    },
+    "zolana-fast-check/src/offline_metadata.rs": {
+      "after": {
+        "bytes": 28326,
+        "sha256": "fdb3c362dcffe7a256315f0f16d323949dc34426485f9ca021232e9ae8a27fb9"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/offline_overlay_canary.rs": {
+      "after": {
+        "bytes": 9903,
+        "sha256": "e46720cd5fab2bfa3d668f6d5e4b4c64543a84b2c6e3d093390c5aeca233554c"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/offline_ssd.rs": {
+      "after": {
+        "bytes": 25839,
+        "sha256": "e81d21d83cde9bec2037ee6a3f29f7c9f996d7b3cd11be77f03cef659083fcad"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "after": {
+        "bytes": 62162,
+        "sha256": "89db30cab1271d485a85e9de352dfdcc55e25034eec942a327ccc3526a43d228"
+      },
+      "before": {
+        "bytes": 60813,
+        "sha256": "90953ca578af785f314fb3b6dd94724470fd026caf82c188a433e7b9432a1e5e"
+      }
+    }
+  },
+  "format": "zolana098-r3-durable-dependent-cow-candidate-source-v1",
+  "indexed_exact": {
+    "Primary_access_unchanged": true,
+    "column_count": 24,
+    "hard_max_key_bytes": 134217728,
+    "hard_max_rows": 1048576,
+    "historical_block_decode": false,
+    "new_diagnostics": [
+      "durable_copy_indexed_prune_started",
+      "durable_copy_indexed_prune_committed"
+    ],
+    "ordinary_production_Exact": "unchanged",
+    "publication_journal": "unchanged; pending begin always refuses",
+    "same_write_batch": true,
+    "special_keys": "modern exact72/72/108 bytes; strict full-key roundtrip and iterator error refusal"
+  },
+  "native_tests": {
+    "baseline095": 79,
+    "guard": 9,
+    "inherited_relative095": 25,
+    "names_added_relative095": [
+      "offline_metadata::tests::fixed_export_flag_cannot_mix_with_live_or_path_options",
+      "offline_metadata::tests::public_resume_rejects_changed_network_peer_voter_or_original_root",
+      "offline_metadata::tests::snapshot_inventory_requires_exact_two_fixed_pins_and_no_incremental_input",
+      "offline_metadata::tests::bounded_private_reads_refuse_symlinks_hardlinks_and_oversize",
+      "offline_metadata::tests::certified_head_walk_requires_strict_complete_parent_path",
+      "offline_metadata::tests::certified_head_walk_obeys_deadline_and_original_boundary",
+      "offline_metadata::tests::published_manifest_requires_independent_sha_and_full_v2_binding",
+      "offline_metadata::tests::metadata_export_domain_keeps_original_and_older_snapshot_bounds",
+      "offline_ssd::tests::ssd_modes_are_fixed_and_reject_live_or_path_arguments",
+      "offline_ssd::tests::ssd_independent_receipt_pin_is_checked_before_json_or_bindings",
+      "offline_ssd::tests::ssd_fixed_peer_rejects_manifest_identity_and_genesis_substitution",
+      "offline_ssd::tests::ssd_current_original_and_snapshot_bounds_cannot_move",
+      "offline_ssd::tests::ssd_corrupt_unknown_typed_binding_does_not_fallback",
+      "offline_ssd::tests::ssd_fixed_pins_remain_distinct_and_ram_filesystem_is_refused",
+      "offline_overlay_canary::tests::overlay_canary_accepts_only_fixed_modes_without_paths_or_live_flags",
+      "offline_overlay_canary::tests::overlay_canary_distinguishes_full_native_metadata_not_parent_projection",
+      "offline_overlay_canary::tests::overlay_canary_genuine_store_reopens_and_preserves_exact_purge",
+      "copy_runtime::tests::provenance_refuses_host_namespace_original_alias_and_missing_key",
+      "copy_runtime::tests::generated_origins_are_limited_to_new_mutable_copy_outputs",
+      "copy_runtime::tests::private_file_descriptor_checks_reject_public_mode_and_unlisted_hardlink",
+      "copy_runtime::tests::complete_new_account_alias_groups_never_admit_authority_aliases",
+      "copy_runtime::tests::fixed_copy_service_rejects_every_alternate_path_or_extra_operation",
+      "copy_runtime::tests::actual_mount_parser_and_pins_reject_wrong_view_or_shared_propagation",
+      "copy_runtime::tests::overlay_must_have_all_three_fixed_layers_and_no_indirection",
+      "copy_runtime::tests::copy_file_paths_cannot_escape_or_enter_any_original_rocksdb",
+      "durable_copy_guard::tests::provenance_refuses_host_namespace_original_alias_and_missing_key",
+      "durable_copy_guard::tests::generated_origins_are_limited_to_new_mutable_copy_outputs",
+      "durable_copy_guard::tests::private_file_descriptor_checks_reject_public_mode_and_unlisted_hardlink",
+      "durable_copy_guard::tests::complete_new_account_alias_groups_never_admit_authority_aliases",
+      "durable_copy_guard::tests::actual_mount_parser_and_pins_reject_wrong_view_or_shared_propagation",
+      "durable_copy_guard::tests::overlay_must_have_all_three_fixed_layers_and_no_indirection",
+      "durable_copy_guard::tests::copy_file_paths_cannot_escape_or_enter_any_original_rocksdb",
+      "durable_copy_guard::tests::phases_bind_exact_policy_and_journal_presence_and_hashes",
+      "durable_copy_guard::tests::durable_image_canonical_and_large_inputs_cannot_be_substituted",
+      "resume::copy_retention_098::tests::every_exact_journal_prefix_distinguishes_done_pending_and_complete",
+      "resume::copy_retention_098::tests::torn_empty_oversized_and_extra_record_journals_refuse",
+      "resume::copy_retention_098::tests::journal_changed_policy_resume_peer_order_and_hash_chain_refuse",
+      "resume::copy_retention_098::tests::journal_unknown_fields_and_empty_interior_lines_refuse",
+      "resume::copy_retention_098::tests::genuine_purged_store_reopens_with_archive_and_rejects_changed_current_bank",
+      "resume::copy_retention_098::tests::durable_journal_append_reopen_requires_exact_unchanged_prefix",
+      "resume::copy_retention_098::command_tests::fixed_copy_commands_require_exact_phase_pins_and_no_alternate_paths",
+      "resume::copy_retention_098::tests::indexed_exact_genuine_311_orphans_delete_old_all_special_cfs_preserve_tail_and_reopen",
+      "resume::copy_retention_098::tests::indexed_exact_row_byte_budget_and_midscan_cancel_never_commit_any_cf",
+      "resume::copy_retention_098::tests::indexed_exact_special_key_parser_rejects_legacy_malformed_and_unknown_layouts",
+      "resume::copy_retention_098::tests::indexed_exact_deadline_bounds_and_readonly_access_refuse_without_mutation"
+    ],
+    "required_total": 124,
+    "retention_and_indexed": 11,
+    "status": "actual124 passed; zero failed/ignored/filtered"
+  },
+  "policy_template": {
+    "bytes": 24934,
+    "path": ".local/durable-pruning-098/native-r1/retention-copy-098.template.json",
+    "sha256": "5935a4d857286bc3225d127dc72128e17923c84982901838a18b9e96e75a0c3a"
+  },
+  "preparation": {
+    "bytes": 10964,
+    "path": ".local/durable-pruning-098/native-r3/preparation.json",
+    "sha256": "f00348398455c6b782f56dff3802ff742478db11c26561669a903fd2adf45bdc"
+  },
+  "prior_iterations_preserved": {
+    "r1_native_candidate": {
+      "bytes": 14278,
+      "path": "node/candidate/LOCAL-098-source.json",
+      "sha256": "af8965943db97a2679078ca1ecd32f5730b5615a792bbe1811d5c59a67871d12"
+    },
+    "r1_native_result": {
+      "bytes": 22793,
+      "path": ".local/durable-pruning-098/build-r1/evidence/result.json",
+      "sha256": "3e4344a88c4973f6ec7e8d51ddfbb2c5870a81570d8c773c679532b2c35d5a82"
+    },
+    "r1_operational_attempt": {
+      "receipt": {
+        "bytes": 416942,
+        "path": ".local/durable-pruning-098/ops-r1/execution.json",
+        "sha256": "2f54a0d9daf0d388acc194e223b5300f6c62940568d9be30eb14d2383149037b"
+      },
+      "status": "failed180s before first done; old Exact implementation discovers special indexes by decoding historical slot bodies; internal failure phase not measured; begin-only image never adopted/retried"
+    },
+    "r2_compile": {
+      "result": {
+        "bytes": 2344,
+        "path": ".local/durable-pruning-098/build-r2/evidence/result.json",
+        "sha256": "726dc3fcc94ab596cf68abff981b6441c1f0f40744a805d1d6a7ed1ca333b078"
+      },
+      "status": "failed only unavailable Signature::new_unique in added test fixture; full21257 restore; no runtime seal"
+    },
+    "r3_change_from_r2": "test-only deterministic Signature::from([u8;64]); no dependency, feature or runtime wrapper change"
+  },
+  "qualifications": [
+    "This is durable SSD OverlayFS upper storage dependent on preserved original read-only lower Blockstores, not an independent compact database.",
+    "No original pilot pruning, original395GB space-reclamation, independent-clone, power-loss or public-launch claim.",
+    "Original wallet, keys, resume and old093/095/096/097 frozen artifacts are outside this patch. Operator copies/mounts/key custody remain separately reviewed prerequisites.",
+    "Prune-hold intentionally pauses after fsynced verified done(peer0); ordinary prune/resume/service have no diagnostic delay.",
+    "No automatic retry, missing/corrupt archive fallback, eligibility rewrite, reset or genesis fallback.",
+    "Old failed r1 begin-only image/journal is preserved separately; this artifact does not authorize adopting or retrying it.",
+    "Scoped actual native124 tests, committed partial-prune recovery, pruned process crash, same-image full detach/remount and final preservation pass; raw outer exit1 and local reconciliation are preserved transparently.",
+    "Final old095 parent-mode expectation corrected only in a new read-only checker: historical root0755 directory and executable0555/5c99 unchanged; no permission mutation."
+  ],
+  "scope": [
+    "New durable_copy_guard authority proves fixed ext4 image, namespace/overlay/source isolation and externally pinned phase/policy/journal BEFORE mutable setup.",
+    "Main early098 fixed CLI dispatch; old097 and ordinary093 entry semantics remain unchanged.",
+    "Shared strict095 archive/canonical/snapshot loader; distinct098 copy policy attaches only through verified private capability, without changing original resume bytes or093 fixture eligibility.",
+    "Copy-only Exact purge with all3 preflight, eight-record/16KiB append-only fsynced hash-chain journal, captured current BANK evidence, explicit done-prefix resume and ambiguous begin refusal.",
+    "Dev-context-only exact24+empty-default schema validation and synchronous all-known-CF flush followed by WALsync; no automatic ordinary runtime calls.",
+    "Dev-only indexed Exact wrapper: same21 ordinary-CF range tombstones and3 modern special-CF key scans in one batch, hard row/key-byte/deadline/cancellation bounds and strict iterator/key refusal; standard production Exact unchanged."
+  ],
+  "status": "scoped accepted: actual Linux124 tests, indexed partial-prune checkpoint recovery, pruned-validator crash and same-image full unmount/remount/restart, final preservation"
+}

@@ -1,0 +1,437 @@
+{
+  "actual_build_acceptance": {
+    "all_commands_offline_locked_no_filter_no_stop": true,
+    "baseline_tests": 79,
+    "collection": {
+      "bytes": 6179,
+      "path": ".local/pilot-metadata-096/build-r1/collection.json",
+      "sha256": "669b6d6c1234c2b58f2fdd87946163602d0546f798067df292d8b23dfe550a2d"
+    },
+    "command_seconds": {
+      "compile": 4.000583514047321,
+      "list": 1.0003990010009147,
+      "runner-compile": 5.001231222995557,
+      "runtime-build-info": 1.0004021979984827,
+      "tests": 12.001155255013146
+    },
+    "compiled_source_manifest": {
+      "bytes": 254891,
+      "path": ".local/pilot-metadata-096/build-r1/evidence/compiled-source-manifest.json",
+      "sha256": "dd04e1eddfcecd4af6ae678a5b07570309610e009d99ec6c5a83177f6b9691b6"
+    },
+    "failed": 0,
+    "filtered_out": 0,
+    "ignored": 0,
+    "native_tests": 87,
+    "new_focused_tests": 8,
+    "qualification": "The build and public linkage probe do not establish actual original-pilot export, durable export handover, compact-copy restart, installed activation or pruning acceptance.",
+    "result": {
+      "bytes": 16348,
+      "path": ".local/pilot-metadata-096/build-r1/evidence/result.json",
+      "sha256": "5b2d031bab8a58d3917218705b27d35799c94bc65007d683d66daeb7fa1b3112"
+    },
+    "runtime_binary_sha256": "a26bdc78a0050fae69ff6c62fc08d076e8cbeff898572996c24b1a4468b7d0d2",
+    "runtime_probe": {
+      "financial_operations": 0,
+      "keys_read": false,
+      "ledgers_opened": false,
+      "mode": "--build-info only",
+      "runner_new_feature": true,
+      "runtime_new_feature": true,
+      "runtime_old_retry_feature": false,
+      "validators_started": false,
+      "votor_new_feature": true
+    },
+    "runtime_sealed_bytes": 93344720,
+    "runtime_sealed_path": "/dev/shm/zolana-pilot-metadata-096-sealed-r1/zolana-fast-check",
+    "scratch_source_restoration": {
+      "evidence": {
+        "bytes": 254750,
+        "path": ".local/pilot-metadata-096/build-r1/evidence/root-restored-source-manifest.json",
+        "sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d"
+      },
+      "full_manifest_sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d",
+      "old095_runtime_sha256": "5c99ead8b97ebcb9427b8d5874ab3f966b31786b85b15d1fbe52e17cad20ab54",
+      "old095_sealed_runtime_preserved": true,
+      "passed": true,
+      "root_fallback_used": false
+    },
+    "status": "passed",
+    "test_summary_seconds": 11.01,
+    "toolchain": {
+      "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+      "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+    }
+  },
+  "actual_durable_byte_copy_acceptance": {
+    "collection": {
+      "bytes": 371,
+      "path": ".local/pilot-metadata-096/durable-r1/collection.json",
+      "sha256": "d40a2122a2a3466de6bb49c9f05e118ba2de5904845db7f1de750caa05d8bba3"
+    },
+    "destination": "/var/lib/zolana-metadata-096-r1/data",
+    "destination_filesystem": "ext4 SSD",
+    "file_count": 7,
+    "files": [
+      {
+        "bytes": 15188,
+        "path": "export.json",
+        "sha256": "40fe0ec0acb088390f6c2580f0f2b6ad7936aae7cd878a32e79a39893e64cd68"
+      },
+      {
+        "bytes": 1839,
+        "path": "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t/pilot096-r1/manifest.json",
+        "sha256": "9c3147861ff1c59e4b7b3027691ebe8a9c2bbf79ea4bbcb5b26040668de42b75"
+      },
+      {
+        "bytes": 79315254,
+        "path": "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t/pilot096-r1/prefix.bin",
+        "sha256": "99f979af4b8e6fdf3cb0dd31644726412440c61bb404dc10255ca9011cf8bcc9"
+      },
+      {
+        "bytes": 1836,
+        "path": "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa/pilot096-r1/manifest.json",
+        "sha256": "d3b6f9de44b81069dc98b7860ad8e85d9da01d83c4793aa9f2aaec1db5a478d1"
+      },
+      {
+        "bytes": 79315253,
+        "path": "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa/pilot096-r1/prefix.bin",
+        "sha256": "be83373ad37f73734393d4ae8e96d249e65135af4b711a753669af2df508d04f"
+      },
+      {
+        "bytes": 1850,
+        "path": "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth/pilot096-r1/manifest.json",
+        "sha256": "0ddf102931b9d628d26578982b06a85eaec246a9dbd2d774b4e2491583afc866"
+      },
+      {
+        "bytes": 79315251,
+        "path": "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth/pilot096-r1/prefix.bin",
+        "sha256": "8a649eaee8d3695fefa5691c1833bccc898589d23fd9f26c9216b85e5ae4c3b2"
+      }
+    ],
+    "host_reboot_or_powerloss_tested": false,
+    "logical_bytes": 237966471,
+    "manifest_sha256": {
+      "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t": "9c3147861ff1c59e4b7b3027691ebe8a9c2bbf79ea4bbcb5b26040668de42b75",
+      "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa": "d3b6f9de44b81069dc98b7860ad8e85d9da01d83c4793aa9f2aaec1db5a478d1",
+      "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth": "0ddf102931b9d628d26578982b06a85eaec246a9dbd2d774b4e2491583afc866"
+    },
+    "native_database_opens": 0,
+    "native_reload_performed": false,
+    "original_pilot_pruned": false,
+    "planned_allocation_bytes": 238018560,
+    "publication": "exclusive renameat2+file/directory/parent fsync",
+    "qualification": "Original export.json bytes remain unchanged and still describe volatile RAM preparation. Separate byte-copy evidence records the SSD publication; it does not reinterpret the original receipt as native durable-load/restart acceptance.",
+    "result": {
+      "bytes": 6974,
+      "path": ".local/pilot-metadata-096/durable-r1/actual-copy.json",
+      "sha256": "a7e53cc44fcf409cf90e591e928664a5d96995cdaccf26dbd9eaf0334e320cfd"
+    },
+    "retention_policy_created": false,
+    "source": "/dev/shm/zolana-pilot-metadata-096-export-r1/data",
+    "source_changed": false,
+    "source_export_json_sha256": "40fe0ec0acb088390f6c2580f0f2b6ad7936aae7cd878a32e79a39893e64cd68",
+    "source_filesystem": "tmpfs",
+    "status": "published with independently verified exact file bytes and file/directory/parent fsync; native reload/reboot acceptance not claimed"
+  },
+  "actual_metadata_export_acceptance": {
+    "canonical_export_E": 522202,
+    "canonical_export_height": 521886,
+    "collection": {
+      "bytes": 306,
+      "path": ".local/pilot-metadata-096/export-collection.json",
+      "sha256": "c5c10856a1d6b7136cd19d4658ae8c881c9cd233363fafcf41729449aa0fd481"
+    },
+    "controller_collection_seconds": 33.183201749809086,
+    "financial_operations": 0,
+    "keys_or_signed_history_opened": false,
+    "native_execution_seconds": 32.10821878403658,
+    "network_enabled": false,
+    "ordinary_full_snapshot_bank_accounts_verification_performed": false,
+    "output_is_volatile_RAM": true,
+    "output_root": "/dev/shm/zolana-pilot-metadata-096-export-r1/data",
+    "peers": [
+      {
+        "current_root_slot": 522202,
+        "decoded_metadata_bytes": 2187235275,
+        "encoded_metadata_bytes": 54347998,
+        "full_live_path_entries": 521846,
+        "head_slot": 520507,
+        "highest_stored_slot": 522202,
+        "identity": "45DJyc1y2Ata9Zm6ScdhV9xr6Vx4bGjfmWLk2d3hTM2t",
+        "index_bytes": 24967248,
+        "loaded_merged_path_entries": 521846,
+        "manifest_sha256": "9c3147861ff1c59e4b7b3027691ebe8a9c2bbf79ea4bbcb5b26040668de42b75",
+        "metadata_export_and_verification_ms": 9790,
+        "newer_snapshot_slot": 521532,
+        "older_snapshot_slot": 520508,
+        "original_slot": 44,
+        "payload_bytes": 79315254,
+        "prune_through": 520506,
+        "records": 520151,
+        "signed_frontier": null,
+        "snapshot_parent_slot": 520507
+      },
+      {
+        "current_root_slot": 522202,
+        "decoded_metadata_bytes": 2187235275,
+        "encoded_metadata_bytes": 54347997,
+        "full_live_path_entries": 521846,
+        "head_slot": 520507,
+        "highest_stored_slot": 522202,
+        "identity": "6khKL5Y3pGop3RLmNAFfRJamvBG9VmgATMahLKzSqypa",
+        "index_bytes": 24967248,
+        "loaded_merged_path_entries": 521846,
+        "manifest_sha256": "d3b6f9de44b81069dc98b7860ad8e85d9da01d83c4793aa9f2aaec1db5a478d1",
+        "metadata_export_and_verification_ms": 11567,
+        "newer_snapshot_slot": 521532,
+        "older_snapshot_slot": 520508,
+        "original_slot": 44,
+        "payload_bytes": 79315253,
+        "prune_through": 520506,
+        "records": 520151,
+        "signed_frontier": null,
+        "snapshot_parent_slot": 520507
+      },
+      {
+        "current_root_slot": 522202,
+        "decoded_metadata_bytes": 2187235251,
+        "encoded_metadata_bytes": 54347995,
+        "full_live_path_entries": 521846,
+        "head_slot": 520507,
+        "highest_stored_slot": 522202,
+        "identity": "CNbHYLVskf1HkkQmq78GBZHikCWazMnH6GqrXrmy9Cth",
+        "index_bytes": 24967248,
+        "loaded_merged_path_entries": 521846,
+        "manifest_sha256": "0ddf102931b9d628d26578982b06a85eaec246a9dbd2d774b4e2491583afc866",
+        "metadata_export_and_verification_ms": 9852,
+        "newer_snapshot_slot": 521532,
+        "older_snapshot_slot": 520508,
+        "original_slot": 44,
+        "payload_bytes": 79315251,
+        "prune_through": 520506,
+        "records": 520151,
+        "signed_frontier": null,
+        "snapshot_parent_slot": 520507
+      }
+    ],
+    "qualifications": [
+      "The actual original-pilot output preserves H520507 through immutable O44; the full N522202 toO44 path is separately verified. This is not all historical blocks or genesis.",
+      "Each peer has 520151 FULL native SlotMeta records and 521846 live/loaded current-root path entries. Counts concern metadata, not payments.",
+      "The 9.790/11.567/9.852-second per-peer observations include metadata publication/load/path checks; no payment, wallet, restart or WAN latency claim.",
+      "This native execution loaded its new files from RAM in the same process; the later SSD copy has not undergone fresh native reload.",
+      "The 237,966,471-byte metadata archive is not a complete replacement for the original 132GB-per-peer Blockstores; full snapshot and complete replay tail remain required."
+    ],
+    "receipt_status_as_recorded": "completed-unreviewed",
+    "result": {
+      "bytes": 53994,
+      "path": ".local/pilot-metadata-096/actual-export.json",
+      "sha256": "20437e065bfec0d29493f18b4ffd4f1168cd2f9d017221e1f8ebcb83fa4a312d"
+    },
+    "runtime_binary_sha256": "a26bdc78a0050fae69ff6c62fc08d076e8cbeff898572996c24b1a4468b7d0d2",
+    "snapshot_binding_uses_older_slot": 520508,
+    "source_access": "ReadOnly with kernel read-only original paths and keys inaccessible",
+    "source_resume_sha256": "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a",
+    "source_root": "/var/lib/zolana-vat-085-r1/network",
+    "source_writable": false,
+    "status": "scoped RAM metadata publication and same-process reload verified; root-reviewed actual collected receipt",
+    "validators_started": false
+  },
+  "application": {
+    "baseline_revision": "exact LOCAL-095 compiled after-state, preserving LOCAL-094 main unchanged",
+    "changed_or_added_files": 2,
+    "delta_patch": {
+      "bytes": 29758,
+      "path": "node/candidate/agave-4.3.2-LOCAL-096.patch",
+      "sha256": "b5cbee75f001907eeae9ada8a0c6bf433b42ccae5c61dfee08f61e254dd522ad"
+    },
+    "existing_preparer_changed": false,
+    "predecessor_patch": {
+      "bytes": 51116,
+      "path": "node/candidate/agave-4.3.2-LOCAL-095.patch",
+      "sha256": "81d79b5c320204f55cbd8a9f25a22c260085e37785d06c7a36050013e3a8b699"
+    },
+    "predecessor_source": {
+      "bytes": 15956,
+      "path": "node/candidate/LOCAL-095-source.json",
+      "sha256": "df41b8642fe3cb0e60cc2d6687131b818106a9705fce096acb6f21dac5022eeb"
+    },
+    "prepare_native_candidate_revision_supported": false,
+    "requires_independently_verified_exact_baseline_copy": true
+  },
+  "baseline": {
+    "compiled_source_manifest": {
+      "bytes": 254750,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/compiled-source-manifest.json",
+      "sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d"
+    },
+    "native_result": {
+      "bytes": 15736,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/result.json",
+      "sha256": "ea859b83f444cb800db20076b7e4b5fd4a40286b8ef688225264870268ada071"
+    },
+    "qualification": "Only these two source leaves are reconstructed here; this does not replace full workspace verification or establish retroactive d805 attestation.",
+    "required_file_sha256": {
+      "zolana-fast-check/src/main.rs": "6516a7881f86fb9b11cb91ec3b9c5ba02570941b040f054c111b3f606b82b81e",
+      "zolana-fast-check/src/offline_metadata.rs": null
+    },
+    "runtime_sha256": "5c99ead8b97ebcb9427b8d5874ab3f966b31786b85b15d1fbe52e17cad20ab54"
+  },
+  "bounds": {
+    "decoded_full_metadata_bytes_per_peer": 8589934592,
+    "final_receipt_max_bytes": 262144,
+    "frame_bytes_per_record": 48,
+    "manifest_read_max_bytes": 65536,
+    "max_all_three_payload_bytes": 1761607704,
+    "max_index_bytes_per_peer": 50331648,
+    "max_payload_bytes_per_peer": 587202568,
+    "max_records_per_peer": 1048576,
+    "peers_opened_sequentially": true,
+    "per_peer_shared_seconds": 180,
+    "public_file_read_max_bytes": 1048576,
+    "stored_compressed_metadata_bytes_per_peer": 536870912,
+    "whole_invocation_seconds": 600
+  },
+  "census": {
+    "bytes": 36781,
+    "path": ".local/pilot-metadata-096/ops-r1/actual-census.json",
+    "sha256": "733aaf988ee75db60bab4ac493c7f5ec546aa3d4b354652e16803b0dfc980dbc"
+  },
+  "command": [
+    "--offline-pilot-metadata-export"
+  ],
+  "external_required_gates": [
+    "all original and095 actors stopped and activation marker absent before/after",
+    "UID995 bounded PrivateNetwork service, original pilot kernel read-only, original keys inaccessible, only fixed fresh RAM output writable",
+    "original file metadata and protected key/resume/history hashes independently preserved before/after by root",
+    "offline locked exact two-leaf overlay compile and all baseline79+new8 tests pass before export",
+    "no live activation, no pruning or copy/restart operation from this preparatory output"
+  ],
+  "files": {
+    "zolana-fast-check/src/main.rs": {
+      "after": {
+        "bytes": 52029,
+        "sha256": "f7f4cdd8fb9228e81167053965cf29f9e8191d246a3e865f9c955ec5f938a305"
+      },
+      "before": {
+        "bytes": 51938,
+        "sha256": "6516a7881f86fb9b11cb91ec3b9c5ba02570941b040f054c111b3f606b82b81e"
+      },
+      "delta": "one module declaration and first early fixed offline dispatch"
+    },
+    "zolana-fast-check/src/offline_metadata.rs": {
+      "after": {
+        "bytes": 28326,
+        "sha256": "fdb3c362dcffe7a256315f0f16d323949dc34426485f9ca021232e9ae8a27fb9"
+      },
+      "before": null,
+      "delta": "new fixed keyless read-only preparatory utility with eight focused tests"
+    }
+  },
+  "final_preservation_acceptance": {
+    "all_actors_off": true,
+    "all_old_protected_artifacts_unchanged": true,
+    "independent_final_review": {
+      "path": ".local/pilot-metadata-096/review-r1/final-review.json",
+      "sha256": "f10857db9ee2e50b9ed3f722b13896fdb00a533b535a53abe656e15fb381c806"
+    },
+    "mac_validators_running": 0,
+    "original_census": {
+      "path": ".local/pilot-metadata-096/final-census.json",
+      "sha256": "df4e1a821c68f6b07942c40b9437837206a60468913728ab54ca2f058187c321"
+    },
+    "original_metadata_entries": 5321,
+    "status": "passed for metadata-preparation scope"
+  },
+  "fixed_input": {
+    "binding_snapshot_slot": 520508,
+    "canonical_export": {
+      "actual_E_header_and_certified_BANK_parity_checked_all_peers": true,
+      "blockhash": "A3nGXWqPUYcXtofE77sV7Pwuvgj7y7ArAvwnWkXy7Kjk",
+      "height": 521886,
+      "receipt_sha256": "d29631aa5eedd0ecde2605da7146b73a816ba0969d66427110ec152f17da4262",
+      "sqlite_file_not_opened": true,
+      "sqlite_sha256": "46c7a8609a75cfede99c8ddd0a6ec08bb661c9701f84384dbeab853ad641b212",
+      "through_slot": 522202
+    },
+    "resume_sha256": "2a488e39b4d3a7c290e3b4eacd0bd679031ae3534ac7241b10a6f6c3d414388a",
+    "snapshot_slots": [
+      520508,
+      521532
+    ],
+    "source_root": "/var/lib/zolana-vat-085-r1/network",
+    "uid": 995
+  },
+  "format": "zolana096-readonly-original-pilot-native-metadata-candidate-v1",
+  "output": {
+    "durability_claim": false,
+    "final_receipt": "export.json, only after all three source paths and independently pinned V2 loads verify",
+    "fresh_empty_private_namespace_required": true,
+    "generation": "pilot096-r1",
+    "peer_directories": "three fixed public validator identity strings",
+    "root": "/dev/shm/zolana-pilot-metadata-096-export-r1/data",
+    "volatile_RAM": true
+  },
+  "preparation": {
+    "bytes": 9184,
+    "path": ".local/pilot-metadata-096/native-r1/preparation.json",
+    "sha256": "07c0703b72bc66958bcb412a6b7c9ca17a0c4002be369df94f938c371dc8cb0a"
+  },
+  "qualifications": [
+    "RAM output is volatile; fsync does not establish SSD or reboot durability",
+    "payload covers actual H->immutable O44, not every historical block or genesis; full current N->O44 is separately verified",
+    "the external full canonical SQLite is not opened by UID995; its accepted pins are recorded and exact E header/BANK source parity checked",
+    "highest_stored_slot is keyless Blockstore metadata only; signed frontier remains unclaimed/null because signed-history loading is excluded",
+    "no retention policy file, keys, wallet, validator, account replay or source mutation is part of this utility",
+    "No full-snapshot bank/accounts load, live-runtime activation, original-pilot pruning, compact copy or restart is performed by this candidate.",
+    "The immutable original checkpoint remains O44 and real older S520508 bounds the candidate head/cutoff; newer S521532 is also byte-pinned.",
+    "No Chrome/WASM/Mac-to-Linux or payment latency result is established by source preparation."
+  ],
+  "reconstruction": {
+    "bytes": 904,
+    "path": ".local/pilot-metadata-096/candidate-reproduction-r1.json",
+    "sha256": "00ea7533c6a1377daa2a399b3653b18781a3f154c3739bc64179d35512996689"
+  },
+  "status": "scoped Linux87-test build, actual keyless full-metadata export, verified SSD byte publication and final preservation passed; fresh SSD native loading and isolated large-history prune/restart remain separate gates",
+  "tests": {
+    "baseline_native_tests": 79,
+    "expected_total_discovery": 87,
+    "local_parser": "rustfmt --edition2024 module parse/format check passed",
+    "native_test_results": {
+      "failed": 0,
+      "filtered_out": 0,
+      "ignored": 0,
+      "measured": 0,
+      "passed": 87,
+      "summary_seconds": 11.01,
+      "test_command_seconds": 12.001155255013146
+    },
+    "new_focused_tests_prepared": 8,
+    "new_test_names": [
+      "offline_metadata::tests::fixed_export_flag_cannot_mix_with_live_or_path_options",
+      "offline_metadata::tests::public_resume_rejects_changed_network_peer_voter_or_original_root",
+      "offline_metadata::tests::snapshot_inventory_requires_exact_two_fixed_pins_and_no_incremental_input",
+      "offline_metadata::tests::bounded_private_reads_refuse_symlinks_hardlinks_and_oversize",
+      "offline_metadata::tests::certified_head_walk_requires_strict_complete_parent_path",
+      "offline_metadata::tests::certified_head_walk_obeys_deadline_and_original_boundary",
+      "offline_metadata::tests::published_manifest_requires_independent_sha_and_full_v2_binding",
+      "offline_metadata::tests::metadata_export_domain_keeps_original_and_older_snapshot_bounds"
+    ]
+  },
+  "unchanged": {
+    "ancestry_and_archive_formats": true,
+    "cargo_and_lock": true,
+    "ledger_readonly_api": true,
+    "previous_candidate_artifacts": true,
+    "resume_fixture_fence": true,
+    "runtime_service_or_gateway_configuration": true
+  },
+  "validation_contract": [
+    "complete public resume SHA, public genesis/O44 BANK/three identity+voter+ledger fields",
+    "all original ledger/RocksDB/snapshot directories canonical owned source paths",
+    "both actual snapshot file inventories/bytes/SHAs before and after export",
+    "actual current N certified root; N and both real snapshot slots are complete ancestors to immutable O44",
+    "full native H->O44 indexed095V2 streamed and reloaded from independent returned manifest SHA",
+    "unchanged loaded merge verifies full N->O44, including live/full overlap conflict rules; current root and resume unchanged afterward"
+  ]
+}

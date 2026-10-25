@@ -1,0 +1,381 @@
+{
+  "actual_build_acceptance": {
+    "baseline_tests": 71,
+    "collection": {
+      "bytes": 5432,
+      "path": ".local/restart-scale-095/native-build-r3/collection.json",
+      "sha256": "97be50dabc587e13bc0742fe0ef862d159daee50c5bad01e15ea3fe03529f24d"
+    },
+    "compiled_source_manifest": {
+      "bytes": 254750,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/compiled-source-manifest.json",
+      "sha256": "21257b7a6c32c810de01fc80314ec1f7969edc626bc56750ab86049dcd32074d"
+    },
+    "native_test_summary_seconds": 11.11,
+    "native_tests": 79,
+    "new_indexed_tests": 8,
+    "r1_capacity_refusal_preserved": true,
+    "r2_receipt_parser_refusal_preserved": {
+      "actual_compile_and_all79_test_exit_codes": 0,
+      "reason": "invalid contiguous per-test name/ok text assumption under --nocapture",
+      "result_sha256": "093499d749e5ef7777573169f7eb615a0fd35fe7bcae388a056ce67483a026a6"
+    },
+    "r3_validation": "independently pinned previous result, all six compile/list/test streams, actual binary SHA, exact unfiltered invocation, all71+8 names, one anchored79/0/0/0 summary and scale byte accounting; no source changes or test rerun",
+    "result": {
+      "bytes": 15736,
+      "path": ".local/restart-scale-095/native-build-r3/evidence/result.json",
+      "sha256": "ea859b83f444cb800db20076b7e4b5fd4a40286b8ef688225264870268ada071"
+    },
+    "runtime_binary_sha256": "5c99ead8b97ebcb9427b8d5874ab3f966b31786b85b15d1fbe52e17cad20ab54",
+    "runtime_probe": {
+      "financial_operations": 0,
+      "keys_read": false,
+      "ledgers_opened": false,
+      "mode": "--build-info only",
+      "new_runtime_and_votor_features_linked": true,
+      "old_retry_feature": false,
+      "validators_started": false
+    },
+    "scale_measurement": {
+      "decoded_metadata_bytes": 4205012615,
+      "encoded_metadata_bytes": 59956367,
+      "event": "indexed_full_slot_meta_scale",
+      "full_canonical_slot_meta": true,
+      "index_bytes": 48000144,
+      "payload_bytes": 107956519,
+      "publish_and_load_ms": 5727.251439,
+      "publish_load_and_verify_ms": 9501.949292000001,
+      "publish_ms": 3007.88357,
+      "records": 1000003,
+      "validators_started": false
+    },
+    "status": "passed; subsequent integrated recovery and final preservation accepted separately below"
+  },
+  "application": {
+    "baseline_revision": "exact LOCAL-094 compiled after-state",
+    "changed_or_added_files": 7,
+    "delta_patch": "agave-4.3.2-LOCAL-095.patch",
+    "delta_patch_sha256": "81d79b5c320204f55cbd8a9f25a22c260085e37785d06c7a36050013e3a8b699",
+    "existing_preparer_changed": false,
+    "predecessor_patch": {
+      "bytes": 22870,
+      "path": "node/candidate/agave-4.3.2-LOCAL-094.patch",
+      "sha256": "b2a577f007bb5ef5a42bea0be36e5458c20a7898d062a39eaceaeac4d65b595c"
+    },
+    "predecessor_source": {
+      "bytes": 10335,
+      "path": "node/candidate/LOCAL-094-source.json",
+      "sha256": "970262215d4c46b53716ec3b16a7cffa4b33120d33c7888572c3447424c5d9ed"
+    },
+    "prepare_native_candidate_revision_supported": false,
+    "requires_independent_existing_exact_baseline_copy": true
+  },
+  "baseline": {
+    "actual_native094_result": {
+      "bytes": 13569,
+      "path": ".local/archive-scale-094/native-build-r1/evidence/result.json",
+      "sha256": "7c1e18c46c09be83994e3b3b431dd55cfa3170da64abb0348a8961697723ceed"
+    },
+    "compiled_manifest": {
+      "bytes": 254446,
+      "path": ".local/archive-scale-094/native-build-r1/evidence/compiled-source-manifest.json",
+      "sha256": "87fdca263765f3e04ca32763c938c40ae118b771c3fa142be5b02340404e10d4"
+    },
+    "qualification": "Exact observed inherited source; these seven before/after pins do not establish retroactive d805 source-to-binary attestation.",
+    "required_file_sha256": {
+      "Cargo.lock": "8989b37ae537c1d28f0c45d7b385da135381a562bb6160467153b2edb39e8f21",
+      "zolana-fast-check/Cargo.toml": "391db670347ebfa64d59e6bf98f3f8dabc733bf6e3c32cc3bac61ea2ff1a94dc",
+      "zolana-fast-check/src/ancestry.rs": "818d16af05549bf7885b5c0a5c8674df9d319cd9845b9445e4a40986f14a0f71",
+      "zolana-fast-check/src/ancestry_archive.rs": "3a36313567e7bdac13f465604536b1d155a5696ad1f8306a37305f1f4ef47cee",
+      "zolana-fast-check/src/ancestry_archive_indexed.rs": null,
+      "zolana-fast-check/src/ancestry_archive_indexed_tests.rs": null,
+      "zolana-fast-check/src/resume.rs": "7c96a289ea592d363f51a505d7b8a25434266cbca3e296da93a4313df42a023b"
+    }
+  },
+  "bounds": {
+    "caller_load_prepare_purge_deadline_seconds": 180,
+    "decoded_metadata_bytes": 8589934592,
+    "encoded_metadata_record_bytes": 66560,
+    "frame_bytes": 48,
+    "full_metadata_record_bytes": 65536,
+    "index_entry_bytes": 48,
+    "maximum_index_bytes_per_peer": 50331648,
+    "records": 1048576,
+    "scale_test_full_records": 1000003,
+    "stored_metadata_bytes": 536870912,
+    "synthetic_test_deadline_seconds": 180
+  },
+  "codec": {
+    "allocation": "bulk decompress capacity is independently bounded decoded_size <=64KiB and exact output size required",
+    "crate": "existing locked zstd0.13.3, zstd-safe7.2.1",
+    "format": "zolana095-native-ancestry-indexed-zstd-v2",
+    "magic": "ZANCZ002",
+    "name": "zstd-one-frame-level-1",
+    "strict_frame_size_api": "zstd::zstd_safe::find_frame_compressed_size(encoded) must equal encoded.len()",
+    "typed_bytes": "raw digest pins exact full canonical SlotMeta; compression does not project/abbreviate fields"
+  },
+  "files": {
+    "Cargo.lock": {
+      "after": {
+        "bytes": 337491,
+        "sha256": "369f9f297a42fd632fc92f3ef4523034db8ca5818525ecc362a9da5740cdd9b0"
+      },
+      "before": {
+        "bytes": 337482,
+        "sha256": "8989b37ae537c1d28f0c45d7b385da135381a562bb6160467153b2edb39e8f21"
+      }
+    },
+    "zolana-fast-check/Cargo.toml": {
+      "after": {
+        "bytes": 2105,
+        "sha256": "aa40c1d451b2c06dc5050a6d85248c7906117fd14fd0fa88545b2dbcdcc08cbe"
+      },
+      "before": {
+        "bytes": 2077,
+        "sha256": "391db670347ebfa64d59e6bf98f3f8dabc733bf6e3c32cc3bac61ea2ff1a94dc"
+      }
+    },
+    "zolana-fast-check/src/ancestry.rs": {
+      "after": {
+        "bytes": 11074,
+        "sha256": "61a4cf9b55f09d03a8db372fb457126b4dcbca8c16cf12d93aea7925385d1dc1"
+      },
+      "before": {
+        "bytes": 11063,
+        "sha256": "818d16af05549bf7885b5c0a5c8674df9d319cd9845b9445e4a40986f14a0f71"
+      }
+    },
+    "zolana-fast-check/src/ancestry_archive.rs": {
+      "after": {
+        "bytes": 20262,
+        "sha256": "a112460d2f4c629e7aeeab00dfaecdf249d83e93bbc4b174035026b252a164bf"
+      },
+      "before": {
+        "bytes": 19057,
+        "sha256": "3a36313567e7bdac13f465604536b1d155a5696ad1f8306a37305f1f4ef47cee"
+      }
+    },
+    "zolana-fast-check/src/ancestry_archive_indexed.rs": {
+      "after": {
+        "bytes": 20981,
+        "sha256": "8d80dd7d4676197a5ebaa85956fa65e68bc66c4d6052a6301499f2e08559e388"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/ancestry_archive_indexed_tests.rs": {
+      "after": {
+        "bytes": 21378,
+        "sha256": "d264f8547026e004c55349ca5bf17d680718a0e24ebb8c436e2800c44f104279"
+      },
+      "before": null
+    },
+    "zolana-fast-check/src/resume.rs": {
+      "after": {
+        "bytes": 60813,
+        "sha256": "90953ca578af785f314fb3b6dd94724470fd026caf82c188a433e7b9432a1e5e"
+      },
+      "before": {
+        "bytes": 60920,
+        "sha256": "7c96a289ea592d363f51a505d7b8a25434266cbca3e296da93a4313df42a023b"
+      }
+    }
+  },
+  "final_preservation": {
+    "Mac_validator_processes": 0,
+    "activation_marker_absent": true,
+    "all_original_and095_actors_stopped": true,
+    "closure": {
+      "bytes": 1258,
+      "path": ".local/restart-scale-095/recovery-r7/close-result.json",
+      "sha256": "6a30707391576d2315a8352c070411400c86cb101877eebaa0f88a09f792c585"
+    },
+    "closure_files_deleted": 0,
+    "closure_keys_deleted": 0,
+    "installed_d805_closed093_and094_archive_unchanged": true,
+    "new3GiBimage_unmounted_and_loop_detached": true,
+    "new_image_sha256": "e2b1f8292825e8be7ddbf41fad6634dddd50192b4267a639af547330d32b470b",
+    "original_pilot_5321_metadata_and_small_files_unchanged": true,
+    "pre_grow_1GiB_backup_preserved_sha256": "14476a791952c3448cc5cbe5e435f56401e0420fae7b17f1cfa6c384fb6bea21",
+    "preservation": {
+      "bytes": 5001,
+      "path": ".local/restart-scale-095/preservation.json",
+      "sha256": "356691b653179ae1bacc3f45175876cdbd73ef2b4676db2f3fec65b8735436b5"
+    },
+    "status": "passed"
+  },
+  "format": "zolana095-additive-candidate-source-v1",
+  "integrated_recovery_acceptance": {
+    "Alice_retransmissions": 0,
+    "actual_native_sigkills": 2,
+    "all3_old_primary_headers_unavailable": true,
+    "all3_retained_E_header_hash_and_height_verified_before_prune_checks": true,
+    "browser_native_core_first_replay": {
+      "Alice": {
+        "balance": 21000000,
+        "decision": "expired-absent"
+      },
+      "Bob": {
+        "balance": 16000000,
+        "decision": "accepted",
+        "slot": 306
+      }
+    },
+    "certified_head": 1040,
+    "collection": {
+      "bytes": 4988,
+      "path": ".local/restart-scale-095/recovery-r7/collection.json",
+      "sha256": "96bd9c2dcc056e712305843121156ef66e6eded4e44493141832e3c0dbf0d1c1"
+    },
+    "earlier_Alice_initial_physical_forwards": 1,
+    "earlier_Bob_initial_physical_forwards": 3,
+    "earlier_Bob_logical_initial_submissions": 1,
+    "genesis_hash": "5HzFkP1SBPkcqj8A6nuwmkW9GViyWGs4uhz6xBeio2NU",
+    "immutable_canonical_export": {
+      "anchor": {
+        "block_height": 2049,
+        "blockhash": "7yqh2CzNAkSZpYpN8NpWVbZ6CKGoZ23io62ZzSzvHtXP",
+        "slot": 2066
+      },
+      "canonical_blocks_sha256": "4d19f4f38d12a9d92ad03e137a6f4963b3a1fb37bc3c920506e542a7e9528cae",
+      "file_sha256": "09cb7f3b0634b29d8b92e97fee07f1551da44037eda5609d23581b30cf7b081f",
+      "network": {
+        "genesis_hash": "5HzFkP1SBPkcqj8A6nuwmkW9GViyWGs4uhz6xBeio2NU",
+        "network": [
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67,
+          67
+        ]
+      },
+      "path": "/var/lib/zolana-rehearsal-095-r1/data/network/canonical/full-history.sqlite3",
+      "produced_blocks": 2049,
+      "relative_path": "canonical/full-history.sqlite3",
+      "through_blockhash": "7yqh2CzNAkSZpYpN8NpWVbZ6CKGoZ23io62ZzSzvHtXP",
+      "through_slot": 2066
+    },
+    "native_state": {
+      "backing_units": 37000994,
+      "notes": 14,
+      "permanent_markers": 14,
+      "pool_lamports": 216958754,
+      "prior_funded_12_markers_unchanged": true
+    },
+    "new_R7_proofs": 0,
+    "new_R7_submissions": 0,
+    "no_live_public_gateway_or_browser_UI_timing_claim": true,
+    "normal_snapshot_backed_resumes": 2,
+    "original_pairs_unchanged": true,
+    "original_root": 41,
+    "policy_sha256": "ee74118cf344b3639c84e40843bfe5bbb5f73fd200bdea023e38eda5b94e53fa",
+    "protected_full_snapshots": [
+      1041,
+      2065
+    ],
+    "prune_through": 1039,
+    "recovery_negative_qualification": "retained command rejected by driver allowlist; no retained rows presented as canonical in that negative",
+    "result": {
+      "bytes": 42010,
+      "path": ".local/restart-scale-095/recovery-r7/evidence/result.json",
+      "sha256": "09cf5731725b4aed436525c161feac43dc3543f743850cf95c816dbc902f5f92"
+    },
+    "scope": "same disposable095 fixture; not original521886-block pilot",
+    "second_client_check": "exact durable cached settlement reload, not second canonical replay",
+    "selected_snapshot": 2065,
+    "status": "passed and closed"
+  },
+  "lock_edge": {
+    "after_sha256": "369f9f297a42fd632fc92f3ef4523034db8ca5818525ecc362a9da5740cdd9b0",
+    "all_other_tomllib_fields_exact": true,
+    "before_sha256": "8989b37ae537c1d28f0c45d7b385da135381a562bb6160467153b2edb39e8f21",
+    "new_resolved_packages": 0,
+    "only_change": "zolana-fast-check dependency list adds existing zstd edge"
+  },
+  "native_tests_prepared": [
+    "ancestry_archive::indexed::tests::pilot_scale_streams_1000003_full_records_and_keeps_only_bounded_digest_index",
+    "ancestry_archive::indexed::tests::v2_dispatch_retains_full_overlap_conflicts_live_errors_and_missing_tail_refusal",
+    "ancestry_archive::indexed::tests::v2_external_pins_owner_binding_and_hostile_manifest_bounds_are_required",
+    "ancestry_archive::indexed::tests::v2_truncated_corrupt_and_even_repinned_discontinuous_frames_never_load",
+    "ancestry_archive::indexed::tests::v2_postload_body_and_digest_rewrite_cannot_replace_verified_memory_pin",
+    "ancestry_archive::indexed::tests::v2_failed_preparation_is_never_adopted_or_overwritten",
+    "ancestry_archive::indexed::tests::indexed_sigkill_before_rename_never_publishes_partial_generation",
+    "ancestry_archive::indexed::tests::indexed_sigkill_after_commit_reloads_complete_generation_with_independent_pin"
+  ],
+  "not_claimed": [
+    "actual original-pilot metadata export completed",
+    "original-pilot-scale copy/prune/validator-restart acceptance",
+    "gateway/live runtime activation",
+    "original-pilot pruning approval",
+    "unbounded multi-year retention",
+    "independent consensus/light-client proof",
+    "new Chrome/WASM/Mac-to-Linux payment-speed result",
+    "public-testnet launch or competitor superiority",
+    "complete reproduction or retroactive d805 attestation",
+    "host reboot or power-loss acceptance"
+  ],
+  "r1_compilation_and_failure": {
+    "compiled_manifest_sha256": "235dba82bdb3fee45a2b69f7586f373a9c939f022bbfcdfb816a7d599260217e",
+    "native_compilation_passed": true,
+    "reason": "fixed FULL canonical CompletedDataIndexes carries4096-byte bitmap;1m records exceed512MiB uncompressed cap. Bounds correctly refused; no abbreviated fixture used.",
+    "result_sha256": "28c048ef1964a279bc0d5ed58029641f29da772a6339c5f6a74f45c4b7ccdaef",
+    "tests_failed": 1,
+    "tests_passed": 78
+  },
+  "scoped_final_acceptance": {
+    "path": ".local/restart-scale-095/final-acceptance.json",
+    "sha256": "d190f75ba52fe6b478d04b84f4c81aa37f753148b33eac03537db34c1bb96061"
+  },
+  "source_preparation": {
+    "bytes": 7576,
+    "path": ".local/restart-scale-095/native-r2/preparation.json",
+    "sha256": "bed84f45abf0bb1fdfd332137df061fce42cdbd5a70240d0b1d213e69aadc12d"
+  },
+  "status": "scoped native scale, client, fresh Linux recovery and preservation accepted; original-pilot rollout remains gated",
+  "unchanged_recovery_gates": [
+    "durable policy opt-in restricted to a fresh disposable three-validator fixture with exact independent config SHA",
+    "immutable resume/genesis/identity/voter/original certified BANK root domain",
+    "ordinary actual full snapshot validation and pinned protected pair",
+    "current live certified root/head above prune cutoff",
+    "complete canonical transaction export separately pinned; metadata archive is not transaction history",
+    "no missing-tail fallback; full live/archive SlotMeta conflicts and live read/decode errors fatal",
+    "old v1 format/count/byte bounds and tests remain available"
+  ],
+  "validation": {
+    "all_other_tomllib_lock_fields_exact": true,
+    "bounded_seven_file_git_apply_after_hashes_match": true,
+    "bounded_seven_file_git_apply_check_passed": true,
+    "existing_candidate_patches_preserved": true,
+    "five_existing_before_files_match_actual094_manifest": true,
+    "no_build_host_actor_or_wallet_actions_by_packager": true,
+    "only_existing_zstd_dependency_edge_added": true,
+    "rustfmt_parser_passed": true,
+    "two_new_files_absent_in_actual094_manifest": true
+  }
+}
