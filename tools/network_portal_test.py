@@ -145,5 +145,17 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(request('/api/network',method='POST')[0],405);self.assertEqual(request('/../network.json')[0],404);self.assertEqual(request('/api/blocks?limit=1&limit=2')[0],400);self.assertEqual(request('/api/sendTransaction')[0],400)
         self.assertEqual(request('/')[0],200)
 
+    def test_brand_assets_use_portal_local_bytes_without_a_shared_wallet_fallback(self):
+        server=portal.Server(0,self.app());thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();self.addCleanup(thread.join,3);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        for route,name in (('/zolana-mark.svg','zolana-mark.svg'),('/favicon.svg','favicon.svg')):
+            connection=HTTPConnection('127.0.0.1',server.server_address[1],timeout=3)
+            try:
+                connection.request('GET',route);response=connection.getresponse();raw=response.read()
+                self.assertEqual(response.status,200);self.assertEqual(response.getheader('Content-Type'),'image/svg+xml')
+                self.assertEqual(raw,(portal.ASSETS/name).read_bytes())
+                self.assertNotEqual(raw,(portal.ASSETS.parent/'wallet-ui'/name).read_bytes())
+                self.assertIn("img-src 'self'",response.getheader('Content-Security-Policy'))
+            finally:connection.close()
+
 
 if __name__=='__main__':unittest.main()
