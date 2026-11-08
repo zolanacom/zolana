@@ -6,6 +6,10 @@ import re
 ALPHABET='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 MAX_BYTES=2*1024*1024
 MAX_BLOCKS=2048
+MAX_RETAINED_BLOCKS=1024
+MAX_RETAINED_TRANSACTIONS=4096
+FEED_V1='native-explorer-feed-v1'
+FEED_V2='native-explorer-feed-v2'
 
 
 def b58(raw):
@@ -50,22 +54,43 @@ def block(slot,value):
     return {'slot':slot,'parent_slot':result['parentSlot'],'blockhash':result['blockhash'],'previous_blockhash':result['previousBlockhash'],'block_height':result['blockHeight'],'transaction_count':len(rows),'transactions':rows,'status':'finalized'}
 
 
-def validate(value,network):
-    keys={'format','network','instance','sequence','published_at','sampled_at','phase','observed_finalized_slot','blocks','validators'}
-    if not isinstance(value,dict) or set(value)!=keys or value['format']!='native-explorer-feed-v1' or value['network']!=network or not isinstance(value['instance'],str) or re.fullmatch('[0-9a-f]{32}',value['instance']) is None or not natural(value['sequence']) or value['sequence']==0 or value['phase'] not in ('live','syncing','paused','unavailable'):raise ValueError('invalid explorer feed identity')
-    for k in ('published_at','sampled_at'):
-        if type(value[k]) not in (int,float) or not math.isfinite(value[k]) or value[k]<0:raise ValueError('invalid explorer timestamp')
-    if value['sampled_at']>value['published_at'] or not natural(value['observed_finalized_slot']) or not isinstance(value['blocks'],list) or not 1<=len(value['blocks'])<=MAX_BLOCKS or not isinstance(value['validators'],list) or len(value['validators'])>128:raise ValueError('invalid explorer feed bounds')
-    previous=None;signatures=set()
-    for item in value['blocks']:
+def validate_blocks(rows,network,signatures,*,retained=False):
+    previous=None
+    for item in rows:
         if not isinstance(item,dict) or set(item)!={'slot','parent_slot','blockhash','previous_blockhash','block_height','transaction_count','transactions','status'} or not natural(item['slot']) or not natural(item['parent_slot']) or item['parent_slot']>=item['slot'] or not natural(item['block_height']) or not public_key(item['blockhash']) or not public_key(item['previous_blockhash']) or item['status']!='finalized' or not isinstance(item['transactions'],list) or not natural(item['transaction_count']) or item['transaction_count']!=len(item['transactions']) or len(item['transactions'])>1024:raise ValueError('invalid explorer block')
-        if previous and (item['parent_slot']!=previous['slot'] or item['previous_blockhash']!=previous['blockhash'] or item['block_height']!=previous['block_height']+1):raise ValueError('explorer feed ancestry changed')
+        if retained and not item['transactions']:raise ValueError('retained explorer blocks require public transactions')
+        if previous:
+            if item['parent_slot']<previous['slot'] or item['block_height']<=previous['block_height']:raise ValueError('explorer feed ancestry changed')
+            linked=(item['parent_slot']==previous['slot'] and item['previous_blockhash']==previous['blockhash'] and item['block_height']==previous['block_height']+1)
+            adjacent=item['parent_slot']==previous['slot'] or item['block_height']==previous['block_height']+1
+            if (not retained or adjacent) and not linked:raise ValueError('explorer feed ancestry changed')
         if item['parent_slot']==0 and item['previous_blockhash']!=network['genesis_hash']:raise ValueError('explorer genesis anchor changed')
         for i,tx in enumerate(item['transactions']):
             if not isinstance(tx,dict) or set(tx)!={'signature','slot','position','fee_units','execution','status'} or not isinstance(tx['signature'],str) or re.fullmatch('[1-9A-HJ-NP-Za-km-z]{64,88}',tx['signature']) is None or tx['signature'] in signatures or type(tx['slot']) is not int or tx['slot']!=item['slot'] or type(tx['position']) is not int or tx['position']!=i or not natural(tx['fee_units']) or tx['execution'] not in ('success','failed') or tx['status']!='finalized':raise ValueError('invalid explorer transaction')
             signatures.add(tx['signature'])
         previous=item
+    return previous
+
+
+def validate(value,network):
+    keys={'format','network','instance','sequence','published_at','sampled_at','phase','observed_finalized_slot','blocks','validators'}
+    version=value.get('format') if isinstance(value,dict) else None
+    if version==FEED_V2:keys.update(('retained_blocks','retained_from_slot'))
+    if version not in (FEED_V1,FEED_V2) or set(value)!=keys or value['network']!=network or not isinstance(value['instance'],str) or re.fullmatch('[0-9a-f]{32}',value['instance']) is None or not natural(value['sequence']) or value['sequence']==0 or value['phase'] not in ('live','syncing','paused','unavailable'):raise ValueError('invalid explorer feed identity')
+    for k in ('published_at','sampled_at'):
+        if type(value[k]) not in (int,float) or not math.isfinite(value[k]) or value[k]<0:raise ValueError('invalid explorer timestamp')
+    if value['sampled_at']>value['published_at'] or not natural(value['observed_finalized_slot']) or not isinstance(value['blocks'],list) or not 1<=len(value['blocks'])<=MAX_BLOCKS or not isinstance(value['validators'],list) or len(value['validators'])>128:raise ValueError('invalid explorer feed bounds')
+    signatures=set()
+    previous=validate_blocks(value['blocks'],network,signatures)
     if previous['slot']>value['observed_finalized_slot'] or (value['phase']=='live' and previous['slot']!=value['observed_finalized_slot']):raise ValueError('explorer finality mismatch')
+    if version==FEED_V2:
+        retained=value['retained_blocks'];floor=value['retained_from_slot'];first=value['blocks'][0]
+        if not natural(floor) or not 0<floor<=first['slot'] or not isinstance(retained,list) or len(retained)>MAX_RETAINED_BLOCKS:raise ValueError('explorer retained coverage exceeds bounds')
+        end=validate_blocks(retained,network,signatures,retained=True)
+        if sum(item['transaction_count'] for item in retained)>MAX_RETAINED_TRANSACTIONS:raise ValueError('explorer retained transaction capacity exhausted')
+        if end and (retained[0]['slot']<floor or end['slot']>first['parent_slot'] or end['block_height']>=first['block_height'] or
+                ((end['slot']==first['parent_slot'] or end['block_height']+1==first['block_height']) and
+                 (end['slot']!=first['parent_slot'] or end['blockhash']!=first['previous_blockhash'] or end['block_height']+1!=first['block_height']))):raise ValueError('explorer retained ancestry or coverage mismatch')
     votes=set()
     for v in value['validators']:
         if not isinstance(v,dict) or set(v)!={'identity','vote_account','last_vote','activated_stake','delinquent'} or not public_key(v['identity']) or not public_key(v['vote_account']) or v['vote_account'] in votes or not natural(v['last_vote']) or not isinstance(v['activated_stake'],str) or re.fullmatch('[0-9]{1,20}',v['activated_stake']) is None or int(v['activated_stake'])>2**64-1 or type(v['delinquent']) is not bool:raise ValueError('invalid public validator observation')

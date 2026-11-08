@@ -77,7 +77,7 @@ class Portal:
             if value!=self.feed_value:
                 a=copy.copy(self.base_archive) if self.base_archive else Archive.__new__(Archive)
                 a.by_slot=dict(self.base_archive.by_slot) if self.base_archive else {};a.by_signature=dict(self.base_archive.by_signature) if self.base_archive else {}
-                for item in value['blocks']:
+                for item in value.get('retained_blocks', []) + value['blocks']:
                     summary={k:v for k,v in item.items() if k!='transactions'};old=a.by_slot.get(item['slot'])
                     if old and any(old[k]!=summary[k] for k in ('slot','parent_slot','blockhash','previous_blockhash','block_height')):raise ValueError('explorer source fork mismatch')
                     # Retained wallet history contains native-payment transactions,
@@ -188,10 +188,9 @@ class Handler(BaseHTTPRequestHandler):
                 params=parse_qs(url.query,keep_blank_values=True,max_num_fields=3)
                 if any(len(v)!=1 for v in params.values()):raise ValueError('duplicate query')
                 return self.respond(200,json.dumps(self.server.app.query(url.path,params),allow_nan=False).encode())
-            paths={'/':'index.html','/style.css':'style.css','/app.js':'app.js','/views.js':'views.js','/veil.png':'veil.png','/zolana-mark.svg':'zolana-mark.svg','/favicon.svg':'favicon.svg'}
+            paths={'/':'index.html','/style.css':'style.css','/app.js':'app.js','/views.js':'views.js','/zolana-mark.svg':'zolana-mark.svg','/favicon.svg':'favicon.svg'}
             if url.query or url.path not in paths:return self.respond(404,b'{"error":"Page not found."}')
-            root=ASSETS.parent/'wallet-ui' if url.path in ('/zolana-mark.svg','/favicon.svg') else ASSETS
-            path=root/paths[url.path];raw=path.read_bytes()
+            path=ASSETS/paths[url.path];raw=path.read_bytes()
             self.respond(200,raw,mimetypes.guess_type(path)[0] or 'application/octet-stream')
         except (OSError,ValueError,KeyError,RecursionError):self.respond(400,b'{"error":"History request unavailable. Preserve the selected source and try again."}')
     def do_POST(self):self.respond(405,b'{"error":"This explorer is read-only."}')
