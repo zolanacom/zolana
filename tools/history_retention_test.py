@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from history_retention import Retention, capture, manifest, MIN_FREE, MAX_SEGMENT, MAX_LAG
+from history_retention import Retention, capture, manifest, usage, MIN_FREE, MAX_SEGMENT, MAX_LAG
 
 NETWORK = {'network': [7] * 32, 'genesis_hash': '11111111111111111111111111111111'}
 H = '11111111111111111111111111111111'
@@ -43,6 +43,12 @@ class CaptureTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve(); self.source = self.root / 'source'; self.mirror = self.root / 'mirror'
         archive(self.source)
+
+    def test_usage_tolerates_an_atomically_published_temporary_file(self):
+        vanished = self.source / '.segment-disappeared.tmp'
+        present = self.source / 'manifest.json'
+        with patch.object(Path, 'iterdir', return_value=iter([vanished, present])):
+            self.assertEqual(usage(self.source), present.stat().st_size)
 
     def test_captured_manifest_is_exact_and_excludes_keys_locks_and_uncommitted_payloads(self):
         write(self.source / 'operator.password', b'not-public-history')

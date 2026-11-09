@@ -104,7 +104,12 @@ def usage(path, budget=STORE_BUDGET):
     total = count = 0
     for entry in path.iterdir():
         count += 1
-        meta = entry.lstat()
+        try:
+            meta = entry.lstat()
+        except FileNotFoundError:
+            # A collector can publish an atomic temporary file while this
+            # inventory is running. Referenced segments are verified separately.
+            continue
         if count > MAX_SEGMENTS * 4 + 16 or not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
             raise ValueError('unsafe history storage inventory')
         total += meta.st_size
