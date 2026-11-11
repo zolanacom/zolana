@@ -155,7 +155,7 @@ def safe_name(name):
 def inventory(files):
     if 'MANIFEST.json' not in files or not REQUIRED<=set(files):raise ValueError('wallet release missing required files')
     # Optional fixed brand assets keep existing authenticated releases valid.
-    if any(name not in REQUIRED|{'MANIFEST.json','BUILD.json','assets/zolana-mark.svg','assets/favicon.svg'} and not name.startswith('notices/') for name in files):raise ValueError('file outside wallet release allowlist')
+    if any(name not in REQUIRED|{'MANIFEST.json','BUILD.json','runtime/wallet_session.py','assets/zolana-mark.svg','assets/favicon.svg'} and not name.startswith('notices/') for name in files):raise ValueError('file outside wallet release allowlist')
     raw=files['MANIFEST.json']
     if len(raw)>1_000_000:raise ValueError('manifest exceeds limit')
     manifest=decode(raw)
@@ -254,29 +254,56 @@ class Installation:
             meta=os.fstat(self.lock)
             if not stat.S_ISREG(meta.st_mode) or meta.st_uid!=os.getuid() or meta.st_mode&0o077:raise ValueError('unsafe installation lock')
             fcntl.flock(self.lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            raw=read(self.root/'trust.json',8192,True);self.trust=decode(raw);t=self.trust
-            if (not isinstance(t,dict) or set(t)!={'format','channel','key_sha256','public_key_der','profile_sha256','platform','minimum_sequence'} or t['format']!='native-wallet-release-trust-v1' or
-                    t['platform']!=host() or not sequence(t['minimum_sequence']) or not hex64(t['profile_sha256']) or not hex64(t['key_sha256']) or
-                    not isinstance(t['channel'],str) or re.fullmatch('[a-z0-9][a-z0-9-]{0,47}',t['channel']) is None or
-                    not isinstance(t['public_key_der'],str) or sha(base64.b64decode(t['public_key_der'],validate=True))!=t['key_sha256']):raise ValueError('invalid release trust policy')
-            public_pem(base64.b64decode(t['public_key_der'],validate=True))
-            marker=decode(read(self.root/'initialized',8192,True))
-            if marker!={'format':'native-wallet-install-marker-v1','trust_sha256':sha(raw)}:raise ValueError('release trust policy changed')
-            self.state=decode(read(self.root/'state.json',16384,True));s=self.state
-            if (not isinstance(s,dict) or set(s)!={'format','trust_sha256','sequence','active','pending'} or s['format']!='native-wallet-install-v1' or
-                    s['trust_sha256']!=sha(raw) or type(s['sequence']) is not int or not 0<=s['sequence']<=2**31-1 or (s['sequence']==0)!=(s['active'] is None)):
-                raise ValueError('invalid initialized installation state')
-            directory(self.root/'releases')
-            for item in (s['active'],s['pending']):
-                if item is None:continue
-                if not isinstance(item,dict) or set(item)!={'release','descriptor_sha256'} or not hex64(item['descriptor_sha256']):raise ValueError('invalid install action')
-                descriptor(item['release'])
-                if sha(encode(item['release']))!=item['descriptor_sha256']:raise ValueError('install action digest changed')
-                for k in ('channel','key_sha256','profile_sha256','platform'):
-                    if item['release'][k]!=self.trust[k]:raise ValueError('install action policy changed')
-            if s['active'] and s['active']['release']['sequence']!=s['sequence']:raise ValueError('active sequence changed')
-            if s['pending'] and s['pending']['release']['sequence']<=s['sequence']:raise ValueError('pending sequence rollback')
+            self.trust,trust_sha256=self._load_trust()
+            self.state=self._load_state(trust_sha256)
         except BaseException:self.close();raise
+
+    def _load_trust(self):
+        """Validate the immutable publisher policy before reading install state."""
+        raw=read(self.root/'trust.json',8192,True)
+        trust=decode(raw)
+        if (not isinstance(trust,dict) or
+                set(trust)!={'format','channel','key_sha256','public_key_der','profile_sha256','platform','minimum_sequence'} or
+                trust['format']!='native-wallet-release-trust-v1' or
+                trust['platform']!=host() or not sequence(trust['minimum_sequence']) or
+                not hex64(trust['profile_sha256']) or not hex64(trust['key_sha256']) or
+                not isinstance(trust['channel'],str) or re.fullmatch('[a-z0-9][a-z0-9-]{0,47}',trust['channel']) is None or
+                not isinstance(trust['public_key_der'],str) or
+                sha(base64.b64decode(trust['public_key_der'],validate=True))!=trust['key_sha256']):
+            raise ValueError('invalid release trust policy')
+        public_pem(base64.b64decode(trust['public_key_der'],validate=True))
+        trust_sha256=sha(raw)
+        marker=decode(read(self.root/'initialized',8192,True))
+        if marker!={'format':'native-wallet-install-marker-v1','trust_sha256':trust_sha256}:
+            raise ValueError('release trust policy changed')
+        return trust,trust_sha256
+
+    def _load_state(self,trust_sha256):
+        """Validate committed and interrupted actions against the pinned policy."""
+        state=decode(read(self.root/'state.json',16384,True))
+        if (not isinstance(state,dict) or set(state)!={'format','trust_sha256','sequence','active','pending'} or
+                state['format']!='native-wallet-install-v1' or state['trust_sha256']!=trust_sha256 or
+                type(state['sequence']) is not int or not 0<=state['sequence']<=2**31-1 or
+                (state['sequence']==0)!=(state['active'] is None)):
+            raise ValueError('invalid initialized installation state')
+        directory(self.root/'releases')
+        for action in (state['active'],state['pending']):
+            if action is None:continue
+            if (not isinstance(action,dict) or set(action)!={'release','descriptor_sha256'} or
+                    not hex64(action['descriptor_sha256'])):
+                raise ValueError('invalid install action')
+            descriptor(action['release'])
+            if sha(encode(action['release']))!=action['descriptor_sha256']:
+                raise ValueError('install action digest changed')
+            for field in ('channel','key_sha256','profile_sha256','platform'):
+                if action['release'][field]!=self.trust[field]:
+                    raise ValueError('install action policy changed')
+        if state['active'] and state['active']['release']['sequence']!=state['sequence']:
+            raise ValueError('active sequence changed')
+        if state['pending'] and state['pending']['release']['sequence']<=state['sequence']:
+            raise ValueError('pending sequence rollback')
+        return state
+
     def close(self):
         if self.lock is not None:os.close(self.lock);self.lock=None
     def ready(self):

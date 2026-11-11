@@ -1,8 +1,10 @@
 //! Invite admission and durable gateway quotas. No wallet spending authority is exported.
+#[cfg(test)]
+use crate::keys::WalletKey;
 use crate::{
     connection::TesterProfile,
     faucet::{self, Claim},
-    keys::{read_private, write_private_new, Network, WalletKey},
+    keys::{read_private, write_private_new, Network},
     operation::WalletOperation,
     sponsor::replace,
     Result,
@@ -11,7 +13,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_pubkey::Pubkey;
-use solana_signature::Signature;
+#[cfg(test)]
 use solana_signer::Signer;
 use std::{
     fs,
@@ -19,6 +21,10 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+mod client;
+mod proof;
+pub use client::{request_join, request_status};
 
 const STATE: &str = "admission.json";
 const MEMBERSHIP_SECONDS: u64 = 7 * 86400;
@@ -55,79 +61,7 @@ pub struct Proof {
     body_digest: String,
     signature: String,
 }
-impl Proof {
-    fn message(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&(
-            "native-invited-access-v1",
-            &self.purpose,
-            &self.network,
-            &self.audience,
-            &self.fee_address,
-            self.issued_at,
-            self.expires_at,
-            &self.nonce,
-            &self.body_digest,
-        ))?)
-    }
-    pub fn signed(wallet: &WalletKey, audience: &str, purpose: &str, body: &[u8]) -> Result<Self> {
-        Self::signed_at(wallet, audience, purpose, body, now()?)
-    }
-    fn signed_at(
-        wallet: &WalletKey,
-        audience: &str,
-        purpose: &str,
-        body: &[u8],
-        time: u64,
-    ) -> Result<Self> {
-        let mut proof = Self {
-            purpose: purpose.into(),
-            network: wallet.network.clone(),
-            audience: audience.into(),
-            fee_address: wallet.fee_keypair().pubkey().to_string(),
-            issued_at: time,
-            expires_at: time.checked_add(600).ok_or("clock overflow")?,
-            nonce: URL_SAFE_NO_PAD.encode(rand::random::<[u8; 24]>()),
-            body_digest: digest(body),
-            signature: String::new(),
-        };
-        proof.signature = wallet
-            .fee_keypair()
-            .sign_message(&proof.message()?)
-            .to_string();
-        Ok(proof)
-    }
-    fn verify(&self, policy: &Policy, purpose: &str, body: &[u8], time: u64) -> Result<()> {
-        let audience = if purpose == "rpc" {
-            &policy.rpc_audience
-        } else {
-            &policy.faucet_audience
-        };
-        if self.network != policy.network
-            || self.purpose != purpose
-            || &self.audience != audience
-            || self.nonce.len() != 32
-            || self.body_digest != digest(body)
-            || self.expires_at != self.issued_at.checked_add(600).ok_or("clock overflow")?
-            || self.issued_at > time.saturating_add(30)
-            || self.expires_at <= time
-        {
-            return Err("access proof invalid or expired".into());
-        }
-        let key: Pubkey = self.fee_address.parse()?;
-        if !key.is_on_curve()
-            || !self
-                .signature
-                .parse::<Signature>()?
-                .verify(key.as_ref(), &self.message()?)
-        {
-            return Err("access proof signature invalid".into());
-        }
-        Ok(())
-    }
-    pub fn header(&self) -> Result<String> {
-        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
-    }
-}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Join {
@@ -142,76 +76,6 @@ pub struct Status {
 }
 fn join_body(claim: &Claim, invitation: Option<&str>) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&(claim, invitation))?)
-}
-fn post(profile: &TesterProfile, suffix: &str, body: Vec<u8>) -> Result<Value> {
-    profile.validate()?;
-    let endpoint = profile.faucet.as_ref().ok_or("no admission endpoint")?;
-    let mut client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20));
-    if let Some(pem) = &profile.local_tls_ca_pem {
-        client = client.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
-    }
-    let response = client
-        .build()?
-        .post(format!("{}{suffix}", endpoint.url.trim_end_matches('/')))
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()?;
-    if !response.status().is_success() {
-        return Err(match response.status().as_u16(){403=>"Invitation or access is invalid, expired, revoked or already bound to another wallet.",429=>"Testnet request limit reached. Wait before checking the same wallet again.",409=>"Testnet admission capacity reached. An existing grant is preserved.",_=>"Testnet access service unavailable. Your original wallet and grant remain saved."}.into());
-    }
-    use std::io::Read;
-    let mut data = Vec::new();
-    response.take(4097).read_to_end(&mut data)?;
-    if data.len() > 4096 {
-        return Err("admission response exceeds limit".into());
-    }
-    Ok(serde_json::from_slice(&data)?)
-}
-pub fn request_join(
-    profile: &TesterProfile,
-    wallet: &WalletKey,
-    invitation: Option<String>,
-) -> Result<Value> {
-    let claim = Claim::signed(wallet)?;
-    let endpoint = profile.faucet.as_ref().ok_or("no admission endpoint")?;
-    let proof = Proof::signed(
-        wallet,
-        &endpoint.url,
-        "join",
-        &join_body(&claim, invitation.as_deref())?,
-    )?;
-    let value = post(
-        profile,
-        "/join",
-        serde_json::to_vec(&Join {
-            claim: claim.clone(),
-            invitation,
-            proof,
-        })?,
-    )?;
-    if value["claim_id"] != claim.id() || value["admitted"] != true {
-        return Err("invalid admission receipt".into());
-    }
-    Ok(value)
-}
-pub fn request_status(profile: &TesterProfile, wallet: &WalletKey) -> Result<Value> {
-    let endpoint = profile.faucet.as_ref().ok_or("no admission endpoint")?;
-    let value = post(
-        profile,
-        "/status",
-        serde_json::to_vec(&Status {
-            proof: Proof::signed(wallet, &endpoint.url, "status", b"")?,
-        })?,
-    )?;
-    if !value["admitted"].is_boolean()
-        || value["fee_address"] != wallet.fee_keypair().pubkey().to_string()
-    {
-        return Err("invalid membership response".into());
-    }
-    Ok(value)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -251,17 +115,22 @@ struct Bucket {
 }
 impl Bucket {
     fn take(&mut self, period: u64, limit: u64) -> Result<()> {
+        self.take_units(period, limit, 1)
+    }
+    fn take_units(&mut self, period: u64, limit: u64, units: u64) -> Result<()> {
         if period < self.period {
             return Err("clock moved backwards; preserve admission state".into());
         }
-        if period > self.period {
-            self.period = period;
-            self.count = 0;
+        if units == 0 {
+            return Err("positive authorization units required".into());
         }
-        if self.count >= limit {
+        let count = if period > self.period { 0 } else { self.count };
+        let next = count.checked_add(units).ok_or("request quota exhausted")?;
+        if next > limit {
             return Err("request quota exhausted".into());
         }
-        self.count += 1;
+        self.period = period;
+        self.count = next;
         Ok(())
     }
 }
@@ -360,7 +229,8 @@ pub fn initialize(root: &Path, profile_path: &Path, daily: usize, rpc_limit: u64
     let profile = TesterProfile::load(profile_path)?;
     let source = TesterProfile::load(&root.join("profile.json"))?;
     let (network, capacity, required) = faucet::access_context(root)?;
-    if required
+    if profile.access_audiences.is_some()
+        || required
         || !profile.invite_required
         || profile.rpc.url == source.rpc.url
         || profile.network() != network
@@ -585,22 +455,34 @@ pub fn authorize(root: &Path, proof: Proof) -> Result<Value> {
     authorize_at(root, proof, now()?)
 }
 fn authorize_at(root: &Path, proof: Proof, time: u64) -> Result<Value> {
+    authorize_units_at(root, proof, 1, time)?;
+    Ok(json!({"authorized":true}))
+}
+/// Charge the same finite member/global RPC units in one locked durable write.
+/// No authorization or revocation result is cached between requests.
+pub fn authorize_many(root: &Path, proof: Proof, units: u64) -> Result<Value> {
+    authorize_units_at(root, proof, units, now()?)
+}
+fn authorize_units_at(root: &Path, proof: Proof, units: u64, time: u64) -> Result<Value> {
+    if !(1..=2048).contains(&units) {
+        return Err("authorization units must be between 1 and 2048".into());
+    }
     let _lock = lock(root)?;
     let mut state = load(root)?;
     let time = clock(&mut state, time)?;
     proof.verify(&state.policy, "rpc", b"", time)?;
     let i = member_index(&state, &proof.fee_address).ok_or("invitation required")?;
     active(&state.invitations[i], time)?;
-    state.global_rpc.take(time / 60, 6000)?;
+    state.global_rpc.take_units(time / 60, 6000, units)?;
     let limit = state.policy.rpc_per_minute;
     state.invitations[i]
         .member
         .as_mut()
         .ok_or("missing member")?
         .rpc
-        .take(time / 60, limit)?;
+        .take_units(time / 60, limit, units)?;
     save(root, &state)?;
-    Ok(json!({"authorized":true}))
+    Ok(json!({"authorized":true,"units":units}))
 }
 pub fn edge(root: &Path, channel: &str, peer: &str) -> Result<Value> {
     let _lock = lock(root)?;
@@ -644,6 +526,100 @@ pub fn edge(root: &Path, channel: &str, peer: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn public_alias_profile() -> TesterProfile {
+        TesterProfile {
+            format: "native-wallet-profile-v1".into(),
+            label: "Explicit public client".into(),
+            key_mode: "user-wallet-v1".into(),
+            network: [7; 32],
+            genesis_hash: bs58::encode([9; 32]).into_string(),
+            program: native_payment_program::id().to_string(),
+            pool: native_payment_program::pool_address().to_string(),
+            pool_format: "NPOOL003".into(),
+            private_send_transport: None,
+            retained_history_format: None,
+            access_audiences: Some(crate::connection::AccessAudiences {
+                format: "native-access-audiences-v1".into(),
+                network: [7; 32],
+                genesis_hash: bs58::encode([9; 32]).into_string(),
+                rpc: "https://127.0.0.1:39443".into(),
+                faucet: "https://127.0.0.1:39444".into(),
+            }),
+            recipient_withdrawals: true,
+            rpc: crate::connection::Endpoint {
+                transport: "https".into(),
+                url: "https://pilot.example.invalid".into(),
+            },
+            faucet: Some(crate::connection::Endpoint {
+                transport: "https".into(),
+                url: "https://pilot.example.invalid:8444".into(),
+            }),
+            invite_required: true,
+            local_tls_ca_pem: None,
+        }
+    }
+
+    #[test]
+    fn access_audiences_sign_original_policy_without_transport_fallback() {
+        let profile = public_alias_profile();
+        profile.validate().unwrap();
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let policy = Policy {
+            format: "native-invited-testnet-v1".into(),
+            network: profile.network(),
+            rpc_audience: "https://127.0.0.1:39443".into(),
+            faucet_audience: "https://127.0.0.1:39444".into(),
+            max_invites: 1,
+            daily_admissions: 1,
+            rpc_per_minute: 1000,
+        };
+        let before = serde_json::to_vec(&policy).unwrap();
+        let time = 1_700_000_000;
+        for purpose in ["rpc", "join", "status"] {
+            let (audience, transport) = if purpose == "rpc" {
+                (profile.rpc_audience(), profile.rpc.url.as_str())
+            } else {
+                (
+                    profile.faucet_audience().unwrap(),
+                    profile.faucet.as_ref().unwrap().url.as_str(),
+                )
+            };
+            let body = b"exact purpose-bound test body";
+            let proof = Proof::signed_at(&wallet, audience, purpose, body, time).unwrap();
+            proof.verify(&policy, purpose, body, time).unwrap();
+            let wrong = Proof::signed_at(&wallet, transport, purpose, body, time).unwrap();
+            assert!(wrong.verify(&policy, purpose, body, time).is_err());
+        }
+        assert_eq!(serde_json::to_vec(&policy).unwrap(), before);
+    }
+
+    #[test]
+    fn access_audiences_are_client_only_and_cannot_initialize_an_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("unused-faucet");
+        let mut source = public_alias_profile();
+        source.access_audiences = None;
+        source.invite_required = false;
+        source.faucet = None;
+        source.rpc = crate::connection::Endpoint {
+            transport: "loopback-http".into(),
+            url: "http://127.0.0.1:18899".into(),
+        };
+        let source_path = directory.path().join("source.json");
+        fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
+        faucet::initialize(&root, &source_path, b"alias-authority-test-password", 1).unwrap();
+        let claims = fs::read(root.join("claims.json")).unwrap();
+        let profile_path = directory.path().join("public-alias.json");
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&public_alias_profile()).unwrap(),
+        )
+        .unwrap();
+        assert!(initialize(&root, &profile_path, 1, 1000).is_err());
+        assert!(!root.join(STATE).exists());
+        assert_eq!(fs::read(root.join("claims.json")).unwrap(), claims);
+    }
+
     fn fixture(
         capacity: usize,
         daily: usize,
@@ -660,6 +636,9 @@ mod tests {
             program: native_payment_program::id().to_string(),
             pool: native_payment_program::pool_address().to_string(),
             pool_format: "NPOOL003".into(),
+            private_send_transport: None,
+            retained_history_format: None,
+            access_audiences: None,
             recipient_withdrawals: true,
             rpc: crate::connection::Endpoint {
                 transport: "loopback-http".into(),
@@ -873,5 +852,136 @@ mod tests {
             1
         );
         assert_eq!(load(&root).unwrap().admissions.count, 1);
+    }
+
+    #[test]
+    fn bulk_rpc_authorization_persists_exact_units_and_rejects_partial_debits() {
+        let (_dir, root, profile) = fixture(1, 1, 5);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let time = now().unwrap();
+        let invitation = token(&root, "bulk", 3600, None);
+        join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
+        let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        assert_eq!(
+            authorize_units_at(&root, proof.clone(), 3, time).unwrap(),
+            json!({"authorized":true,"units":3})
+        );
+        let before = fs::read(root.join(STATE)).unwrap();
+        assert!(authorize_units_at(&root, proof.clone(), 3, time).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), before);
+        for units in [0, 2049, u64::MAX] {
+            assert!(authorize_units_at(&root, proof.clone(), units, time).is_err());
+            assert_eq!(fs::read(root.join(STATE)).unwrap(), before);
+        }
+        authorize_units_at(&root, proof.clone(), 2, time).unwrap();
+        let state = load(&root).unwrap();
+        assert_eq!(state.global_rpc.count, 5);
+        assert_eq!(state.invitations[0].member.as_ref().unwrap().rpc.count, 5);
+        assert!(authorize_at(&root, proof, time).is_err());
+    }
+
+    #[test]
+    fn wide_history_debits_2048_units_without_increasing_global_capacity() {
+        let (_dir, root, profile) = fixture(1, 1, 10000);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let time = now().unwrap();
+        let invitation = token(&root, "wide", 3600, None);
+        join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
+        let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        for _ in 0..2 {
+            authorize_units_at(&root, proof.clone(), 2048, time).unwrap();
+        }
+        let before = fs::read(root.join(STATE)).unwrap();
+        assert!(authorize_units_at(&root, proof.clone(), 2048, time).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), before);
+        authorize_units_at(&root, proof, 1904, time).unwrap();
+        assert_eq!(load(&root).unwrap().global_rpc.count, 6000);
+    }
+
+    #[test]
+    fn bulk_rpc_authorization_preserves_global_cap_and_checks_revocation() {
+        let (_dir, root, profile) = fixture(1, 1, 10000);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let time = now().unwrap();
+        let invitation = token(&root, "global", 3600, None);
+        join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
+        let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        let mut state = load(&root).unwrap();
+        state.global_rpc = Bucket {
+            period: time / 60,
+            count: 5999,
+        };
+        state.invitations[0].member.as_mut().unwrap().rpc = Bucket {
+            period: time / 60,
+            count: 5999,
+        };
+        save(&root, &state).unwrap();
+        let before = fs::read(root.join(STATE)).unwrap();
+        assert!(authorize_units_at(&root, proof.clone(), 2, time).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), before);
+        authorize_units_at(&root, proof.clone(), 1, time).unwrap();
+        let id = load(&root).unwrap().invitations[0].id.clone();
+        revoke(&root, &id).unwrap();
+        let revoked = fs::read(root.join(STATE)).unwrap();
+        assert!(authorize_units_at(&root, proof, 1, time).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), revoked);
+    }
+
+    #[test]
+    fn bulk_rpc_authorization_keeps_minute_rollover_and_rejects_clock_rollback() {
+        let (_dir, root, profile) = fixture(1, 1, 5);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let time = now().unwrap();
+        let invitation = token(&root, "rollover", 3600, None);
+        join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
+        let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        authorize_units_at(&root, proof.clone(), 5, time).unwrap();
+        let later = time + 60;
+        let fresh = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", later).unwrap();
+        authorize_units_at(&root, fresh, 4, later).unwrap();
+        let current = fs::read(root.join(STATE)).unwrap();
+        assert!(authorize_units_at(&root, proof, 1, time).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), current);
+        let state = load(&root).unwrap();
+        assert_eq!(state.global_rpc.period, later / 60);
+        assert_eq!(state.global_rpc.count, 4);
+        assert_eq!(state.invitations[0].member.as_ref().unwrap().rpc.count, 4);
+        let expired = later + MEMBERSHIP_SECONDS;
+        let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", expired).unwrap();
+        assert!(authorize_units_at(&root, proof, 1, expired).is_err());
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), current);
+    }
+
+    #[test]
+    fn concurrent_bulk_rpc_debits_cannot_overdraw_member_budget() {
+        let (_dir, root, profile) = fixture(1, 1, 3);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let time = now().unwrap();
+        let invitation = token(&root, "concurrent-bulk", 3600, None);
+        join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
+        let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let proof = proof.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    authorize_units_at(&root, proof, 2, time).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|ok| *ok)
+                .count(),
+            1
+        );
+        let state = load(&root).unwrap();
+        assert_eq!(state.global_rpc.count, 2);
+        assert_eq!(state.invitations[0].member.as_ref().unwrap().rpc.count, 2);
     }
 }

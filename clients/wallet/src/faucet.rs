@@ -11,18 +11,30 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_commitment_config::CommitmentConfig;
+#[cfg(test)]
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
-use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_signature::Signature;
 use solana_signer::Signer;
+#[cfg(test)]
 use solana_transaction::Transaction;
-use std::{fs, path::Path, time::Duration};
+#[cfg(test)]
+use std::time::Duration;
+use std::{fs, path::Path};
 
 pub const PRIVATE_GRANT: u64 = 1_000_000;
 pub const GAS_GRANT: u64 = 150_000_000;
+pub const NATIVE_PRIVATE_GRANT: u64 = 20_000_000;
+const NATIVE_FAUCET_FORMAT: &str = "native-test-faucet-native-v1";
 const PAYMENT_CAP: u64 = 150_000_000;
 const ATTEMPTS: u8 = 3;
+
+mod client;
+mod gas_transfer;
+mod operator_continuation;
+
+pub use client::request;
+use gas_transfer::gas;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,58 +93,6 @@ impl Claim {
     }
 }
 
-pub fn request(profile: &TesterProfile, wallet: &WalletKey) -> Result<Value> {
-    profile.validate()?;
-    if profile.invite_required {
-        return crate::access::request_join(profile, wallet, None);
-    }
-    let endpoint = profile
-        .faucet
-        .as_ref()
-        .ok_or("this profile has no test faucet")?;
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    let reply = client
-        .post(&endpoint.url)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&Claim::signed(wallet)?)?)
-        .send()?;
-    if reply.status().as_u16() == 409 {
-        return Err(
-            "the test faucet has no grants left; an existing claim can still be checked".into(),
-        );
-    }
-    if reply.status().as_u16() == 429 {
-        return Err("please check the same test claim again in a moment".into());
-    }
-    if !reply.status().is_success() {
-        return Err(format!(
-            "test faucet unavailable (HTTP {}); checking again reuses the same claim",
-            reply.status()
-        )
-        .into());
-    }
-    use std::io::Read;
-    let mut body = Vec::new();
-    reply.take(4097).read_to_end(&mut body)?;
-    if body.len() > 4096 {
-        return Err("faucet response exceeds limit".into());
-    }
-    let response: Value = serde_json::from_slice(&body)?;
-    if response["claim_id"] != Claim::signed(wallet)?.id()
-        || !matches!(
-            response["state"].as_str(),
-            Some("queued" | "funding" | "ready" | "needs_attention")
-        )
-    {
-        return Err("invalid faucet receipt".into());
-    }
-    Ok(response)
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Policy {
@@ -151,6 +111,11 @@ struct Policy {
     gas_amount: u64,
     max_attempts: u8,
     payment_cap: u64,
+}
+impl Policy {
+    fn native(&self) -> bool {
+        self.format == NATIVE_FAUCET_FORMAT
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -204,16 +169,50 @@ struct Gas {
 fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     replace(path, &serde_json::to_vec_pretty(value)?)
 }
+
+/// A native source scan is read-only readiness work, not a proof authorization.
+/// Reserve the finite attempt only after that scan succeeds, immediately before
+/// invoking the proof builder. A failure or crash inside the builder still
+/// consumes the persisted attempt. Only an ordinary native grant calls this
+/// helper; an exhausted claim can never reach either callback.
+fn prepare_native_grant<S>(
+    path: &Path,
+    progress: &mut Progress,
+    sync: impl FnOnce() -> Result<S>,
+    build: impl FnOnce(S) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    if progress.private_attempts >= ATTEMPTS {
+        return Err("ordinary grant proof preparation limit reached".into());
+    }
+    let source = sync()?;
+    progress.private_attempts += 1;
+    save(path, progress)?;
+    build(source)
+}
+
 fn load(root: &Path) -> Result<(TesterProfile, Ledger)> {
     let profile = TesterProfile::load(&root.join("profile.json"))?;
     let ledger: Ledger =
         serde_json::from_slice(&read_private(&root.join("claims.json"), 1024 * 1024)?)?;
     let p = &ledger.policy;
-    if p.format != "native-test-faucet-v1"
+    let valid_mode = match p.format.as_str() {
+        "native-test-faucet-v1" => {
+            (1..=100).contains(&p.max_claims)
+                && p.private_amount == PRIVATE_GRANT
+                && p.gas_amount == GAS_GRANT
+        }
+        NATIVE_FAUCET_FORMAT => {
+            (1..=10).contains(&p.max_claims)
+                && p.private_amount == NATIVE_PRIVATE_GRANT
+                && p.gas_amount == 0
+                && profile.pool_format == "NPOOL004"
+                && !profile.invite_required
+                && profile.private_send_transport.is_none()
+        }
+        _ => false,
+    };
+    if !valid_mode
         || p.network != profile.network()
-        || !(1..=100).contains(&p.max_claims)
-        || p.private_amount != PRIVATE_GRANT
-        || p.gas_amount != GAS_GRANT
         || p.max_attempts != ATTEMPTS
         || p.payment_cap != PAYMENT_CAP
         || ledger.claims.len() > p.max_claims
@@ -245,13 +244,39 @@ pub fn initialize_with_rpc(
     max_claims: usize,
     credential: Option<&Path>,
 ) -> Result<Value> {
+    initialize_mode(root, profile_path, password, max_claims, credential, false)
+}
+
+/// A separate finite V4 cohort. Grants use operator-paid staged private sends;
+/// testers receive no public gas and their later sends use shielded fees.
+pub fn initialize_native(
+    root: &Path,
+    profile_path: &Path,
+    password: &[u8],
+    max_claims: usize,
+    credential: Option<&Path>,
+) -> Result<Value> {
+    initialize_mode(root, profile_path, password, max_claims, credential, true)
+}
+
+fn initialize_mode(
+    root: &Path,
+    profile_path: &Path,
+    password: &[u8],
+    max_claims: usize,
+    credential: Option<&Path>,
+    native: bool,
+) -> Result<Value> {
     let material = credential
         .map(native_rpc_access::read_credential)
         .transpose()?;
     let token = credential
         .map(native_rpc_access::read_material)
         .transpose()?;
-    if root.exists() || !(1..=100).contains(&max_claims) {
+    if root.exists() || !(1..=if native { 10 } else { 100 }).contains(&max_claims) {
+        if native {
+            return Err("use a new native faucet directory and 1..10 lifetime claims".into());
+        }
         return Err("use a new faucet directory and 1..100 lifetime claims".into());
     }
     let profile = TesterProfile::load(profile_path)?;
@@ -268,6 +293,9 @@ pub fn initialize_with_rpc(
             "faucet source profile must use separate operator RPC without invitation access".into(),
         );
     }
+    if native && (profile.pool_format != "NPOOL004" || profile.private_send_transport.is_some()) {
+        return Err("native faucet requires an explicit NPOOL004 operator source profile".into());
+    }
     fs::create_dir(root)?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
@@ -278,7 +306,12 @@ pub fn initialize_with_rpc(
     wallet.save(&root.join("wallet.enc.json"), password)?;
     wallet.save(&root.join("recovery.enc.json"), password)?;
     let policy = Policy {
-        format: "native-test-faucet-v1".into(),
+        format: if native {
+            NATIVE_FAUCET_FORMAT
+        } else {
+            "native-test-faucet-v1"
+        }
+        .into(),
         network: wallet.network.clone(),
         source_fee_address: wallet.fee_keypair().pubkey().to_string(),
         source_private_address: wallet.address_text(),
@@ -286,8 +319,12 @@ pub fn initialize_with_rpc(
         invite_required: false,
         operator_rpc: token.is_some(),
         operator_unix,
-        private_amount: PRIVATE_GRANT,
-        gas_amount: GAS_GRANT,
+        private_amount: if native {
+            NATIVE_PRIVATE_GRANT
+        } else {
+            PRIVATE_GRANT
+        },
+        gas_amount: if native { 0 } else { GAS_GRANT },
         max_attempts: ATTEMPTS,
         payment_cap: PAYMENT_CAP,
     };
@@ -303,39 +340,52 @@ pub fn initialize_with_rpc(
         })?,
     )?;
     fs::File::open(root)?.sync_all()?;
-    Ok(
-        json!({"private_address":policy.source_private_address,"fee_address":policy.source_fee_address,"private_units_required":max_claims as u64 * PRIVATE_GRANT,"public_gas_grants_required":max_claims as u64 * GAS_GRANT,"additional_working_rent_required":PAYMENT_CAP,"max_claims":max_claims,"automatic_refill":false}),
-    )
+    let mut result = json!({"private_address":policy.source_private_address,"fee_address":policy.source_fee_address,"private_units_required":max_claims as u64 * policy.private_amount,"public_gas_grants_required":max_claims as u64 * policy.gas_amount,"additional_working_rent_required":PAYMENT_CAP,"max_claims":max_claims,"automatic_refill":false});
+    if native {
+        result["gas_required"] = false.into();
+        result["conservative_public_units"] =
+            (max_claims as u64 * u64::from(ATTEMPTS) * PAYMENT_CAP).into();
+    }
+    Ok(result)
 }
-fn progress(root: &Path, id: &str) -> Result<Progress> {
+fn progress(root: &Path, id: &str, policy: &Policy) -> Result<Progress> {
+    read_progress(root, id, policy.native())
+}
+fn read_progress(root: &Path, id: &str, native: bool) -> Result<Progress> {
     let path = root.join(format!("{id}.json"));
     let p: Progress = serde_json::from_slice(&read_private(&path, 128 * 1024)?)?;
     if p.gas_attempts > ATTEMPTS
         || p.private_attempts > ATTEMPTS
         || p.proof.as_ref().is_some_and(|b| b.len() != 9222)
-        || (p.gas_done && p.gas.is_none())
+        || (!native && p.gas_done && p.gas.is_none())
+        || (native && (p.gas_attempts != 0 || p.gas.is_some()))
+        || (native
+            && !p.gas_done
+            && (p.private_attempts != 0 || p.proof.is_some() || p.submission_started))
         || (p.private_done && !p.gas_done)
     {
         return Err("invalid faucet progress; operator recovery required".into());
     }
     Ok(p)
 }
-fn status(root: &Path, claim: &Claim) -> Result<Value> {
-    let p = progress(root, &claim.id())?;
+fn status(root: &Path, claim: &Claim, policy: &Policy) -> Result<Value> {
+    let p = progress(root, &claim.id(), policy)?;
     let state = if p.private_done {
         "ready"
     } else if (p.gas_attempts >= ATTEMPTS && !p.gas_done && p.gas.is_none())
         || (p.private_attempts >= ATTEMPTS && p.proof.is_none())
     {
         "needs_attention"
-    } else if p.gas_attempts > 0 {
+    } else if p.gas_attempts > 0 || (policy.native() && p.private_attempts > 0) {
         "funding"
     } else {
         "queued"
     };
-    Ok(
-        json!({"claim_id":claim.id(),"state":state,"private_amount":PRIVATE_GRANT,"gas_amount":GAS_GRANT,"gas_finalized":p.gas_done,"private_finalized":p.private_done,"one_grant_per_wallet":true}),
-    )
+    let mut result = json!({"claim_id":claim.id(),"state":state,"private_amount":policy.private_amount,"gas_amount":policy.gas_amount,"gas_finalized":p.gas_done && !policy.native(),"private_finalized":p.private_done,"one_grant_per_wallet":true});
+    if policy.native() {
+        result["gas_required"] = false.into();
+    }
+    Ok(result)
 }
 /// Atomically reserve a lifetime slot before starting any funding operation.
 pub fn accept(root: &Path, claim: Claim) -> Result<Value> {
@@ -361,14 +411,14 @@ pub(crate) fn accept_unlocked(root: &Path, claim: Claim) -> Result<Value> {
         if serde_json::to_vec(existing)? != serde_json::to_vec(&claim)? {
             return Err("this address already belongs to a different claim".into());
         }
-        return status(root, existing);
+        return status(root, existing, &ledger.policy);
     }
     if ledger.claims.len() >= ledger.policy.max_claims {
         return Err("test faucet lifetime capacity exhausted".into());
     }
     let initial = root.join(format!("{}.json", claim.id()));
     if initial.exists() {
-        let orphan = progress(root, &claim.id())?;
+        let orphan = progress(root, &claim.id(), &ledger.policy)?;
         if orphan.gas_attempts != 0
             || orphan.private_attempts != 0
             || orphan.gas.is_some()
@@ -384,7 +434,7 @@ pub(crate) fn accept_unlocked(root: &Path, claim: Claim) -> Result<Value> {
     }
     ledger.claims.push(claim.clone());
     save(&root.join("claims.json"), &ledger)?;
-    status(root, &claim)
+    status(root, &claim, &ledger.policy)
 }
 
 pub(crate) fn access_context(root: &Path) -> Result<(Network, usize, bool)> {
@@ -409,8 +459,66 @@ pub(crate) fn enable_invites(root: &Path) -> Result<()> {
 
 /// One serialized worker; all RPC uncertainty retains the original identities.
 pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
+    tick_with_history(root, password, None)
+}
+
+/// Use verified retained history only for grant proof preparation. The original
+/// claim, attempt cap, proof identity and pending-operation recovery stay intact.
+pub fn tick_with_history(root: &Path, password: &[u8], history: Option<&Path>) -> Result<Value> {
+    tick_mode(root, password, history, None, false)
+}
+
+/// Explicit operator recovery exception: one extra preparation for this exact
+/// exhausted native claim, without resetting its legacy attempt counter. This
+/// returns after persisting one proof; ordinary tick owns submission/recovery.
+pub fn continue_grant_once(
+    root: &Path,
+    password: &[u8],
+    claim_id: &str,
+    progress_sha256: &str,
+    history: &Path,
+) -> Result<Value> {
+    if !operator_continuation::valid_pin(claim_id)
+        || !operator_continuation::valid_pin(progress_sha256)
+        || history.as_os_str().is_empty()
+    {
+        return Err("explicit claim ID, progress SHA-256 and retained history required".into());
+    }
+    tick_mode(
+        root,
+        password,
+        Some(history),
+        Some((claim_id, progress_sha256)),
+        false,
+    )
+}
+
+/// Verify/cache the original native source history without touching any claim,
+/// intent, attempt, proof or outcome and without submitting a transaction.
+pub fn warm_grant_history(root: &Path, password: &[u8], history: &Path) -> Result<Value> {
+    if history.as_os_str().is_empty() {
+        return Err("explicit retained history required for source warm-up".into());
+    }
+    tick_mode(root, password, Some(history), None, true)
+}
+
+fn tick_mode(
+    root: &Path,
+    password: &[u8],
+    history: Option<&Path>,
+    continuation: Option<(&str, &str)>,
+    warm_history: bool,
+) -> Result<Value> {
     let _worker = WalletOperation::acquire(&root.join("worker"))?;
     let (profile, ledger) = load(root)?;
+    if warm_history && !ledger.policy.native() {
+        return Err("history warm-up requires the original native source policy".into());
+    }
+    if let Some((id, _)) = continuation {
+        if !ledger.policy.native() || !ledger.claims.iter().any(|claim| claim.id() == id) {
+            return Err("continuation requires one existing native claim".into());
+        }
+    }
     let source = root.join("wallet.enc.json");
     let wallet = WalletKey::open(&source, password, &profile.network())?;
     let payer = wallet.fee_keypair();
@@ -420,7 +528,7 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
         return Err("faucet seed differs from original ledger".into());
     }
     let connect = || {
-        if ledger.policy.operator_rpc {
+        let chain = if ledger.policy.operator_rpc {
             if ledger.policy.operator_unix
                 && native_rpc_access::read_credential(&root.join("rpc-access.key"))?
                     .socket(
@@ -436,27 +544,60 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
                 &profile.rpc.url,
                 profile.network(),
                 &root.join("rpc-access.key"),
-            )
+            )?
+            .with_pool_format(&profile.pool_format)?
         } else {
-            Chain::connect_profile(&profile)
+            Chain::connect_profile(&profile)?
+        };
+        if ledger.policy.native() && history.is_some() {
+            chain.with_operator_read_batches()
+        } else {
+            Ok(chain)
         }
     };
     let chain = connect()?;
     chain.health()?;
+    if warm_history {
+        let operation = WalletOperation::acquire(&source)?;
+        operation.ensure_resolved()?;
+        let synced = chain.sync_cached_with_history(
+            &wallet,
+            &operation,
+            history.ok_or("history path missing from warm-up")?,
+        )?;
+        return Ok(
+            json!({"warm_history":true,"balance":synced.state.balance()?,
+            "finalized_slot":synced.slot,"scan":synced.scan,"grant_state_changed":false,
+            "transactions_submitted":0,"local_verified_cache_may_update":true}),
+        );
+    }
     for claim in &ledger.claims {
         let id = claim.id();
+        if continuation.is_some_and(|(selected, _)| selected != id.as_str()) {
+            continue;
+        }
         let path = root.join(format!("{id}.json"));
-        let mut p = progress(root, &id)?;
+        let mut p = progress(root, &id, &ledger.policy)?;
         // Complete accepted work's rent cleanup before starting another grant.
         let outcome = root.join(format!("{id}.outcome.json"));
         let operation = WalletOperation::acquire(&source)?.with_durable_receipt(&outcome);
+        if let Some((_, expected)) = continuation {
+            operator_continuation::begin(root, &ledger.policy, claim, &p, &operation, expected)?;
+        }
+        operator_continuation::check_progress(root, &ledger.policy, claim, &p)?;
         if p.private_done {
             continue;
         }
         if !p.gas_done {
-            gas(&chain.rpc, &payer, claim, &mut p, &path)?;
+            if ledger.policy.native() {
+                // Only this explicit policy may skip public tester funding.
+                p.gas_done = true;
+                save(&path, &p)?;
+            } else {
+                gas(&chain.rpc, &payer, claim, &mut p, &path)?;
+            }
             if !p.gas_done {
-                return status(root, claim);
+                return status(root, claim, &ledger.policy);
             }
         }
         let mut chain = connect()?.with_user_fees(payer.pubkey(), PAYMENT_CAP, &operation)?;
@@ -483,7 +624,7 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
         if accepted {
             p.private_done = true;
             save(&path, &p)?;
-            return status(root, claim);
+            return status(root, claim, &ledger.policy);
         }
         if resolution == Some(false) {
             p.submission_started = false;
@@ -503,27 +644,64 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
             }
         }
         if p.proof.is_none() {
-            if p.private_attempts >= ATTEMPTS {
-                return status(root, claim);
+            if p.private_attempts >= ATTEMPTS && continuation.is_none() {
+                return status(root, claim, &ledger.policy);
             }
-            p.private_attempts += 1;
-            save(&path, &p)?;
+            if continuation.is_none() && !ledger.policy.native() {
+                p.private_attempts += 1;
+                save(&path, &p)?;
+            }
             if outcome.exists() {
                 fs::remove_file(&outcome)?;
                 fs::File::open(root)?.sync_all()?;
             }
-            let synced = chain.sync_cached(&wallet, &operation)?;
-            p.proof = Some(payments::build(
-                &wallet,
-                &synced.state,
-                payer.pubkey().to_bytes(),
-                chain.expiry()?,
-                Payment::Send {
-                    amount: PRIVATE_GRANT,
-                    recipient: &claim.private_address,
-                },
-            )?);
+            let sync = || {
+                let synced = match history {
+                    Some(path) => chain.sync_cached_with_history(&wallet, &operation, path)?,
+                    None => chain.sync_cached(&wallet, &operation)?,
+                };
+                Ok((synced, chain.expiry()?))
+            };
+            let build = |(synced, expiry): (crate::rpc::Synced, u64)| {
+                payments::build(
+                    &wallet,
+                    &synced.state,
+                    payer.pubkey().to_bytes(),
+                    expiry,
+                    Payment::Send {
+                        amount: ledger.policy.private_amount,
+                        recipient: &claim.private_address,
+                    },
+                )
+            };
+            let proof = if ledger.policy.native() && continuation.is_none() {
+                prepare_native_grant(&path, &mut p, sync, build)?
+            } else {
+                build(sync()?)?
+            };
+            if continuation.is_some() {
+                operator_continuation::seal_proof(
+                    root,
+                    &ledger.policy,
+                    claim,
+                    &p,
+                    &operation,
+                    &proof,
+                )?;
+            }
+            p.proof = Some(proof);
             save(&path, &p)?;
+            if continuation.is_some() {
+                operator_continuation::check_progress(root, &ledger.policy, claim, &p)?;
+                let mut result = status(root, claim, &ledger.policy)?;
+                result["explicit_operator_exception"] = true.into();
+                result["additional_preparations_authorized"] = 1.into();
+                result["legacy_private_attempts"] = p.private_attempts.into();
+                result["proof_sha256"] =
+                    operator_continuation::digest(p.proof.as_ref().unwrap()).into();
+                result["transactions_submitted"] = 0.into();
+                return Ok(result);
+            }
         }
         p.submission_started = true;
         save(&path, &p)?;
@@ -534,104 +712,11 @@ pub fn tick(root: &Path, password: &[u8]) -> Result<Value> {
         )?;
         p.private_done = !operation.staging.exists();
         save(&path, &p)?;
-        return status(root, claim);
+        return status(root, claim, &ledger.policy);
     }
     Ok(
         json!({"idle":true,"reserved_claims":ledger.claims.len(),"max_claims":ledger.policy.max_claims}),
     )
-}
-fn gas(
-    rpc: &solana_rpc_client::rpc_client::RpcClient,
-    payer: &Keypair,
-    claim: &Claim,
-    p: &mut Progress,
-    path: &Path,
-) -> Result<()> {
-    let recipient: Pubkey = claim.fee_address.parse()?;
-    if p.gas.is_none() {
-        if p.gas_attempts >= ATTEMPTS {
-            return Ok(());
-        }
-        let (hash, height) =
-            rpc.get_latest_blockhash_with_commitment(CommitmentConfig::finalized())?;
-        let tx = Transaction::new_signed_with_payer(
-            &[solana_system_interface::instruction::transfer(
-                &payer.pubkey(),
-                &recipient,
-                GAS_GRANT,
-            )],
-            Some(&payer.pubkey()),
-            &[payer],
-            hash,
-        );
-        let fee = rpc.get_fee_for_message(&tx.message)?;
-        if fee > 10_000 {
-            return Err("faucet gas transfer fee exceeds fixed limit".into());
-        }
-        p.gas_attempts += 1;
-        p.gas = Some(Gas {
-            transaction: bincode::serialize(&tx)?,
-            last_valid_block_height: height,
-        });
-        save(path, p)?; // Full signed identity, not just a recipient balance, before broadcast.
-    }
-    let gas = p.gas.as_ref().ok_or("missing gas identity")?;
-    let tx: Transaction = bincode::deserialize(&gas.transaction)?;
-    let expected = Transaction::new_signed_with_payer(
-        &[solana_system_interface::instruction::transfer(
-            &payer.pubkey(),
-            &recipient,
-            GAS_GRANT,
-        )],
-        Some(&payer.pubkey()),
-        &[payer],
-        tx.message.recent_blockhash,
-    );
-    if tx != expected {
-        return Err("saved gas transaction differs from fixed claim".into());
-    }
-    let signature = tx.signatures[0];
-    let statuses = rpc.get_signature_statuses_with_history(&[signature])?;
-    if let Some(s) = statuses.value.first().and_then(Option::as_ref) {
-        if s.satisfies_commitment(CommitmentConfig::finalized()) {
-            if s.err.is_some() {
-                return Err("gas transaction failed canonically; original record retained".into());
-            }
-            p.gas_done = true;
-            save(path, p)?;
-            return Ok(());
-        }
-        // The original identity is already observed. Wait for canonical finality
-        // or disappearance on a later tick instead of racing preflight with it.
-        return Ok(());
-    }
-    if rpc.get_block_height_with_commitment(CommitmentConfig::finalized())?
-        > gas.last_valid_block_height
-    {
-        // Resolve once more after the finalized expiry checkpoint before re-signing.
-        if rpc
-            .get_signature_statuses_with_history(&[signature])?
-            .value
-            .first()
-            .and_then(Option::as_ref)
-            .is_none()
-        {
-            p.gas = None;
-            save(path, p)?;
-            return Ok(());
-        }
-        return Ok(());
-    }
-    rpc.send_transaction_with_config(
-        &tx,
-        RpcSendTransactionConfig {
-            skip_preflight: false,
-            preflight_commitment: Some(CommitmentConfig::confirmed().commitment),
-            max_retries: Some(0),
-            ..Default::default()
-        },
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -701,6 +786,9 @@ mod tests {
             program: native_payment_program::id().to_string(),
             pool: native_payment_program::pool_address().to_string(),
             pool_format: "NPOOL003".into(),
+            private_send_transport: None,
+            retained_history_format: None,
+            access_audiences: None,
             recipient_withdrawals: true,
             rpc: crate::connection::Endpoint {
                 transport: "loopback-http".into(),
@@ -751,6 +839,9 @@ mod tests {
             program: native_payment_program::id().to_string(),
             pool: native_payment_program::pool_address().to_string(),
             pool_format: "NPOOL003".into(),
+            private_send_transport: None,
+            retained_history_format: None,
+            access_audiences: None,
             recipient_withdrawals: true,
             rpc: crate::connection::Endpoint {
                 transport: "loopback-http".into(),
@@ -796,13 +887,17 @@ mod tests {
         save(&temp.path().join("claim.json"), &p).unwrap();
         assert!(fs::metadata(temp.path().join("claim.json")).unwrap().len() > 64 * 1024);
         assert_eq!(
-            progress(temp.path(), "claim").unwrap().proof.unwrap().len(),
+            read_progress(temp.path(), "claim", false)
+                .unwrap()
+                .proof
+                .unwrap()
+                .len(),
             9222
         );
         let mut exhausted = p;
         exhausted.private_attempts = ATTEMPTS + 1;
         save(&temp.path().join("claim.json"), &exhausted).unwrap();
-        assert!(progress(temp.path(), "claim").is_err());
+        assert!(read_progress(temp.path(), "claim", false).is_err());
     }
     #[test]
     fn incomplete_or_conflicting_outcomes_are_never_treated_as_unpaid() {
@@ -851,3 +946,15 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "faucet/native_tests.rs"]
+mod native_tests;
+
+#[cfg(test)]
+#[path = "faucet/operator_continuation_tests.rs"]
+mod operator_continuation_tests;
+
+#[cfg(test)]
+#[path = "faucet/attempt_tests.rs"]
+mod attempt_tests;

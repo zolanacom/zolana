@@ -1,81 +1,281 @@
 # Zolana (ZOL)
 
-An independent Agave-derived Layer 1 with protocol-native shielded payments. ZOL is the native coin's chosen name; current coins are local test units. Production economics remain undecided.
+Zolana is an independent Layer 1 blockchain derived from the
+[Agave](https://github.com/anza-xyz/agave) validator, with shielded payments
+implemented natively in the protocol. ZOL is the name of its native coin.
 
-The [local network portal](docs/network-portal-runbook.md) includes a read-only explorer of retained public blocks/transactions, validator-service status and developer information. The wallet is a separate interface to this chain. No public network or live explorer is deployed.
+This repository is an experimental preview. The only coins are valueless test
+coins, the code has not been independently audited and there is no mainnet.
+Read [Status and limitations](#status-and-limitations) before relying on
+anything here.
 
-The selected architecture is an [independent privacy L1 with its own native coin](docs/decisions/0005-independent-privacy-l1.md). A Solana asset bridge is later work; no mainnet settlement or bridge is implemented.
+## What it is
 
-Fresh local rehearsals support [recipient-bound native withdrawals](docs/withdrawal-runbook.md): the user chooses a public account independently from the fee sponsor, with the default signing authority recoverable from the encrypted wallet seed. Existing genesis, historical payment bytes and sponsor policies remain preserved.
+- **An independent chain.** Zolana has its own genesis, validators and native
+  coin; the coin pays fees and is the stake asset. It is not a Solana program,
+  token or rollup and does not settle on Solana. No bridge is implemented. See
+  [decision 0005](docs/decisions/0005-independent-privacy-l1.md).
+- **Shielded payments verified by the validator.** A built-in native program,
+  enabled by a feature gate, verifies shielded-payment proofs during transaction
+  execution and applies the result atomically: pool backing, note commitments
+  and permanent nullifier accounts. Unmodified upstream validators cannot
+  validate this network's payments. See decisions
+  [0003](docs/decisions/0003-native-validator-integration.md) and
+  [0004](docs/decisions/0004-durable-nullifiers.md).
+- **Existing shielded cryptography.** Payments use the `orchard` crate
+  (version 0.16.0, Orchard v2 bundles with Halo 2 proofs) unchanged. The project
+  does not define its own circuit. See
+  [decision 0002](docs/decisions/0002-payment-validation-boundary.md).
+- **Public and shielded value side by side.** Public accounts and transfers
+  still work. A user deposits native coins into the shielded pool, sends
+  privately, and can withdraw to a public account
+  ([decision 0008](docs/decisions/0008-recipient-bound-withdrawals.md)).
+  Privacy is an added native capability, not a property of every transaction.
+- **Three ways to pay fees.** A development sponsor, the user's own public fee
+  account ([0009](docs/decisions/0009-user-paid-fees.md),
+  [0011](docs/decisions/0011-user-paid-private-sends.md)), or a fee taken from
+  the shielded notes being spent and reimbursed to a relay
+  ([0032](docs/decisions/0032-shielded-fees.md)).
+- **Wallets and tools.** A native command-line wallet, a device-local wallet
+  UI, a browser wallet that builds proofs and decrypts notes on the device, a
+  read-only network portal and explorer, and Python tooling for local test
+  networks, gateways, faucets, history retention, monitoring and wallet
+  packaging.
 
-[User-paid withdrawals](docs/user-paid-fees-runbook.md) can use a fee authority recovered from the encrypted seed, with an explicit gross-debit cap and crash recovery. They work without operator sponsor credentials once the public fee account has native coins for fees and refundable upload rent.
+## Repository layout
 
-This repository starts from upstream Agave source and a new development history. Networking and consensus are retained while a separate payment module is evaluated. Public transfers remain supported in the minimal design; privacy is an additional native capability, not a claim about every transaction or application.
+| Path | Contents |
+| --- | --- |
+| `protocol/payments/` | `native-payments`: payment validation, wire formats, pool state, anchors and envelopes |
+| `node/adapter/` | `native-payment-program`: the native program (metered execution, staging, nullifier accounts, coin accounting) |
+| `node/agave/` | Upstream Agave v3.0.14 source snapshot with local modifications; Apache-2.0, see [THIRD_PARTY.md](THIRD_PARTY.md) |
+| `node/validator-check/` | Integration tests that run signed transactions through the Agave Bank |
+| `node/localnet/` | `native-localnet` and `native-validator` binaries for local test networks |
+| `node/rpc-access/` | Authenticated private RPC transport used by the validator and operator tools |
+| `node/candidate/` | Patch series and reconstruction plan that port the payment code to Agave 4.3.2; not built by the workspace, see [its README](node/candidate/README.md) |
+| `clients/cli/` | `payment-lab`: proof fixture and development commands |
+| `clients/wallet/` | `native-wallet`, `native-faucet` and `native-shielded` binaries, plus the synthetic `native-fast-cash` fixture |
+| `clients/wallet-core/`, `clients/wallet-seed/` | Shared proof construction and history replay; the encrypted seed format |
+| `clients/browser-core/` | Rust/Wasm core of the browser wallet |
+| `clients/browser-wallet/` | Browser wallet page, workers, storage adapter and Node test suites |
+| `clients/browser-lab/` | Loopback page that measures synthetic proofs in a browser ([README](clients/browser-lab/README.md)) |
+| `clients/wallet-ui/` | Device-local wallet UI, served by `tools/wallet_ui.py` |
+| `clients/network-portal/` | Network portal and read-only explorer, served by `tools/network_portal.py` |
+| `tools/` | Build wrappers, local-network runners, operator services and their tests |
+| `docs/decisions/` | Architecture decisions |
+| `docs/` | Runbooks, design notes and the tester quick-start |
 
-See development status for the current prototype stage, completed components and production gaps.
+## Build and run
 
-The [funded-cohort pilot runtime](docs/pilot-runtime-runbook.md) now binds reviewed funding and admission to validators, verified retention, direct HTTPS and automatic grants. Durable first activation and active crash/restart recovery are accepted locally; no pilot host is installed or deployed.
+Prerequisites:
 
-The [post-quantum migration roadmap](docs/post-quantum-roadmap.md) separates wallet authorization, validator security and shielded-protocol/fund migration. It is planned work: the current chain is not post-quantum secure.
+- Rust 1.92 (pinned in `rust-toolchain.toml`) and a C/C++ toolchain. On macOS
+  that is the Xcode command-line tools; for Ubuntu the packages are listed in
+  the [Linux pilot runbook](docs/linux-pilot-runbook.md).
+- Python 3. The tools use the standard library; a few tests and acceptance
+  runners use optional extras (the `cryptography` package, an installed
+  Playwright runtime). Individual runbooks say where a newer Python is needed.
+- Node.js for the JavaScript test suites, and Git.
 
-The [standalone tester wallet](docs/tester-wallet-runbook.md) packages the device-local client independently of the checkout and operator keys, with a pinned genesis/RPC profile, HTTPS for remote endpoints and preserved wallet data across package replacement. Extracted-package acceptance passed offline recovery and real local-validator reads. The refreshed gateway-recovery archive also passed actual package replacement with an original pending journal, offline state preservation and recovery after validator crash/restart, with zero broadcast attempts. This unsigned development bundle remains local; hosting and release review are still required before inviting testers.
+Development has been on Apple Silicon macOS, with Linux x86-64 builds described
+in the Linux pilot runbook. Other platforms are untested.
 
-[Sponsor-free private sends](docs/private-send-runbook.md) use the same seed-derived fee authority with an explicit gas/rent quote and durable cap. Real browser/CLI sends, interrupted uploads, lost finalized replies, validator crash/restart, spent-proof rejection and restored-seed spending passed locally. Recipients receive the full private amount; the sender funds fees and refundable staging rent publicly. No protocol or consensus change is needed.
+`tools/dev.sh` wraps Cargo with a project-local dependency cache (`.tools/cargo`)
+and target directory. Fetch dependencies once; everything after that builds
+offline against the lockfile.
 
-[Self-service test distribution](docs/test-faucet-runbook.md) supplies a fixed private test grant and public gas through a pinned faucet, using a separate encrypted reservoir wallet, signed claims and finite lifetime limits. The device-local wallet requests both together and checks finalization automatically. [Invited tester access](docs/invited-testnet-runbook.md) gates the wallet RPC gateway and faucet with single-wallet codes, expiry/revocation and durable request budgets. [Local TLS/raw RPC isolation](docs/tls-rpc-isolation-runbook.md) adds verified HTTPS, operator-only raw HTTP and disabled raw WebSockets. Public hosting and external network isolation remain deployment work. Everything remains local.
-
-The product is an independent privacy blockchain with its own validators and fee/staking coin. Its first user interface is a payments wallet; building that interface does not turn the chain into a Solana application. A DEX, private swaps and an Axiom-style terminal are not implemented. The Solana bridge remains later work.
-
-The [local wallet preview](docs/local-wallet-ui-runbook.md) now creates encrypted wallets, guides recovery-file backup, sponsors test funding and submits real private payments. Concurrent acceptance finalized 24 deposits and 24 private sends and preserved pool/nullifier state through a coordinated restart; see LOCAL-008 validation. This uses fresh-genesis NPOOL003; preserve older fixtures and use their corresponding historical builds.
-
-Encrypted incremental scanning reduced a preserved archive sync from 5.080 s to 1.092 s in a local measurement. Browser copy/paste recovery restored a funded wallet and finalized a private send, with balances and nullifiers verified on both peers; see LOCAL-009 validation.
-
-Phone-sized onboarding, actual recovery-file download/upload and private payments now pass isolated browser acceptance. Separately retained ciphertext history also recovers fresh seeds and supports spending through a snapshot-restored validator without its old transaction ledger. See LOCAL-010 validation and the [retention runbook](docs/recovery-history-runbook.md). This remains local testnet preparation, with independent security review, production keys/sponsorship and retention operations still open.
-
-## Layout
-
-- `protocol/payments/`: bounded payment validation and submission primitives.
-- `clients/cli/`: local proof and payment development commands.
-- `clients/wallet/`: encrypted seed wallet, verified history scanning, witnesses and signed RPC payments.
-- `clients/wallet-ui/` and `tools/wallet_ui.py`: device-local onboarding and payments interface over the real wallet CLI.
-- `node/agave/`: upstream validator source with gated native-payment registration.
-- `node/adapter/`: metered native execution, staging and real coin accounting.
-- `node/validator-check/`: signed-transaction integration tests using Agave Bank.
-- `node/localnet/` and `tools/localnet.py`: real local validators, RPC fixtures and snapshot/restart checks.
-- `docs/decisions/`: architecture and scope decisions.
-
-See LOCAL-001 for the first implementation milestone and its validation record. The standalone verifier and real-proof offline fixture are implemented. Native runtime integration and coin accounting are implemented locally; see LOCAL-002 and [the integration design](docs/decisions/0003-native-validator-integration.md). Nothing in this repository has been deployed or connected to a production network.
-
-## Run the local proof fixture
-
-```
+```sh
 sh tools/dev.sh fetch --locked
+
+# Build and verify a real shielded-payment proof fixture. No chain, no funds.
 sh tools/dev.sh run --offline --locked -p payment-lab -- proof-smoke
+
+# Execute synthetic native payments in the runtime and through the Agave Bank.
 CARGO_BUILD_JOBS=2 sh tools/dev.sh test --offline --locked -p native-payment-program --test runtime
 CARGO_BUILD_JOBS=2 sh tools/dev.sh test --offline --locked -p native-validator-check --test bank
-sh tools/check.sh
 ```
 
-This uses a project-local dependency cache and the installed Rust 1.92 toolchain. The fixture uses public synthetic test keys and creates no real funds. It verifies real proofs and authorization, stages/decodes the payment and confirms local decryption of payment and change. The proof-smoke command is not a wallet or an on-chain transfer. The separate runtime and Bank tests execute synthetic native payments. Two local validator processes have executed payments over RPC, restored a fresh ledger from a full snapshot and restarted the recovered ledger. See [the local runbook](docs/local-validator-runbook.md) and LOCAL-004 validation. Permanent proof-derived nullifier accounts now replace the original 128-payment array; see [the storage decision](docs/decisions/0004-durable-nullifiers.md) and LOCAL-006 validation. The Bank test accepted 129 distinct real-proof payments; the new format also passed two-validator RPC, snapshot and restart checks. This is a fresh-genesis development format with separate permanent storage rent and a fixed-depth tree limit. Wallet scan performance, archive availability and throughput work remain.
+Start a disposable two-validator network on loopback. This builds the validator
+from `node/agave`, which takes time and disk space. See the
+[local validator runbook](docs/local-validator-runbook.md).
 
-The local wallet supports random private keys, encrypted seed-only backups, network-bound addresses, finalized note discovery, balances, private sends with change, withdrawal and pending-payment resolution. See [the wallet runbook](docs/local-wallet-runbook.md) and LOCAL-003 validation. It reconstructs private notes from complete RPC history or separately retained verified ciphertexts plus a recent RPC suffix, and accelerates repeat scans with encrypted checkpoints. Pending resolution retains canonical RPC checks, using a verified checkpoint and continuous suffix where supported; missing required history fails closed. RPC consensus remains trusted; the scanner is not a light client. No note cache is needed for seed recovery, but retention operations, bounded cache/tree scaling, independent security review and production economics remain development work.
+```sh
+sh tools/build_localnet.sh
+python3 -B tools/localnet.py init --root .data/v2
+python3 -B tools/localnet.py start --root .data/v2
+python3 -B tools/localnet.py verify --root .data/v2
+python3 -B tools/localnet.py stop --root .data/v2
+```
 
-Interrupted uploads now retain a private staging journal and support guarded rent reclamation, with OS locks serializing value-changing commands on one wallet path. See [staging recovery](docs/staging-recovery-runbook.md) and LOCAL-007 validation. Gateway pending-send recovery also resolved an original withheld finalized reply after a service crash, with unchanged journals/nullifiers and no repeated payment. Private pending resolution can extend its authenticated checkpoint; recipient-bound withdrawals retain full receipt replay.
+Exercise the command-line wallet end to end on a fresh local network (stop any
+other local network first; see the [wallet runbook](docs/local-wallet-runbook.md)):
 
-For majority or whole-cluster restarts, use the [coordinated restart runbook](docs/coordinated-restart-runbook.md). The explicit path verifies a saved tower and retained bank checkpoint before invoking the upstream hash/shred-version/stake gate, then requires new finalization. It preserves ordinary restart guards and signed ledger data.
+```sh
+CARGO_BUILD_JOBS=2 sh tools/dev.sh build --offline --locked -p native-wallet
+python3 -B tools/wallet_localnet.py --root .data/wallet-example
+```
 
-The [fault recovery runner](docs/fault-recovery-runbook.md) exercises owned-process SIGKILL, competing private payments during a shred partition and canonical rejoin. Its explicitly enabled loopback fault control uses the upstream shred-reception gate. See the fault validation record for observed recovery, nullifier rollback and remaining coverage.
+Run the portal without a network; it shows a disconnected-history state
+([portal runbook](docs/network-portal-runbook.md)):
 
-The [offline recovery runner](docs/offline-recovery-runbook.md) covers multiple epoch boundaries, expired staging, snapshot fallback and damaged-archive rejection. Its validation record preserves the failed ordinary-repair attempt separately from successful snapshot-assisted recovery.
+```sh
+python3 -B tools/network_portal.py --port 8780
+```
 
-For fresh private rehearsals, the [host isolation runbook](docs/host-isolation-runbook.md) adds owner-only Unix transport for raw validator RPC, including recovery inspection. Invited clients still use verified HTTPS. The private transport closes loopback port impersonation; a dedicated OS service identity is required to exclude unrelated processes running as the operator's own user.
+Run the development checks (formatting, Clippy, Rust, Python and Node tests):
 
-The separate opt-in [shielded-fee send path](docs/shielded-fees-runbook.md) spends
-payment plus an exact fee from private notes, using a shared relay for public
-transport costs. It adds separately activated native V3 authorization and durable
-canonical recovery. It does not change existing wallet UI defaults or installed
-releases. See [the protocol decision](docs/decisions/0032-shielded-fees.md).
+```sh
+sh tools/check.sh --development-only
+```
 
-## Attribution
+The local tools bind to loopback and use disposable test keys and test units.
+They keep their state in git-ignored directories: `.data/` for networks and
+wallets, `.local/` for operator scratch files, `.tools/` and `target/` for
+build caches.
 
-Upstream attribution is preserved in [THIRD_PARTY.md](THIRD_PARTY.md) and vendored notices.
+## Documentation
+
+Runbooks describe how to run one tool or procedure. Most were written for local
+rehearsals on one development machine, so amounts, limits and paths in them are
+development values.
+
+- **Local network and wallets:** [validators](docs/local-validator-runbook.md),
+  [command-line wallet](docs/local-wallet-runbook.md),
+  [wallet UI](docs/local-wallet-ui-runbook.md),
+  [network portal](docs/network-portal-runbook.md).
+- **Payment paths:** [withdrawals](docs/withdrawal-runbook.md),
+  [user-paid fees](docs/user-paid-fees-runbook.md),
+  [sponsor-free private sends](docs/private-send-runbook.md),
+  [shielded fees](docs/shielded-fees-runbook.md),
+  [interrupted uploads](docs/staging-recovery-runbook.md).
+- **Restart and recovery:** [coordinated restart](docs/coordinated-restart-runbook.md),
+  [crash and fork faults](docs/fault-recovery-runbook.md),
+  [offline and damaged snapshots](docs/offline-recovery-runbook.md),
+  [retained history](docs/recovery-history-runbook.md),
+  [history replica](docs/history-replica-runbook.md),
+  [canonical archive](docs/canonical-archive-runbook.md),
+  [gateway acknowledgement loss](docs/gateway-pending-recovery-runbook.md).
+- **Test network access:** [keys and sponsor](docs/testnet-key-sponsor-runbook.md),
+  [test faucet](docs/test-faucet-runbook.md),
+  [invitations](docs/invited-testnet-runbook.md),
+  [TLS and raw RPC isolation](docs/tls-rpc-isolation-runbook.md),
+  [private host RPC transport](docs/host-isolation-runbook.md),
+  [direct HTTPS ingress](docs/direct-tls-runbook.md),
+  [public TLS certificate](docs/public-tls-certificate-074.md).
+- **Operator services:** [service account](docs/service-account-runbook.md),
+  [isolated wallet ingress](docs/isolated-wallet-runbook.md),
+  [operator health](docs/operator-health-runbook.md),
+  [off-host monitor](docs/offhost-monitor-runbook.md),
+  [paging](docs/human-paging-runbook.md),
+  [watchdog](docs/watchdog-runbook.md),
+  [vote-admission budget](docs/vat-budget-runbook.md).
+- **Pilot preparation:** [cohort](docs/pilot-cohort-runbook.md),
+  [host and funding](docs/pilot-host-funding-runbook.md),
+  [installation](docs/pilot-installation-runbook.md),
+  [runtime](docs/pilot-runtime-runbook.md),
+  [ten-wallet rehearsal](docs/ten-wallet-rehearsal.md),
+  [Linux candidate](docs/linux-pilot-runbook.md).
+- **Wallet delivery:** [tester wallet](docs/tester-wallet-runbook.md) and its
+  [quick-start](docs/tester-wallet-quickstart.txt),
+  [authenticated releases](docs/wallet-release-runbook.md),
+  [path-remapped builds](docs/path-remapped-wallet-runbook.md),
+  [Apple signing preparation](docs/apple-signing-runbook.md).
+- **Design notes:** [privacy and delivery review](docs/privacy-boundary-LOCAL-070.md),
+  [post-quantum migration plan](docs/post-quantum-roadmap.md),
+  [module boundaries](docs/refactoring-plan.md),
+  [browser storage adapter](clients/browser-wallet/storage.README.txt),
+  [Agave 4.3.2 candidate](node/candidate/README.md).
+- **Decisions:** numbered records under [docs/decisions/](docs/decisions/).
+
+Where a document says a test passed, it refers to the project's own runs. The
+underlying logs are not part of this repository.
+
+## Status and limitations
+
+**Stage: public devnet preview.** The project runs one preview network with
+test ZOL for trying the browser wallet. Access is capped by a small, finite
+number of test-coin grants and relay jobs. The network has so far run in
+bounded windows and shuts itself down when its operational safety checks fail.
+Expect it to be offline, reset or withdrawn without notice. No availability is
+promised.
+
+**Test coins only.** ZOL on the preview has no monetary value and nothing
+redeems it. Earlier test networks have been replaced by fresh ones, and
+balances can be lost when that happens. No production supply, issuance, fee or
+rent schedule has been chosen; every amount in this repository is a development
+parameter.
+
+**No mainnet.** There is no mainnet and no production deployment. There is no
+bridge to Solana or to any other chain, and no exchange, swap or trading
+function.
+
+**Not audited.** No independent security audit or cryptographic review has
+been completed for the protocol, the validator modifications, the wallets or
+the operator tooling. Using an existing proof system does not make this
+integration secure.
+
+**Operated by the project.** Every validator of the preview network is run by
+the project, and they are co-located on one host. Independent validators are
+not supported yet: there is no procedure for an outside operator to join.
+Liveness, and the correctness of what a wallet is shown, depend on the
+project's infrastructure.
+
+Known limits:
+
+- **Wallets trust their RPC endpoint.** The wallets verify proofs, signatures
+  and history continuity against the validator they are configured with. They
+  are not light clients and do not verify consensus independently.
+- **The gateway operator can link activity.** Admission ties a wallet's
+  membership identity to its receiving address. The gateway sees IP addresses
+  and request timing and can link submitted payments to a member. Shielding
+  hides amounts and counterparties from the public ledger, not activity from
+  the operator. See the
+  [privacy and delivery review](docs/privacy-boundary-LOCAL-070.md).
+- **Public metadata remains.** Fee payer or relay payee, the exact fee, timing
+  and nullifiers are public. Deposits and withdrawals reveal their amounts and
+  public accounts. There is no network-layer anonymity.
+- **One asset, bounded design.** The shielded pool holds only the native coin.
+  Payments have exactly two actions, the anchor history is bounded, and the
+  shared pool account serialises payments. No throughput figure is claimed.
+- **Not post-quantum secure.** The chain uses Ed25519 and Orchard/Halo 2. The
+  [post-quantum migration plan](docs/post-quantum-roadmap.md) is unimplemented
+  planning.
+- **Two validator code lines.** The workspace builds against the Agave 3.0.14
+  snapshot in `node/agave`. Single-transaction ("inline") shielded payments
+  need the Agave 4.3.2 candidate in `node/candidate`, which is a patch series
+  reconstructed and built separately.
+- **Wallet delivery is unfinished.** Standalone wallet packages are development
+  builds without Apple Developer ID signing or notarization. The browser wallet
+  is a hosted hot wallet: a compromised site could replace wallet code.
+  Physical phone and Safari testing has not been done.
+- **Recovery is tested for process crashes only.** Restart and recovery
+  procedures have been exercised against process kills on test fixtures. Power
+  loss, disk loss and host loss are not covered, and history retention has
+  finite bounds.
+- **The hosted preview is not reproducible from this repository alone.** The
+  deployment, enrollment and backup automation used to host the preview is not
+  included here.
+- **Numbers are the project's own.** Timings and test counts quoted in the
+  documents were measured by the project on its development machines. They are
+  not independent benchmarks.
+
+## Licence and third-party code
+
+First-party code is under the MIT licence; see [LICENSE](LICENSE).
+
+`node/agave/` is a source snapshot of upstream
+[Agave](https://github.com/anza-xyz/agave) v3.0.14 under the Apache License 2.0
+([node/agave/LICENSE](node/agave/LICENSE)), with local modifications. Upstream
+licences, copyright notices and attributions inside that tree are retained.
+[THIRD_PARTY.md](THIRD_PARTY.md) records the upstream commit, the pristine
+tree, the local modifications and the list of changed files.
+
+The patches in `node/candidate/` apply to upstream Agave v4.3.2. They contain
+upstream Apache-2.0 code as patch context and a modified vendored copy of the
+`agave-transaction-view` crate; see [THIRD_PARTY.md](THIRD_PARTY.md).
+
+Rust dependencies are fetched by Cargo and keep their own licences. Wallet
+packages built by `tools/package_wallet.py` bundle the dependency notices.
+
+This project is not affiliated with or endorsed by the maintainers of Agave or
+Solana. Their names are used only to describe the origin of the code.

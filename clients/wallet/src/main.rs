@@ -1,3 +1,5 @@
+mod cli;
+
 use native_wallet::{
     keys::{read_password, read_password_input, read_private, Network, WalletKey},
     operation::WalletOperation,
@@ -10,122 +12,21 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
-fn run() -> Result<()> {
+fn run_with_arguments(
+    arguments: impl Iterator<Item = String>,
+    password_input: Option<&[u8]>,
+) -> Result<()> {
     let command_started = Instant::now();
-    let mut arguments = std::env::args().skip(1);
-    let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
-    if matches!(command.as_str(), "--help" | "-h") {
-        println!(
-            "native-wallet init|restore|address|balance|fees|deposit|send|withdraw|resolve|reclaim|archive|check|profile|test-coins|join|access-status"
-        );
-        println!("Required: --network <network.json> --wallet <encrypted-seed.json> --password-file <private-file|->; '-' reads a bounded password from stdin");
-        println!("init/restore: --backup <encrypted-seed-backup.json>");
-        println!("balance/deposit/send/withdraw/resolve/reclaim: --rpc http://127.0.0.1:<port>");
-        println!("Tester mode: --network <wallet-profile.json> pins the RPC; omit --rpc. Remote profiles require HTTPS. check needs only --network (and --rpc for fixtures), no wallet/password.");
-        println!("deposit/send/withdraw: --sponsor <private-keypair.json> --amount <native-units>");
-        println!("rehearsal deposit/send/withdraw: --sponsor-password-file <private-operator-file> --sponsor-request-id <unique-id> --amount <native-units>; fixed encrypted sponsor/policy beside network.json");
-        println!("rehearsal reclaim: --sponsor-password-file; reuses the saved original reservation for cleanup only.");
-        println!("deposit/send: --to <npriv1-address> (deposit defaults to this wallet)");
-        println!("withdraw: --to <public-address> (defaults to your seed-recoverable public account on this chain); fee sponsor receives no withdrawal value.");
-        println!("fees: show the user fee address, refundable rent, gross-debit quote and funding shortfall; no sponsor needed.");
-        println!("send/withdraw --fee-payer user --max-fee-debit <native-units>: sign with your seed-derived fee authority; never loads operator keys. Fund its public fee address first.");
-        println!("fees --payment send|withdraw: quote the exact payment shape; default withdraw for compatibility.");
-        println!("withdraw-legacy: disposable fixture compatibility only; credits the sponsor. Never enabled for guarded rehearsal keys.");
-        println!("reclaim: --rpc and --sponsor; safely close a recorded interrupted upload after resolving any pending payment.");
-        println!("test-coins: request/check the same signed one-time private test-coin and public-gas grant through a pinned profile faucet; no sponsor options.");
-        println!("join: invited profiles only; --invitation-file <owner-only code/export file> admits this seed-derived fee authority once and queues its fixed grant. access-status checks the same wallet's durable admission.");
-        println!("Invited check validates only the public genesis handshake. Unlock an admitted wallet for authenticated pool/history access. RPC access proofs expire after ten minutes; a new command signs a fresh proof.");
-        println!("Operator fixtures only: --rpc-access-file <owner-only-file> authenticates protected loopback raw RPC. Tester profiles reject operator credentials; local HTTPS profiles can include an explicit public local test CA.");
-        println!("Experimental local network only. Keep the encrypted seed backup and password separately.");
-        println!("archive: --network --rpc --history <directory>; public collector needs no wallet/password/sponsor");
-        println!("balance/deposit/send/withdraw: optional --history <directory> supplies retained verified ciphertext history");
+    let Some(cli::Arguments {
+        command,
+        args,
+        mut shielded_paid,
+        user_paid,
+        quote_payment,
+    }) = cli::parse_arguments(arguments)?
+    else {
         return Ok(());
-    }
-    if ![
-        "init",
-        "restore",
-        "address",
-        "balance",
-        "fees",
-        "deposit",
-        "send",
-        "withdraw",
-        "resolve",
-        "reclaim",
-        "archive",
-        "check",
-        "profile",
-        "test-coins",
-        "join",
-        "access-status",
-        "withdraw-legacy",
-    ]
-    .contains(&command.as_str())
-    {
-        return Err("unknown wallet command; use --help".into());
-    }
-    let mut args = BTreeMap::new();
-    while let Some(flag) = arguments.next() {
-        if ![
-            "--network",
-            "--wallet",
-            "--password-file",
-            "--backup",
-            "--rpc",
-            "--sponsor",
-            "--amount",
-            "--to",
-            "--history",
-            "--sponsor-password-file",
-            "--sponsor-request-id",
-            "--fee-payer",
-            "--max-fee-debit",
-            "--payment",
-            "--invitation-file",
-            "--rpc-access-file",
-        ]
-        .contains(&flag.as_str())
-        {
-            return Err(format!("unknown option {flag}").into());
-        }
-        let value = arguments.next().ok_or("option is missing its value")?;
-        if args.insert(flag, value).is_some() {
-            return Err("duplicate option".into());
-        }
-    }
-    let user_paid = match args.get("--fee-payer").map(String::as_str) {
-        None | Some("sponsor") => false,
-        Some("user") if matches!(command.as_str(), "send" | "withdraw") => true,
-        _ => return Err("--fee-payer must select user or sponsor for send/withdraw".into()),
     };
-    if args.contains_key("--fee-payer") && !matches!(command.as_str(), "send" | "withdraw") {
-        return Err(
-            "fee selection is only for send/withdraw; reclaim uses the original recorded payer"
-                .into(),
-        );
-    }
-    if user_paid
-        && [
-            "--sponsor",
-            "--sponsor-password-file",
-            "--sponsor-request-id",
-        ]
-        .iter()
-        .any(|flag| args.contains_key(*flag))
-    {
-        return Err("user-paid fees cannot be combined with operator sponsor options".into());
-    }
-    if args.contains_key("--max-fee-debit") && !user_paid {
-        return Err("--max-fee-debit requires user-paid send/withdraw fees".into());
-    }
-    let quote_payment = match args.get("--payment").map(String::as_str) {
-        None => "withdraw",
-        Some(value @ ("send" | "withdraw")) if command == "fees" => value,
-        _ => return Err("--payment send|withdraw is only supported for fees".into()),
-    };
-    if command == "withdraw-legacy" && args.contains_key("--to") {
-        return Err("legacy fixture withdrawal pays the sponsor; no destination override".into());
-    }
     let required = |name: &str| -> Result<&str> {
         args.get(name)
             .map(String::as_str)
@@ -138,6 +39,21 @@ fn run() -> Result<()> {
     let tester = if configuration["key_mode"] == "user-wallet-v1" {
         let profile =
             native_wallet::connection::TesterProfile::load(Path::new(required("--network")?))?;
+        let native = profile.private_send_transport.as_deref() == Some("native-inline-v1");
+        if command == "send" && native {
+            if args
+                .get("--fee-payer")
+                .is_some_and(|mode| mode != "shielded")
+            {
+                return Err("this explicit native profile uses shielded private-send fees".into());
+            }
+            shielded_paid = true;
+        }
+        if shielded_paid && !native {
+            return Err(
+                "shielded native sends require an explicit native-inline-v1 tester profile".into(),
+            );
+        }
         if args.contains_key("--rpc") {
             return Err("tester profile pins the RPC; --rpc override is forbidden".into());
         }
@@ -150,7 +66,7 @@ fn run() -> Result<()> {
         .iter()
         .any(|flag| args.contains_key(*flag))
             || matches!(command.as_str(), "deposit" | "withdraw-legacy")
-            || (matches!(command.as_str(), "send" | "withdraw") && !user_paid)
+            || (matches!(command.as_str(), "send" | "withdraw") && !user_paid && !shielded_paid)
         {
             return Err(
                 "tester profile permits no operator sponsorship; use user-paid sends/withdrawals"
@@ -161,6 +77,16 @@ fn run() -> Result<()> {
     } else {
         None
     };
+    if shielded_paid
+        && tester.as_ref().is_none_or(|profile| {
+            profile.private_send_transport.as_deref() != Some("native-inline-v1")
+        })
+    {
+        return Err("shielded sends require an explicit native tester profile".into());
+    }
+    if args.contains_key("--max-shielded-fee") && !(shielded_paid && command == "send") {
+        return Err("--max-shielded-fee only authorizes a native shielded send".into());
+    }
     if command == "withdraw-legacy" && configuration["fixture_keys_are_public"] != true {
         return Err("legacy sponsor withdrawals are restricted to disposable fixtures".into());
     }
@@ -172,14 +98,17 @@ fn run() -> Result<()> {
     if private_setup && args.contains_key("--sponsor") {
         return Err("rehearsal network requires its encrypted sponsor and durable policy; plaintext sponsor override is forbidden".into());
     }
-    let connect = || match &tester {
-        Some(profile) => Chain::connect_profile(profile),
-        None if args.contains_key("--rpc-access-file") => Chain::connect_operator(
-            required("--rpc")?,
-            network.clone(),
-            Path::new(required("--rpc-access-file")?),
-        ),
-        None => Chain::connect(required("--rpc")?, network.clone()),
+    let connect = || -> Result<Chain> {
+        (match &tester {
+            Some(profile) => Chain::connect_profile(profile),
+            None if args.contains_key("--rpc-access-file") => Chain::connect_operator(
+                required("--rpc")?,
+                network.clone(),
+                Path::new(required("--rpc-access-file")?),
+            ),
+            None => Chain::connect(required("--rpc")?, network.clone()),
+        })?
+        .with_pool_format(configuration["pool_format"].as_str().unwrap_or("NPOOL003"))
     };
     if command == "profile" {
         println!(
@@ -224,7 +153,24 @@ fn run() -> Result<()> {
     {
         return Err("--history is only for balance/payment reconstruction; unknown-payment resolution requires canonical full RPC history".into());
     }
-    let password = if required("--password-file")? == "-" {
+    // Only fixed public circuit material is prepared here. The worker receives
+    // no password, wallet, connection or payment, and is joined on early errors.
+    // Recovery commands never start a prover or construct a replacement proof.
+    let mut preparation = if matches!(
+        command.as_str(),
+        "deposit" | "send" | "withdraw" | "withdraw-legacy"
+    ) {
+        native_wallet::progress::report("key");
+        Some(payments::ProverPreparation::start()?)
+    } else {
+        None
+    };
+    let password = if let Some(input) = password_input {
+        if required("--password-file")? != "-" {
+            return Err("wallet sessions only accept the bounded password pipe".into());
+        }
+        read_password_input(input)?
+    } else if required("--password-file")? == "-" {
         read_password_input(std::io::stdin().lock())?
     } else {
         read_password(Path::new(required("--password-file")?))?
@@ -248,9 +194,7 @@ fn run() -> Result<()> {
         if path.exists() {
             return Err("restore requires a new wallet path".into());
         }
-        let wallet = WalletKey::open(Path::new(required("--backup")?), &password, &network)?;
-        wallet.save(path, &password)?;
-        wallet
+        WalletKey::restore(Path::new(required("--backup")?), path, &password, &network)?
     } else {
         WalletKey::open(path, &password, &network)?
     };
@@ -298,12 +242,33 @@ fn run() -> Result<()> {
     let mut chain = match &tester {
         Some(profile) if profile.invite_required => Chain::connect_invited(profile, &wallet)?,
         _ => connect()?,
-    };
+    }
+    .with_retained_history_format(
+        tester
+            .as_ref()
+            .and_then(|profile| profile.retained_history_format.as_deref()),
+    )?;
     if command == "resolve" {
-        println!("{}", chain.resolve(&wallet, &operation)?);
+        let outcome = if operation.has_shielded() {
+            native_wallet::shielded::recover(&chain, &wallet, &operation, false)?
+        } else {
+            chain.resolve(&wallet, &operation)?
+        };
+        println!("{}", outcome);
         return Ok(());
     }
     if command == "fees" {
+        if quote_payment == "send"
+            && tester.as_ref().is_some_and(|profile| {
+                profile.private_send_transport.as_deref() == Some("native-inline-v1")
+            })
+        {
+            println!(
+                "{}",
+                native_wallet::shielded::native::quote(&chain, &wallet.network)?
+            );
+            return Ok(());
+        }
         let quote = if quote_payment == "send" {
             chain.private_send_fee_quote(wallet.fee_keypair().pubkey())?
         } else {
@@ -313,6 +278,25 @@ fn run() -> Result<()> {
             )?
         };
         println!("{}", serde_json::to_string(&quote)?);
+        return Ok(());
+    }
+    if command == "send" && shielded_paid {
+        if args.contains_key("--history") {
+            return Err(
+                "native send recovery uses canonical gateway history; --history is unsupported"
+                    .into(),
+            );
+        }
+        let outcome = native_wallet::shielded::native::send_with_preparation(
+            chain,
+            &wallet,
+            &operation,
+            required("--amount")?.parse()?,
+            required("--to")?,
+            required("--max-shielded-fee")?.parse()?,
+            preparation.take(),
+        )?;
+        println!("{}", outcome);
         return Ok(());
     }
     if command == "reclaim" {
@@ -358,14 +342,25 @@ fn run() -> Result<()> {
     if command != "balance" {
         operation.ensure_resolved()?;
     }
-    let key_started = Instant::now();
-    if command != "balance" {
-        native_wallet::progress::report("key");
-    }
-    let prover = (command != "balance").then(payments::PaymentProver::new);
-    let proof_key_ms = key_started.elapsed().as_millis();
+    let prepared = preparation
+        .take()
+        .map(|worker| worker.finish())
+        .transpose()?;
+    let (prover, proof_key_ms, proof_key_wait_ms, proof_key_cached) = match prepared {
+        Some((prover, timing)) => (
+            Some(prover),
+            timing.proof_key_ms,
+            timing.proof_key_wait_ms,
+            timing.proof_key_cached,
+        ),
+        None => (None, 0, 0, false),
+    };
     if let Some(prover) = &prover {
         chain = chain.with_payment_prover(prover);
+    } else if let Some(prover) = payments::cached_prover() {
+        // A wallet session retains only public circuit material. A balance
+        // scan can reuse its VK and still verifies every canonical payment.
+        chain = chain.with_payment_prover(&prover);
     }
     let sync_started = Instant::now();
     if command != "balance" {
@@ -378,10 +373,16 @@ fn run() -> Result<()> {
     };
     let sync_ms = sync_started.elapsed().as_millis();
     if command == "balance" {
+        let unspent = synced.state.unspent();
+        for note in &unspent {
+            synced.state.witness(note.position)?;
+        }
         let public = wallet.public_keypair().pubkey();
+        let fee = wallet.fee_keypair().pubkey();
+        let balances = chain.balance_inputs(public, fee)?;
         println!(
             "{}",
-            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":synced.state.unspent().len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan,"public_address":public.to_string(),"public_balance":chain.public_balance(public)?,"minimum_public_withdrawal":chain.minimum_withdrawal(public)?,"fee_address":wallet.fee_keypair().pubkey().to_string(),"fee_balance":chain.public_balance(wallet.fee_keypair().pubkey())?})
+            json!({"balance":synced.state.balance()?,"max_single_payment":synced.state.max_payment()?,"unspent_notes":unspent.len(),"witnesses_verified":unspent.len(),"finalized_slot":synced.slot,"commitments":synced.state.pool.note_count(),"sync":synced.scan,"public_address":public.to_string(),"public_balance":balances.public_balance,"minimum_public_withdrawal":balances.minimum_withdrawal,"fee_address":fee.to_string(),"fee_balance":balances.fee_balance})
         );
         return Ok(());
     }
@@ -474,7 +475,7 @@ fn run() -> Result<()> {
         .elapsed()
         .as_millis()
         .saturating_sub(sync_ms)
-        .saturating_sub(proof_key_ms);
+        .saturating_sub(proof_key_wait_ms);
     let proof_started = Instant::now();
     native_wallet::progress::report("prove");
     let bytes = prover.as_ref().ok_or("payment prover unavailable")?.build(
@@ -493,6 +494,8 @@ fn run() -> Result<()> {
         "preparation_ms": preparation_ms,
         "sync_ms": sync_ms,
         "proof_key_ms": proof_key_ms,
+        "proof_key_wait_ms": proof_key_wait_ms,
+        "proof_key_cached": proof_key_cached,
         "proof_build_ms": proof_build_ms,
         "submit_ms": submit_started.elapsed().as_millis(),
         "total_ms": command_started.elapsed().as_millis(),
@@ -563,7 +566,22 @@ fn reserve_sponsor(
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let mut args = std::env::args().skip(1);
+    let result = if args.next().as_deref() == Some("command-session") {
+        let values = args.collect::<Vec<_>>();
+        if values.len() != 4 || values[0] != "--network" || values[2] != "--wallet" {
+            Err("command-session requires fixed --network and --wallet paths".into())
+        } else {
+            native_wallet::command_session::serve(
+                Path::new(&values[1]),
+                Path::new(&values[3]),
+                |args, password| run_with_arguments(args.into_iter(), password),
+            )
+        }
+    } else {
+        run_with_arguments(std::env::args().skip(1), None)
+    };
+    if let Err(error) = result {
         eprintln!("Wallet error: {error}");
         std::process::exit(1);
     }

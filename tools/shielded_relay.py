@@ -61,6 +61,43 @@ def packet(value, network, payer, fee):
     return identity(raw).hex()
 
 
+def native_options(config):
+    """Only fixed operator configuration can select private native ingress."""
+    fields = {'native_ingress', 'pool_format', 'native_profile'}
+    if not fields.intersection(config):
+        return None
+    endpoints = config.get('native_ingress')
+    network = config.get('network')
+    if (not fields <= set(config) or config['pool_format'] != 'NPOOL004'
+            or not isinstance(config.get('native_profile'), str)
+            or not 1 <= len(config['native_profile']) <= 4096 or '\0' in config['native_profile']
+            or not Path(config['native_profile']).is_absolute()
+            or not isinstance(endpoints, list) or not 1 <= len(endpoints) <= 3
+            or any(not isinstance(value, str) or
+                   re.fullmatch(r'127\.0\.0\.1:[1-9][0-9]{0,4}', value) is None or
+                   not 1 <= int(value.rsplit(':', 1)[1]) <= 65535 for value in endpoints)
+            or len(set(endpoints)) != len(endpoints)
+            or not isinstance(network, dict) or set(network) != {'network', 'genesis_hash'}
+            or not isinstance(network['network'], list) or len(network['network']) != 32
+            or any(type(byte) is not int or not 0 <= byte <= 255 for byte in network['network'])
+            or network['network'] == [0] * 32
+            or not isinstance(config.get('payer'), list) or len(config['payer']) != 32
+            or any(type(byte) is not int or not 0 <= byte <= 255 for byte in config['payer'])
+            or config['payer'] == [0] * 32
+            or not isinstance(network['genesis_hash'], str)
+            or re.fullmatch('[1-9A-HJ-NP-Za-km-z]{32,44}', network['genesis_hash']) is None):
+        raise ValueError('native relay requires an explicit V4 network and 1..3 unique pinned loopback ingress endpoints')
+    return ','.join(endpoints)
+
+
+class RelayCapacityError(ValueError):
+    def __init__(self, scope):
+        if scope not in ('member', 'network'):
+            raise ValueError('invalid relay capacity scope')
+        self.scope = scope
+        super().__init__('relay lifetime quota exhausted')
+
+
 # Public request IDs use hex; RPC client verifies the exact payload digest too.
 class Relay:
     def __init__(self, root):
@@ -68,61 +105,100 @@ class Relay:
         if self.root.is_symlink() or self.root.stat().st_mode & 0o077:
             raise ValueError('relay root must be owner-only')
         self.lock_file = os.fdopen(os.open(self.root / 'worker.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'a+b')
-        if os.fstat(self.lock_file.fileno()).st_mode & 0o077: raise ValueError('relay lock must be owner-only')
-        import fcntl
         try:
+            if os.fstat(self.lock_file.fileno()).st_mode & 0o077: raise ValueError('relay lock must be owner-only')
+            import fcntl
             fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+            self.config = json.loads(private(self.root / 'config.json', 8192))
+            required = {'format', 'network', 'network_file', 'rpc', 'payer', 'payer_file', 'binary',
+                        'fee', 'gross_cap', 'max_jobs', 'per_member'}
+            if (set(self.config) - (required | {'rpc_access_file', 'native_ingress', 'pool_format', 'native_profile'}) or not required <= set(self.config)
+                    or self.config['format'] != 'native-shielded-relay-v1'
+                    or any(type(self.config[k]) is not int or self.config[k] <= 0 for k in ('fee', 'gross_cap', 'max_jobs', 'per_member'))
+                    or self.config['max_jobs'] > 64 or self.config['per_member'] > 8
+                    or self.config['fee'] > 100_000_000 or self.config['gross_cap'] > 250_000_000
+                    or len(self.config['payer']) != 32):
+                raise ValueError('invalid bounded relay configuration')
+            self.native_ingress = native_options(self.config)
+            self.transport_binding = (dict(format='native-inline-relay-binding-v1',
+                transport='native-inline-v1', pool_format='NPOOL004',
+                network=self.config['network'], payer=self.config['payer'], fee=self.config['fee'])
+                if self.native_ingress is not None else None)
+            self.jobs = self.root / 'jobs'
+            self.jobs.mkdir(mode=0o700, exist_ok=True)
+            if self.jobs.is_symlink() or self.jobs.stat().st_mode & 0o077:
+                raise ValueError('invalid relay jobs directory')
+            # Never reinterpret an existing job under another network, payer, fee,
+            # pool version or transport. Endpoint rotations remain operator-owned.
+            for job in self.jobs.iterdir():
+                self.check_transport(job)
+            self.mutex = threading.Lock()
+            self.stop = threading.Event()
+            self.wake = threading.Event()
+            self.child = None
+            self.worker = None
+
+        except BaseException:
+            # A retained initialization traceback can keep this object alive.
+            # Release its lock before propagating any incomplete construction.
             self.lock_file.close()
             raise
-        self.config = json.loads(private(self.root / 'config.json', 8192))
-        required = {'format', 'network', 'network_file', 'rpc', 'payer', 'payer_file', 'binary',
-                    'fee', 'gross_cap', 'max_jobs', 'per_member'}
-        if (set(self.config) - (required | {'rpc_access_file'}) or not required <= set(self.config)
-                or self.config['format'] != 'native-shielded-relay-v1'
-                or any(type(self.config[k]) is not int or self.config[k] <= 0 for k in ('fee', 'gross_cap', 'max_jobs', 'per_member'))
-                or self.config['max_jobs'] > 64 or self.config['per_member'] > 8
-                or self.config['fee'] > 100_000_000 or self.config['gross_cap'] > 250_000_000
-                or len(self.config['payer']) != 32):
-            raise ValueError('invalid bounded relay configuration')
-        self.jobs = self.root / 'jobs'
-        self.jobs.mkdir(mode=0o700, exist_ok=True)
-        if self.jobs.is_symlink() or self.jobs.stat().st_mode & 0o077:
-            raise ValueError('invalid relay jobs directory')
-        self.mutex = threading.Lock()
-        self.stop = threading.Event()
-        self.child = None
-        self.worker = None
+
+    def check_transport(self, path):
+        if path.is_symlink() or not path.is_dir() or re.fullmatch('[a-f0-9]{64}', path.name) is None:
+            raise ValueError('invalid private relay job directory')
+        binding = path / 'transport.json'
+        if self.transport_binding is None:
+            if binding.exists() or binding.is_symlink():
+                raise ValueError('native relay jobs cannot fall back to staging')
+        elif not binding.exists() or json.loads(private(binding, 4096)) != self.transport_binding:
+            raise ValueError('native relay job transport binding mismatch; original state retained')
+
+    @staticmethod
+    def pending(path):
+        return any((path / name).exists() for name in
+                   ('relay.pending.json', 'relay.staging.json', 'relay.native.json'))
 
     def quote(self):
         # No refundable staging rent is charged to the user.
         from explorer_model import b58
-        return dict(format='native-shielded-fee-quote-v1', network=self.config['network'],
-                    payer=b58(bytes(self.config['payer'])), fee=self.config['fee'])
+        value = dict(format='native-shielded-fee-quote-v1', network=self.config['network'],
+                     payer=b58(bytes(self.config['payer'])), fee=self.config['fee'])
+        if self.native_ingress is not None:
+            value.update(transport='native-inline-v1', pool_format='NPOOL004')
+        return value
+
+    def check_capacity(self, owner):
+        """Check finite lifetime capacity while the caller holds self.mutex."""
+        entries = list(self.jobs.iterdir())
+        if len(entries) >= self.config['max_jobs']:
+            raise RelayCapacityError('network')
+        if sum(json.loads(private(path / 'owner.json')) == owner for path in entries) >= self.config['per_member']:
+            raise RelayCapacityError('member')
 
     def dispatch(self, method, params, member):
         if method == 'getShieldedFeeQuote':
             if params != []:
                 raise ValueError('quote accepts no parameters')
-            return self.quote()
-        if not isinstance(params, list) or len(params) != 1:
+        elif not isinstance(params, list) or len(params) != 1:
             raise ValueError('one bounded relay parameter required')
         # Store a hash of the admitted identity; never expose another member's job.
         owner = hashlib.sha256(member.encode()).hexdigest()
         with self.mutex:
+            if method == 'getShieldedFeeQuote':
+                self.check_capacity(owner)
+                return self.quote()
             if method == 'submitShieldedPayment':
                 job_id = packet(params[0], self.config['network'], self.config['payer'], self.config['fee'])
                 path = self.jobs / job_id
                 if path.exists():
+                    self.check_transport(path)
                     if json.loads(private(path / 'owner.json')) != owner:
                         raise ValueError('relay ownership mismatch')
                     if json.loads(private(path / 'packet.json')) != params[0]:
                         raise ValueError('relay payload identity collision')
                     return dict(id=job_id)
-                entries = list(self.jobs.iterdir())
-                if len(entries) >= self.config['max_jobs'] or sum(
-                        json.loads(private(p / 'owner.json')) == owner for p in entries) >= self.config['per_member']:
-                    raise ValueError('relay lifetime quota exhausted')
+                self.check_capacity(owner)
                 # Fully initialize an invisible directory, then publish atomically.
                 import tempfile
                 import shutil
@@ -130,7 +206,10 @@ class Relay:
                 try:
                     save(pending / 'packet.json', params[0])
                     save(pending / 'owner.json', owner)
+                    if self.transport_binding is not None:
+                        save(pending / 'transport.json', self.transport_binding)
                     os.rename(pending, path); sync_dir(self.jobs)
+                    self.wake.set()  # Notify only after the new job is durable.
                 finally:
                     if pending.exists(): shutil.rmtree(pending)
                 return dict(id=job_id)
@@ -138,6 +217,7 @@ class Relay:
                 raise ValueError('invalid relay status request')
             path = self.jobs / params[0]
             if not path.exists(): return dict(id=params[0], state='unknown')
+            self.check_transport(path)
             if json.loads(private(path / 'owner.json')) != owner:
                 raise ValueError('relay ownership mismatch')
             if (path / 'outcome.json').exists():
@@ -149,9 +229,10 @@ class Relay:
     def work_once(self):
         for path in sorted(self.jobs.iterdir()):
             if self.stop.is_set(): return
-            if (path / 'done').exists() and not any((path / name).exists() for name in ('relay.pending.json', 'relay.staging.json')): continue
+            self.check_transport(path)
+            if (path / 'done').exists() and not self.pending(path): continue
             tries = json.loads(private(path / 'tries.json')) if (path / 'tries.json').exists() else 0
-            if tries >= 3 and not any((path / name).exists() for name in ('relay.pending.json', 'relay.staging.json', 'outcome.json')):
+            if tries >= 3 and not self.pending(path) and not (path / 'outcome.json').exists():
                 save(path / 'outcome.json', dict(accepted=False, aborted=True))
                 save(path / 'done', True)
                 continue
@@ -159,6 +240,8 @@ class Relay:
             args = [self.config['binary'], 'relay', '--network', self.config['network_file'],
                     '--rpc', self.config['rpc'], '--payer', self.config['payer_file'], '--job', str(path),
                     '--gross-cap', str(self.config['gross_cap']), '--fee', str(self.config['fee'])]
+            if self.native_ingress is not None:
+                args += ['--native-ingress', self.native_ingress, '--pool-format', 'NPOOL004']
             if self.config.get('rpc_access_file'):
                 args += ['--rpc-access-file', self.config['rpc_access_file']]
             # One proof/worker at a time; an unknown transaction retains its
@@ -174,8 +257,7 @@ class Relay:
                 child.kill(); child.wait()
             finally:
                 with self.mutex: self.child = None
-            if child.returncode == 0 and (path / 'outcome.json').exists() and not any(
-                    (path / name).exists() for name in ('relay.pending.json', 'relay.staging.json')):
+            if child.returncode == 0 and (path / 'outcome.json').exists() and not self.pending(path):
                 save(path / 'done', True)
 
     def start(self):
@@ -185,12 +267,18 @@ class Relay:
 
     def work(self):
         while not self.stop.is_set():
+            # Clear before scanning: a publication during the scan must still
+            # wake the following wait. Keep the periodic scan for old jobs,
+            # cross-process publications and recovery without an event.
+            self.wake.clear()
             self.work_once()
-            self.stop.wait(1)
+            if not self.stop.is_set():
+                self.wake.wait(1)
 
     def close(self):
         with self.mutex:
             self.stop.set()
+            self.wake.set()
             if self.child is not None:
                 self.child.kill(); self.child.wait()
         if self.worker is not None:

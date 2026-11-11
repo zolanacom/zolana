@@ -1,0 +1,121 @@
+{
+  "format": "zolana-native-reconstruction-plan-v1",
+  "upstream_commit": "a203300045b405f86c9c84308b2eae76af69ac3b",
+  "archive_sha256": "917912ac67fc0b6ffec94e33e1ce113db581e1f1706aa1ecbe4224b967b15f30",
+  "base_patch": {
+    "path": "node/candidate/agave-4.3.2.patch",
+    "sha256": "d582e38f06cd6a1bed8686aa927141d8bb496d078674a4b0dd995177850d0e32"
+  },
+  "steps": [
+    {
+      "revision": "LOCAL-057",
+      "manifest": {
+        "path": "node/candidate/LOCAL-057-source.json",
+        "sha256": "8ee2c21f73527f49dec403eb9e64cca412b230a5fde50b6bdf3000534e06dfe6"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-057.patch",
+        "sha256": "5000ac8db0c731bd84213de68edbfac69ab35428db50b51945d811dbc2a7f8f2"
+      }
+    },
+    {
+      "revision": "LOCAL-058",
+      "manifest": {
+        "path": "node/candidate/LOCAL-058-source.json",
+        "sha256": "727c5dc94fb20cb5f3cd512360ea4f7492664b9ee9101afa59772fed00e24a2c"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-058.patch",
+        "sha256": "b0e7f7e930c5be4020217cd39cc654ea8070312a87639169d38912cd493b7407"
+      }
+    },
+    {
+      "revision": "LOCAL-059",
+      "manifest": {
+        "path": "node/candidate/LOCAL-059-source.json",
+        "sha256": "d11952a9f613a7dcfc679f4eff9dd5de6081d47740688d1863226db7b113ec19"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-059.patch",
+        "sha256": "40d48bb66ee03502861a66876f921740e4282897279a8fa765009ab6127f7367"
+      }
+    },
+    {
+      "revision": "LOCAL-072",
+      "manifest": {
+        "path": "node/candidate/LOCAL-072-source.json",
+        "sha256": "57a947addd2dff75665241af64a40be3ed9d07b9bd64e3e57cc94e2c37bb10d2"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-072.patch",
+        "sha256": "3081981628659772ccd92889348f8816a09105328036b83bbc797ab2c03370c3"
+      }
+    },
+    {
+      "revision": "LOCAL-085",
+      "manifest": {
+        "path": "node/candidate/LOCAL-085-source.json",
+        "sha256": "37c96b819ea00cdc9fe57f15975344e425047c96e0240ff7e9907a44b7184afe"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-085.patch",
+        "sha256": "76ac5672649823ab10f6f4620fe4603fbb16f3b26ec3ac8dc0f495bbcf33998b"
+      }
+    },
+    {
+      "revision": "LOCAL-092",
+      "manifest": {
+        "path": "node/candidate/LOCAL-092-source.json",
+        "sha256": "fb940c77606985b0b841bfa4d69d579f5b1de7bad98b1017a934a9e45bb18b69"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-092.patch",
+        "sha256": "be27624c08d12df3135f512aaddbf1172b698863952206d90a63cc7179f93b0e"
+      }
+    },
+    {
+      "revision": "LOCAL-093",
+      "manifest": {
+        "path": "node/candidate/LOCAL-093-source.json",
+        "sha256": "b95cedb5202686e83cb40595bc91c41a80575b082ec26788188a4dd6dc593ed3"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-093.patch",
+        "sha256": "03164976925a02677ef90b7ed21cd42014b6b6aad9ff0f8027fc5d46797a1ab7"
+      }
+    },
+    {
+      "revision": "LOCAL-094",
+      "manifest": {
+        "path": "node/candidate/LOCAL-094-source.json",
+        "sha256": "970262215d4c46b53716ec3b16a7cffa4b33120d33c7888572c3447424c5d9ed"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-094.patch",
+        "sha256": "b2a577f007bb5ef5a42bea0be36e5458c20a7898d062a39eaceaeac4d65b595c"
+      }
+    },
+    {
+      "revision": "LOCAL-095",
+      "manifest": {
+        "path": "node/candidate/LOCAL-095-source.json",
+        "sha256": "df41b8642fe3cb0e60cc2d6687131b818106a9705fce096acb6f21dac5022eeb"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-095.patch",
+        "sha256": "81d79b5c320204f55cbd8a9f25a22c260085e37785d06c7a36050013e3a8b699"
+      }
+    },
+    {
+      "revision": "LOCAL-098-r3",
+      "manifest": {
+        "path": "node/candidate/LOCAL-098-r3-source.json",
+        "sha256": "25e80a1a5b0459d965b30cda61c18f37ca32933bcb499a1304cfc94f2b2d0beb"
+      },
+      "patch": {
+        "path": "node/candidate/agave-4.3.2-LOCAL-098-r3.patch",
+        "sha256": "68a3d48fc6f5c81509dee96eb300bf1a9435ea61dede683480f18ae86364cc02"
+      }
+    }
+  ]
+}

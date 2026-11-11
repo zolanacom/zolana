@@ -1,357 +1,19 @@
-//! Reconstruct from successful finalized instructions; never accept an RPC balance assertion.
-mod snapshot;
-use crate::{keys::WalletKey, Result};
-use incrementalmerkletree::{Hashable, Level};
-use native_payment_program::{
-    nullifiers, pool_address,
-    staging::{Buffer, ACCOUNT_BYTES},
-};
-use native_payments::{
-    state::PoolState,
-    verification::{
-        bundle_version, AuthorizationContext, PaymentVerifier, ValidationView, VerifiedPayment,
-        MAX_EXPIRY_WINDOW,
-    },
-    wire,
-};
-use orchard::{
-    bundle::Authorized,
-    circuit::VerifyingKey,
-    keys::{FullViewingKey, Scope},
-    tree::{MerkleHashOrchard, MerklePath},
-    Bundle, Note,
-};
-pub(crate) use snapshot::ReplaySnapshot;
+//! Native wallet aliases for the shared checked replay and witness engine.
+//! RPC canonical-success validation remains in rpc.rs before applying history.
+pub use native_wallet_core::history::{OwnedNote, WalletState};
+pub use native_wallet_core::replay::Replay;
+pub type HistoryInstruction = native_wallet_core::replay::HistoryInstruction<solana_pubkey::Pubkey>;
+#[cfg(test)]
+use crate::keys::WalletKey;
+#[cfg(test)]
+use native_payments::{state::PoolState, wire};
+#[cfg(test)]
+use native_wallet_core::history::AcceptedPayment as AcceptedHistoryPayment;
+pub(crate) use native_wallet_core::history::ReplaySnapshot;
+#[cfg(test)]
 use solana_pubkey::Pubkey;
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
-
-pub struct OwnedNote {
-    pub note: Note,
-    pub position: u32,
-}
-
-pub struct WalletState {
-    pub pool: PoolState,
-    leaves: Vec<MerkleHashOrchard>,
-    notes: Vec<OwnedNote>,
-    spent: BTreeSet<[u8; 32]>,
-    view: FullViewingKey,
-    verifier: PaymentVerifier,
-}
-
-impl WalletState {
-    pub fn new(wallet: &WalletKey, rent_floor: u64) -> Result<Self> {
-        Self::with_key(
-            wallet,
-            rent_floor,
-            Arc::new(VerifyingKey::build(bundle_version().circuit_version())),
-        )
-    }
-
-    pub(crate) fn with_key(
-        wallet: &WalletKey,
-        rent_floor: u64,
-        key: Arc<VerifyingKey>,
-    ) -> Result<Self> {
-        Ok(Self {
-            pool: PoolState::new(wallet.network.network, rent_floor)?,
-            leaves: Vec::new(),
-            notes: Vec::new(),
-            spent: BTreeSet::new(),
-            view: wallet.viewing_key(),
-            verifier: PaymentVerifier::with_shared_key(wallet.network.network, key)?,
-        })
-    }
-
-    pub fn accept(
-        &mut self,
-        bundle: &Bundle<Authorized, i64>,
-        authorization: &AuthorizationContext,
-        slot: u64,
-    ) -> Result<()> {
-        let effects = self.verifier.verify(
-            bundle,
-            authorization,
-            &ValidationView {
-                current_slot: slot,
-                accepted_anchors: &self.pool.roots(),
-                spent_nullifiers: &self.spent,
-                authorized_public_value_balance: authorization.public_value_balance,
-            },
-        )?;
-        self.apply_effects(bundle, &effects)
-    }
-
-    fn apply_effects(
-        &mut self,
-        bundle: &Bundle<Authorized, i64>,
-        effects: &VerifiedPayment,
-    ) -> Result<()> {
-        if effects.nullifiers.iter().any(|nf| self.spent.contains(nf)) {
-            return Err("verified history payment was already applied".into());
-        }
-        let next = self.pool.with_payment(effects)?;
-        let position = self.pool.note_count();
-        let keys = [
-            self.view.to_ivk(Scope::External),
-            self.view.to_ivk(Scope::Internal),
-        ];
-        for (index, _, note, _, _) in bundle.decrypt_outputs_with_keys(&keys) {
-            if note.value().inner() > 0 {
-                self.notes.push(OwnedNote {
-                    note,
-                    position: u32::try_from(position + index as u64)?,
-                });
-            }
-        }
-        self.leaves.extend(
-            bundle
-                .actions()
-                .iter()
-                .map(|action| MerkleHashOrchard::from_cmx(action.cmx())),
-        );
-        self.spent.extend(effects.nullifiers);
-        self.pool = next;
-        Ok(())
-    }
-
-    pub fn reconcile(&self, expected: &PoolState) -> Result<()> {
-        if self.pool.encode() != expected.encode()
-            || self.leaves.len() as u64 != expected.note_count()
-        {
-            return Err("history is incomplete or does not match the finalized native pool; an archive RPC is required".into());
-        }
-        if self.balance()? > expected.backing {
-            return Err("wallet notes exceed native backing".into());
-        }
-        Ok(())
-    }
-
-    pub fn unspent(&self) -> Vec<&OwnedNote> {
-        self.notes
-            .iter()
-            .filter(|owned| {
-                !self
-                    .spent
-                    .contains(&owned.note.nullifier(&self.view).to_bytes())
-            })
-            .collect()
-    }
-
-    pub fn balance(&self) -> Result<u64> {
-        self.unspent().iter().try_fold(0u64, |sum, owned| {
-            sum.checked_add(owned.note.value().inner())
-                .ok_or_else(|| "wallet balance overflow".into())
-        })
-    }
-
-    pub fn max_payment(&self) -> Result<u64> {
-        let mut notes = self.unspent();
-        notes.sort_by_key(|note| std::cmp::Reverse(note.note.value().inner()));
-        notes.iter().take(2).try_fold(0u64, |sum, owned| {
-            sum.checked_add(owned.note.value().inner())
-                .ok_or_else(|| "wallet balance overflow".into())
-        })
-    }
-
-    pub fn witness(&self, position: u32) -> Result<MerklePath> {
-        let mut index = position as usize;
-        if index >= self.leaves.len() {
-            return Err("note position is outside the authenticated tree".into());
-        }
-        let mut nodes = self.leaves.clone();
-        let mut siblings = [MerkleHashOrchard::empty_leaf(); 32];
-        for (level, sibling) in siblings.iter_mut().enumerate() {
-            let empty = MerkleHashOrchard::empty_root(Level::from(level as u8));
-            *sibling = nodes.get(index ^ 1).copied().unwrap_or(empty);
-            nodes = nodes
-                .chunks(2)
-                .map(|pair| {
-                    MerkleHashOrchard::combine(
-                        Level::from(level as u8),
-                        &pair[0],
-                        pair.get(1).unwrap_or(&empty),
-                    )
-                })
-                .collect();
-            index /= 2;
-        }
-        let path = MerklePath::from_parts(position, siblings);
-        if nodes.len() != 1 || nodes[0].to_bytes() != self.pool.root() {
-            return Err("witness root does not match native state".into());
-        }
-        Ok(path)
-    }
-}
-
-pub struct HistoryInstruction {
-    pub accounts: Vec<(Pubkey, bool)>,
-    pub data: Vec<u8>,
-}
-
-/// Constructed only after complete proof and history verification. Reusable only
-/// for other local views at the exact same authenticated pre-payment checkpoint.
-pub(crate) struct AcceptedHistoryPayment {
-    before: Vec<u8>,
-    payment: wire::DecodedPayment,
-    effects: VerifiedPayment,
-}
-impl AcceptedHistoryPayment {
-    pub(crate) fn payload_digest(&self) -> Result<[u8; 32]> {
-        Ok(native_payments::staging::payload_digest(&wire::encode(
-            PoolState::decode(&self.before)?.network,
-            &self.payment.context,
-            &self.payment.bundle,
-        )?))
-    }
-    pub(crate) fn withdrawal(&self) -> Option<crate::payments::WithdrawalReceipt> {
-        crate::payments::withdrawal_receipt(&self.payment)
-    }
-    pub(crate) fn apply(&self, state: &mut WalletState) -> Result<()> {
-        if state.pool.encode() != self.before {
-            return Err("shared history checkpoint mismatch".into());
-        }
-        state.apply_effects(&self.payment.bundle, &self.effects)
-    }
-}
-
-pub struct Replay {
-    pub state: WalletState,
-    buffers: HashMap<Pubkey, Buffer>,
-}
-
-impl Replay {
-    pub fn new(wallet: &WalletKey, rent_floor: u64) -> Result<Self> {
-        Ok(Self {
-            state: WalletState::new(wallet, rent_floor)?,
-            buffers: HashMap::new(),
-        })
-    }
-
-    pub fn apply(&mut self, ix: &HistoryInstruction, slot: u64) -> Result<()> {
-        self.apply_verified(ix, slot).map(|_| ())
-    }
-
-    pub(crate) fn from_state(state: WalletState) -> Self {
-        Self {
-            state,
-            buffers: HashMap::new(),
-        }
-    }
-
-    pub(crate) fn apply_verified(
-        &mut self,
-        ix: &HistoryInstruction,
-        slot: u64,
-    ) -> Result<Option<AcceptedHistoryPayment>> {
-        let (&opcode, rest) = ix
-            .data
-            .split_first()
-            .ok_or("empty native history instruction")?;
-        let accounts = &ix.accounts;
-        if opcode == 3 {
-            if !rest.is_empty()
-                || ![6, 7].contains(&accounts.len())
-                || accounts[0].0 != pool_address()
-                || accounts[3].0 != solana_sdk_ids::system_program::id()
-                || !accounts[2].1
-            {
-                return Err("invalid native finalization in history".into());
-            }
-            let buffer = self
-                .buffers
-                .get_mut(&accounts[1].0)
-                .ok_or("missing staging history; an archive RPC is required")?;
-            if buffer.sponsor() != accounts[2].0.to_bytes() || slot > buffer.expiry() {
-                return Err("history sponsor or expiry mismatch".into());
-            }
-            let payment = wire::decode(self.state.pool.network, buffer.payload()?)?;
-            if payment.context.sponsor != accounts[2].0.to_bytes() {
-                return Err("history authorization sponsor mismatch".into());
-            }
-            match payment.context.withdrawal_recipient {
-                None if accounts.len() == 6 => (),
-                Some(recipient)
-                    if accounts.len() == 7
-                        && accounts[6].0.to_bytes() == recipient
-                        && accounts[6].0.is_on_curve()
-                        && accounts[6].0 != accounts[2].0 => {}
-                _ => return Err("history withdrawal recipient/account shape mismatch".into()),
-            }
-            for (index, action) in payment.bundle.actions().iter().enumerate() {
-                if accounts[4 + index].0 != nullifiers::address(&action.nullifier().to_bytes()) {
-                    return Err("history nullifier address mismatch".into());
-                }
-            }
-            let before = self.state.pool.encode();
-            let effects = self.state.verifier.verify(
-                &payment.bundle,
-                &payment.context,
-                &ValidationView {
-                    current_slot: slot,
-                    accepted_anchors: &self.state.pool.roots(),
-                    spent_nullifiers: &self.state.spent,
-                    authorized_public_value_balance: payment.context.public_value_balance,
-                },
-            )?;
-            self.state.apply_effects(&payment.bundle, &effects)?;
-            buffer.consume()?;
-            return Ok(Some(AcceptedHistoryPayment {
-                before,
-                payment,
-                effects,
-            }));
-        }
-        if accounts.len() != 2
-            || !accounts[1].1
-            || accounts[0].0 == pool_address()
-            || accounts[0].0 == accounts[1].0
-        {
-            return Err("invalid native staging history".into());
-        }
-        let key = accounts[0].0;
-        if opcode == 0 {
-            if rest.len() != 44 || !accounts[0].1 || self.buffers.contains_key(&key) {
-                return Err("invalid staging initialization history".into());
-            }
-            let expiry = u64::from_le_bytes(rest[36..44].try_into()?);
-            if expiry < slot || expiry.saturating_sub(slot) > MAX_EXPIRY_WINDOW {
-                return Err("invalid staging expiry history".into());
-            }
-            let buffer = Buffer::initialize(
-                &vec![0; ACCOUNT_BYTES],
-                accounts[1].0.to_bytes(),
-                u32::from_le_bytes(rest[..4].try_into()?),
-                rest[4..36].try_into()?,
-                expiry,
-            )?;
-            self.buffers.insert(key, buffer);
-            return Ok(None);
-        }
-        let buffer = self
-            .buffers
-            .get_mut(&key)
-            .ok_or("missing staging history; an archive RPC is required")?;
-        if buffer.sponsor() != accounts[1].0.to_bytes() || (opcode != 4 && slot > buffer.expiry()) {
-            return Err("staging history sponsor or expiry mismatch".into());
-        }
-        match opcode {
-            1 if rest.len() >= 5 => {
-                buffer.write(u32::from_le_bytes(rest[..4].try_into()?), &rest[4..])?
-            }
-            2 if rest.is_empty() => buffer.seal()?,
-            4 if rest.is_empty() => {
-                self.buffers.remove(&key);
-            }
-            _ => return Err("unknown native instruction in history".into()),
-        }
-        Ok(None)
-    }
-}
-
+#[cfg(test)]
+use std::sync::Arc;
 #[cfg(test)]
 mod shared_scan_tests {
     use super::*;
@@ -361,6 +23,312 @@ mod shared_scan_tests {
     };
     use native_payment_program::instructions;
     use native_payments::staging::{payload_digest, MAX_CHUNK_BYTES};
+
+    #[test]
+    fn v4_block_finish_guards_proving_and_restores_slot_anchors_and_nullifiers() {
+        let network = Network {
+            network: [43; 32],
+            genesis_hash: bs58::encode([44; 32]).into_string(),
+        };
+        let alice = WalletKey::generate(network).unwrap();
+        let prover = payments::PaymentProver::new();
+        let mut state = WalletState::with_key(&alice, 1000, prover.verifying_key()).unwrap();
+        state.pool = PoolState::new_slot_anchored(alice.network.network, 1000).unwrap();
+        assert!(state.spendable_anchor().is_err());
+        state.finish_slot(0).unwrap();
+        let sponsor = Pubkey::new_unique();
+        let funding = prover
+            .build(
+                &alice,
+                &state,
+                sponsor.to_bytes(),
+                100,
+                Payment::Deposit {
+                    amount: 100,
+                    recipient: &alice.address_text(),
+                },
+            )
+            .unwrap();
+        let funding = wire::decode(alice.network.network, &funding).unwrap();
+        state.accept(&funding.bundle, &funding.context, 1).unwrap();
+        assert!(state.spendable_anchor().is_err());
+        assert!(state.witness(0).is_err());
+        state.finish_slot(1).unwrap();
+        assert!(state.spendable_anchor().is_ok());
+
+        let bytes = prover
+            .build(
+                &alice,
+                &state,
+                sponsor.to_bytes(),
+                100,
+                Payment::ShieldedSend {
+                    amount: 10,
+                    recipient: &alice.address_text(),
+                    fee: 2,
+                },
+            )
+            .unwrap();
+        let payment = wire::decode(alice.network.network, &bytes).unwrap();
+        state.accept(&payment.bundle, &payment.context, 2).unwrap();
+        assert!(state.spendable_anchor().is_err());
+        state.finish_slot(2).unwrap();
+        let before = state.pool.encode();
+        assert!(state.accept(&payment.bundle, &payment.context, 2).is_err());
+        assert_eq!(state.pool.encode(), before);
+        state.finish_slot(3).unwrap(); // An empty produced block still refreshes the checkpoint.
+        let replay = Replay::from_state(state);
+        let mut restored =
+            Replay::restore_with_key(&alice, replay.snapshot(), Some(prover.verifying_key()))
+                .unwrap();
+        assert_eq!(restored.state.pool.encode(), replay.state.pool.encode());
+        assert_eq!(
+            restored.state.spent_nullifiers(),
+            replay.state.spent_nullifiers()
+        );
+        assert_eq!(restored.state.balance().unwrap(), 98);
+        assert!(restored.state.spendable_anchor().is_ok());
+        assert!(restored
+            .state
+            .accept(&payment.bundle, &payment.context, 4)
+            .is_err());
+        restored.finish_slot(600).unwrap(); // Skipped slots are not fabricated.
+        assert_eq!(
+            restored
+                .state
+                .pool
+                .slot_anchors()
+                .unwrap()
+                .entries()
+                .iter()
+                .map(|entry| entry.slot)
+                .collect::<Vec<_>>(),
+            vec![600]
+        );
+        assert!(restored.state.pool.accepted_roots(600).unwrap().is_empty());
+        assert!(restored
+            .state
+            .pool
+            .accepted_roots(601)
+            .unwrap()
+            .contains(&restored.state.pool.root()));
+        assert!(restored.finish_slot(599).is_err());
+    }
+
+    fn history(ix: solana_instruction::Instruction) -> HistoryInstruction {
+        HistoryInstruction {
+            accounts: ix
+                .accounts
+                .iter()
+                .map(|meta| (meta.pubkey, meta.is_signer))
+                .collect(),
+            data: ix.data,
+        }
+    }
+
+    fn stage_history(replay: &mut Replay, sponsor: Pubkey, bytes: &[u8]) -> AcceptedHistoryPayment {
+        let buffer = Pubkey::new_unique();
+        replay
+            .apply(
+                &history(instructions::initialize(
+                    buffer,
+                    sponsor,
+                    bytes.len() as u32,
+                    payload_digest(bytes),
+                    100,
+                )),
+                1,
+            )
+            .unwrap();
+        for (index, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
+            replay
+                .apply(
+                    &history(instructions::write(
+                        buffer,
+                        sponsor,
+                        (index * MAX_CHUNK_BYTES) as u32,
+                        chunk,
+                    )),
+                    1,
+                )
+                .unwrap();
+        }
+        replay
+            .apply(&history(instructions::seal(buffer, sponsor)), 1)
+            .unwrap();
+        let payment = wire::decode(replay.state.pool.network, bytes).unwrap();
+        replay
+            .apply_verified(
+                &history(instructions::finalize(
+                    buffer,
+                    sponsor,
+                    std::array::from_fn(|i| payment.bundle.actions()[i].nullifier().to_bytes()),
+                )),
+                1,
+            )
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn inline_history_recovers_receipts_nullifiers_and_immediately_spendable_notes() {
+        let network = Network {
+            network: [19; 32],
+            genesis_hash: bs58::encode([18; 32]).into_string(),
+        };
+        let alice = WalletKey::generate(network.clone()).unwrap();
+        let bob = WalletKey::generate(network.clone()).unwrap();
+        let charlie = WalletKey::generate(network).unwrap();
+        let prover = payments::PaymentProver::new();
+        let key = prover.verifying_key();
+        let mut replay =
+            Replay::from_state(WalletState::with_key(&alice, 1000, Arc::clone(&key)).unwrap());
+        let mut bob_state = WalletState::with_key(&bob, 1000, Arc::clone(&key)).unwrap();
+        let mut charlie_state = WalletState::with_key(&charlie, 1000, Arc::clone(&key)).unwrap();
+        let sponsor = Pubkey::new_unique();
+        let funding = prover
+            .build(
+                &alice,
+                &replay.state,
+                sponsor.to_bytes(),
+                100,
+                Payment::Deposit {
+                    amount: 100,
+                    recipient: &alice.address_text(),
+                },
+            )
+            .unwrap();
+        let accepted = stage_history(&mut replay, sponsor, &funding);
+        accepted.apply(&mut bob_state).unwrap();
+        accepted.apply(&mut charlie_state).unwrap();
+
+        let bytes = prover
+            .build(
+                &alice,
+                &replay.state,
+                sponsor.to_bytes(),
+                100,
+                Payment::ShieldedSend {
+                    amount: 25,
+                    recipient: &bob.address_text(),
+                    fee: 3,
+                },
+            )
+            .unwrap();
+        let ix = history(instructions::inline(alice.network.network, &bytes).unwrap());
+        let before = replay.state.pool.encode();
+        let spent_before = replay.state.spent_nullifiers().clone();
+        let buffer_count = replay.staging_count();
+        let mut invalid = Vec::new();
+        for index in 0..5 {
+            let mut accounts = ix.accounts.clone();
+            accounts[index].0 = Pubkey::new_unique();
+            invalid.push(HistoryInstruction {
+                accounts,
+                data: ix.data.clone(),
+            });
+        }
+        let mut unsigned = ix.accounts.clone();
+        unsigned[1].1 = false;
+        invalid.push(HistoryInstruction {
+            accounts: unsigned,
+            data: ix.data.clone(),
+        });
+        let mut extra = ix.accounts.clone();
+        extra.push((Pubkey::new_unique(), false));
+        invalid.push(HistoryInstruction {
+            accounts: extra,
+            data: ix.data.clone(),
+        });
+        let mut trailing = ix.data.clone();
+        trailing.push(0);
+        invalid.push(HistoryInstruction {
+            accounts: ix.accounts.clone(),
+            data: trailing,
+        });
+        let mut wrong_domain = ix.data.clone();
+        // Opcode, envelope magic, version, then its domain.
+        wrong_domain[1 + 8 + 2] ^= 1;
+        invalid.push(HistoryInstruction {
+            accounts: ix.accounts.clone(),
+            data: wrong_domain,
+        });
+        for invalid in invalid {
+            assert!(replay.apply_verified(&invalid, 2).is_err());
+            assert_eq!(replay.state.pool.encode(), before);
+            assert_eq!(replay.state.spent_nullifiers(), &spent_before);
+            assert_eq!(replay.state.balance().unwrap(), 100);
+            assert_eq!(replay.staging_count(), buffer_count);
+        }
+        assert!(replay.apply_verified(&ix, 101).is_err());
+        // An interruption before replaying the instruction resumes from the
+        // authenticated checkpoint, without any staged bytes for this payment.
+        replay =
+            Replay::restore_with_key(&alice, replay.snapshot(), Some(Arc::clone(&key))).unwrap();
+        let accepted = replay.apply_verified(&ix, 2).unwrap().unwrap();
+        assert_eq!(accepted.payload_digest().unwrap(), payload_digest(&bytes));
+        accepted.apply(&mut bob_state).unwrap();
+        accepted.apply(&mut charlie_state).unwrap();
+        assert_eq!(replay.state.balance().unwrap(), 72);
+        assert_eq!(bob_state.balance().unwrap(), 25);
+        assert_eq!(replay.staging_count(), buffer_count);
+        let accepted_pool = replay.state.pool.encode();
+        assert!(replay.apply_verified(&ix, 2).is_err());
+        assert_eq!(replay.state.pool.encode(), accepted_pool);
+
+        replay =
+            Replay::restore_with_key(&alice, replay.snapshot(), Some(Arc::clone(&key))).unwrap();
+        let mut bob_replay = Replay::restore_with_key(
+            &bob,
+            Replay::from_state(bob_state).snapshot(),
+            Some(Arc::clone(&key)),
+        )
+        .unwrap();
+        let payment = wire::decode(alice.network.network, &bytes).unwrap();
+        for action in payment.bundle.actions() {
+            assert!(replay
+                .state
+                .spent_nullifiers()
+                .contains(&action.nullifier().to_bytes()));
+            assert!(bob_replay
+                .state
+                .spent_nullifiers()
+                .contains(&action.nullifier().to_bytes()));
+        }
+        assert!(replay.apply_verified(&ix, 3).is_err());
+        assert!(bob_replay.apply_verified(&ix, 3).is_err());
+        assert_eq!(replay.state.balance().unwrap(), 72);
+        assert_eq!(bob_replay.state.balance().unwrap(), 25);
+        for owned in replay.state.unspent() {
+            replay.state.witness(owned.position).unwrap();
+        }
+
+        // The received note and its rebuilt witness can fund the very next
+        // native payment; this is replay/proof correctness, not a latency test.
+        let forward = prover
+            .build(
+                &bob,
+                &bob_replay.state,
+                sponsor.to_bytes(),
+                100,
+                Payment::ShieldedSend {
+                    amount: 10,
+                    recipient: &charlie.address_text(),
+                    fee: 2,
+                },
+            )
+            .unwrap();
+        let forward = history(instructions::inline(bob.network.network, &forward).unwrap());
+        let accepted = bob_replay.apply_verified(&forward, 3).unwrap().unwrap();
+        accepted.apply(&mut replay.state).unwrap();
+        accepted.apply(&mut charlie_state).unwrap();
+        assert_eq!(replay.state.balance().unwrap(), 72);
+        assert_eq!(bob_replay.state.balance().unwrap(), 13);
+        assert_eq!(charlie_state.balance().unwrap(), 10);
+        assert_eq!(charlie_state.pool.backing, 95);
+        replay.state.reconcile(&bob_replay.state.pool).unwrap();
+        charlie_state.reconcile(&bob_replay.state.pool).unwrap();
+    }
 
     #[test]
     fn verified_history_fans_out_only_at_the_identical_checkpoint() {
@@ -437,7 +405,10 @@ mod shared_scan_tests {
         assert_eq!(other_view.balance().unwrap(), 0);
         let restored = Replay::restore(&alice, primary.snapshot()).unwrap();
         assert_eq!(restored.state.balance().unwrap(), 100);
-        assert_eq!(restored.state.spent, primary.state.spent);
+        assert_eq!(
+            restored.state.spent_nullifiers(),
+            primary.state.spent_nullifiers()
+        );
         assert_eq!(
             restored.state.witness(0).unwrap().auth_path(),
             primary.state.witness(0).unwrap().auth_path()
@@ -445,6 +416,23 @@ mod shared_scan_tests {
         assert!(Replay::restore(&bob, primary.snapshot()).is_err());
         let mut corrupted = serde_json::to_value(primary.snapshot()).unwrap();
         corrupted["notes"][0]["value"] = serde_json::json!(101);
+        assert!(Replay::restore(&alice, serde_json::from_value(corrupted).unwrap()).is_err());
+        let mut corrupted = serde_json::to_value(primary.snapshot()).unwrap();
+        corrupted["leaves"][0] = serde_json::to_value([0u8; 32]).unwrap();
+        assert!(Replay::restore(&alice, serde_json::from_value(corrupted).unwrap()).is_err());
+        let unowned_position = (0..primary.state.pool.note_count() as usize)
+            .find(|position| {
+                !primary
+                    .state
+                    .owned_positions()
+                    .any(|owned| owned as usize == *position)
+            })
+            .unwrap();
+        let mut corrupted = serde_json::to_value(primary.snapshot()).unwrap();
+        corrupted["leaves"][unowned_position] = serde_json::to_value([0u8; 32]).unwrap();
+        assert!(Replay::restore(&alice, serde_json::from_value(corrupted).unwrap()).is_err());
+        let mut corrupted = serde_json::to_value(primary.snapshot()).unwrap();
+        corrupted["leaves"].as_array_mut().unwrap().pop();
         assert!(Replay::restore(&alice, serde_json::from_value(corrupted).unwrap()).is_err());
         same_view.reconcile(&primary.state.pool).unwrap();
         other_view.reconcile(&primary.state.pool).unwrap();

@@ -1,7 +1,12 @@
 //! Full canonical RPC replay for pending outcomes; never retained metadata.
-use super::*;
+use super::{Chain, ScanResult};
+use crate::archive::HistoryBlock;
+use crate::keys::Network;
+use crate::Result;
+use serde::{Deserialize, Serialize};
 use solana_rpc_client_api::request::RpcRequest;
 use solana_transaction_status_client_types::UiConfirmedBlock;
+use std::time::Instant;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
