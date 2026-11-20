@@ -377,6 +377,57 @@ def supervised_faucet(parent):
     return CohortFaucet
 
 
+RETAINED=Path('/var/lib/zolana-first-sync-mirror/recovery-history-mirror')
+
+
+class RetainedFirstSync:
+    """Optional retained pages for a wallet's first sync; canonical reads are unchanged.
+
+    The directory holds public finalized history published by a separate collector. It is
+    opened when its manifest exists, so a gateway started before the first collection needs
+    no restart, and looked for again at most every thirty seconds while it is absent. A first
+    page (no checkpoint token) that cannot be served is answered as an absent mirror, and the
+    wallet then reads canonical blocks exactly as it does without a mirror. A later page of a
+    sync under way is refused instead: one sync never mixes two retained checkpoints.
+    """
+    def __init__(self,root,network,retry=30):
+        self.root,self.network,self.retry=Path(root),network,retry
+        self.inner=None;self.after=0.0;self.lock=threading.Lock()
+
+    def current(self):
+        with self.lock:
+            if self.inner is None and time.monotonic()>=self.after:
+                self.after=time.monotonic()+self.retry
+                try:
+                    if os.path.lexists(self.root/'manifest.json'):
+                        from gateway_history import History
+                        self.inner=History(self.root,self.network)
+                except (ValueError,OSError):self.inner=None
+            return self.inner
+
+    def served(self,request,read):
+        params=request.get('params')
+        first=isinstance(params,list) and len(params)==3 and params[2] is None
+        absent=json.dumps({'jsonrpc':'2.0','id':request['id'],'result':None}).encode(),0
+        inner=self.current()
+        if inner is None:
+            if first:return absent
+            raise ValueError('retained checkpoint unavailable')
+        try:return read(inner)
+        except (ValueError,OSError):
+            if not first:raise
+            return absent
+
+    def page(self,request):
+        return self.served(request,lambda inner:(inner.page(request),0))[0]
+
+    def page_counted(self,request,**bounds):
+        return self.served(request,lambda inner:inner.page_counted(request,**bounds))
+
+    def page_compact_counted(self,request,**bounds):
+        return self.served(request,lambda inner:inner.page_compact_counted(request,**bounds))
+
+
 def gateway(base,config,config_sha256,ingress=None):
     import fcntl
     inode=base.sandbox(config,'gateway');stop=base.stop_event();uid=config['gateway_uid']
@@ -406,7 +457,8 @@ def gateway(base,config,config_sha256,ingress=None):
         faucet=supervised_faucet(Faucet)(ROOT/'faucet',ROOT/'password',binary=PREFIX/'bin/native-faucet')
         # The sealed native faucet debits every unit of one request in a single
         # locked ledger write (authorize-many); budgets and admission are unchanged.
-        app=Gateway(faucet,relay_root=ROOT/'relay',authorize_many=True);relay=app.relay
+        app=Gateway(faucet,relay_root=ROOT/'relay',authorize_many=True,compact_headers_per_unit=256);relay=app.relay
+        app.history=RetainedFirstSync(RETAINED,app.info['network'])
         if relay is None or relay.native_ingress is None:raise ValueError('cohort native relay required')
         if stop.is_set():return
         activation=activate(base,config,binding,plan,funding,claims,int(time.time()))
