@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocol/payments", "clients/cli", "clients/wallet", "clients/wallet-seed", "clients/wallet-core", "clients/browser-core", "node/adapter", "node/validator-check", "node/localnet", "node/rpc-access"]
+members = ["protocol/payments", "clients/cli", "clients/wallet", "clients/wallet-seed", "clients/wallet-core", "clients/browser-core", "node/adapter", "node/validator-check", "node/localnet", "node/rpc-access", "sdk/rust-examples"]
 exclude = ["node/agave"]
 resolver = "2"
 
