@@ -301,12 +301,24 @@ def prepare(base,config,plan,ready):
 GRANT_TICK_LIMIT=180
 SOURCE_REFRESH_SECONDS=300
 SOURCE_REFRESH_LIMIT=3600
+# Relay children that may run side by side (1..shielded_relay.MAX_WORKERS). One
+# keeps the serial worker. More than one shares the private RPC and this
+# unit's CPU allowance with the grant tick and its time limit, so raise it only
+# after that load has been measured on the host.
+RELAY_WORKERS=1
 
 
 def idle_tick(output):
     try:value=json.loads(output)
     except (TypeError,ValueError):return False
     return isinstance(value,dict) and value.get('idle') is True
+
+
+def paid_tick(output):
+    """A tick that ended by completing a grant; another wallet may be queued behind it."""
+    try:value=json.loads(output)
+    except (TypeError,ValueError):return False
+    return isinstance(value,dict) and value.get('state')=='ready' and value.get('private_finalized') is True
 
 
 def supervised_faucet(parent):
@@ -359,7 +371,9 @@ def supervised_faucet(parent):
                 finally:
                     with self.child_lock:self.child=None
                 if idle_tick(output):self.refresh()
-                self.stop.wait(2)
+                # The pause paces idle polling and a claim that makes no
+                # progress. After a completed grant the next tick starts at once.
+                if not paid_tick(output):self.stop.wait(2)
     return CohortFaucet
 
 
@@ -403,7 +417,9 @@ def gateway(base,config,config_sha256,ingress=None):
                     base.GWROOT/'server.crt',base.GWROOT/'server.key',activated_socket=streams[name]))
         else:servers.extend(ingress.listeners(base,channels,streams))
         if stop.is_set():return
-        worker=threading.Thread(target=faucet.work,daemon=True);worker.start();relay.start()
+        worker=threading.Thread(target=faucet.work,daemon=True);worker.start()
+        if RELAY_WORKERS==1:relay.start()
+        else:relay.start(RELAY_WORKERS)
         for server in servers:
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start();threads.append(thread)
         if stop.is_set():return

@@ -12,6 +12,8 @@ For invitation-gated enrollment, also follow the [invited access runbook](invite
 
 For interruption, preserve all files and restart the same service/root. The worker resolves gas signatures and private pending records canonically, recovers interrupted upload rent, and retains accepted outcomes. Do not delete progress, outcomes, pending/staging journals, claim reservations or source wallet data to force a retry. Missing state, exhausted attempts/capacity, insufficient reservoir funds, unavailable canonical history or a different source seed require operator recovery. Never initialize over an existing faucet or substitute a new ledger with the same funded key.
 
+A claim that has used its three preparations and has nothing in flight waits for operator recovery without holding back the claims behind it: the worker passes over it before touching any payment journal, and an idle tick reports the number of such claims as `needs_attention`. A native cohort tick pays queued grants one after another and begins a further grant only during its first 60 seconds, so that the grant begun last still fits the time limit of whoever runs the tick (180 seconds in the cohort service); its result is the last completed grant with `grants_completed`. Each grant keeps its own durable progress: the submission mark is saved before the first broadcast, and a tick ended anywhere is recovered by the next tick from the original journals and canonical history, never by preparing or sending the payment again. All other policies still complete one grant a tick.
+
 Reproduce the real acceptance using a fresh short `.data` root:
 
 ```

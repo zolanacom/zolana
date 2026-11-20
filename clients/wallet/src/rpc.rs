@@ -450,4 +450,23 @@ impl Chain {
 }
 
 #[cfg(test)]
+impl Chain {
+    /// A V4 connection whose every RPC call fails decoding, for tests that
+    /// must show a code path reads and sends nothing.
+    pub(crate) fn unreachable(network: Network) -> Self {
+        Self {
+            rpc: RpcClient::new_mock("fails"),
+            network,
+            sponsor_budget: None,
+            user_fees: None,
+            history_batches: false,
+            retained_history_v2: false,
+            standard_reads: None,
+            verification_key: None,
+            pool_format: "NPOOL004",
+        }
+    }
+}
+
+#[cfg(test)]
 mod recovery_tests;

@@ -3,7 +3,7 @@ use crate::{
     connection::TesterProfile,
     keys::{decode_address, read_private, write_private_new, Network, WalletKey},
     operation::WalletOperation,
-    payments::{self, Payment},
+    payments::{Payment, PaymentProver},
     rpc::Chain,
     sponsor::replace,
     Result,
@@ -18,9 +18,12 @@ use solana_signature::Signature;
 use solana_signer::Signer;
 #[cfg(test)]
 use solana_transaction::Transaction;
-#[cfg(test)]
-use std::time::Duration;
-use std::{fs, path::Path};
+use std::{
+    cell::OnceCell,
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub const PRIVATE_GRANT: u64 = 1_000_000;
 pub const GAS_GRANT: u64 = 150_000_000;
@@ -31,6 +34,13 @@ pub const NATIVE_MAX_CLAIMS: usize = 500;
 const NATIVE_FAUCET_FORMAT: &str = "native-test-faucet-native-v1";
 const PAYMENT_CAP: u64 = 150_000_000;
 const ATTEMPTS: u8 = 3;
+/// A native tick pays its queued grants strictly one after another. Whoever
+/// runs the tick ends it after a fixed limit (180 seconds in the cohort
+/// service), so a further grant is begun only inside this window and the rest
+/// of that limit is left to the grant begun last. Every grant keeps its own
+/// durable records, so a tick ended between or inside grants is recovered by
+/// the next tick exactly as a tick that paid one grant.
+const TICK_GRANT_WINDOW: Duration = Duration::from_secs(60);
 
 mod client;
 mod gas_transfer;
@@ -191,6 +201,37 @@ fn prepare_native_grant<S>(
     progress.private_attempts += 1;
     save(path, progress)?;
     build(source)
+}
+
+/// An ordinary grant that used every preparation and has nothing in flight.
+/// It waits for the explicit operator continuation and must not hold back the
+/// claims queued behind it. Such a claim owns no pending or staging journal:
+/// both are created only after `submission_started` is durable, and that mark
+/// is cleared only after they were resolved. A later claim's journals must
+/// therefore never be read under this claim's receipt, so it is passed over
+/// before any wallet journal or chain access.
+fn exhausted(progress: &Progress) -> bool {
+    progress.private_attempts >= ATTEMPTS
+        && progress.proof.is_none()
+        && !progress.submission_started
+        && !progress.private_done
+}
+
+/// The submission mark is durable before the first broadcast of every grant,
+/// also when one tick pays several. A tick ended anywhere inside `submit`
+/// leaves a record that the next tick resolves from the original journals and
+/// canonical history; it never prepares or sends a second payment for it.
+/// `submit` reports whether cleanup of the accepted payment is still recorded.
+fn submit_grant(
+    path: &Path,
+    progress: &mut Progress,
+    submit: impl FnOnce(&[u8]) -> Result<bool>,
+) -> Result<()> {
+    progress.submission_started = true;
+    save(path, progress)?;
+    let cleanup_recorded = submit(progress.proof.as_deref().ok_or("missing grant proof")?)?;
+    progress.private_done = !cleanup_recorded;
+    save(path, progress)
 }
 
 fn load(root: &Path) -> Result<(TesterProfile, Ledger)> {
@@ -515,6 +556,7 @@ fn tick_mode(
     continuation: Option<(&str, &str)>,
     warm_history: bool,
 ) -> Result<Value> {
+    let begin_until = Instant::now() + TICK_GRANT_WINDOW;
     let _worker = WalletOperation::acquire(&root.join("worker"))?;
     let (profile, ledger) = load(root)?;
     if warm_history && !ledger.policy.native() {
@@ -527,8 +569,7 @@ fn tick_mode(
     }
     let source = root.join("wallet.enc.json");
     let wallet = WalletKey::open(&source, password, &profile.network())?;
-    let payer = wallet.fee_keypair();
-    if payer.pubkey().to_string() != ledger.policy.source_fee_address
+    if wallet.fee_keypair().pubkey().to_string() != ledger.policy.source_fee_address
         || wallet.address_text() != ledger.policy.source_private_address
     {
         return Err("faucet seed differs from original ledger".into());
@@ -577,6 +618,41 @@ fn tick_mode(
             "transactions_submitted":0,"local_verified_cache_may_update":true}),
         );
     }
+    pay_claims(
+        root,
+        &ledger,
+        &wallet,
+        &chain,
+        &connect,
+        history,
+        continuation,
+        begin_until,
+    )
+}
+
+/// The claims pass of one tick, in ledger order. The caller holds the worker
+/// lock and has checked the source wallet and the chain. A native policy may
+/// complete several grants here until `begin_until`; every other policy and an
+/// operator continuation handle one claim, as before.
+#[allow(clippy::too_many_arguments)]
+fn pay_claims(
+    root: &Path,
+    ledger: &Ledger,
+    wallet: &WalletKey,
+    chain: &Chain,
+    connect: &dyn Fn() -> Result<Chain>,
+    history: Option<&Path>,
+    continuation: Option<(&str, &str)>,
+    begin_until: Instant,
+) -> Result<Value> {
+    let source = root.join("wallet.enc.json");
+    let payer = wallet.fee_keypair();
+    // One public circuit key serves every grant of this tick, and its
+    // verification half serves their history scans. Nothing is built while idle.
+    let shared_prover = OnceCell::new();
+    let mut completed: Option<Value> = None;
+    let mut grants = 0u64;
+    let mut waiting = 0u64;
     for claim in &ledger.claims {
         let id = claim.id();
         if continuation.is_some_and(|(selected, _)| selected != id.as_str()) {
@@ -594,6 +670,9 @@ fn tick_mode(
         if p.private_done {
             continue;
         }
+        if grants > 0 && !(ledger.policy.native() && Instant::now() < begin_until) {
+            break;
+        }
         if !p.gas_done {
             if ledger.policy.native() {
                 // Only this explicit policy may skip public tester funding.
@@ -606,9 +685,13 @@ fn tick_mode(
                 return status(root, claim, &ledger.policy);
             }
         }
+        if continuation.is_none() && exhausted(&p) && read_outcome(&outcome)? != Some(true) {
+            waiting += 1;
+            continue;
+        }
         let mut chain = connect()?.with_user_fees(payer.pubkey(), PAYMENT_CAP, &operation)?;
         if operation.pending.exists() {
-            chain.resolve(&wallet, &operation)?;
+            chain.resolve(wallet, &operation)?;
         }
         let resolution = read_outcome(&outcome)?;
         let accepted = resolution == Some(true);
@@ -630,7 +713,9 @@ fn tick_mode(
         if accepted {
             p.private_done = true;
             save(&path, &p)?;
-            return status(root, claim, &ledger.policy);
+            completed = Some(status(root, claim, &ledger.policy)?);
+            grants += 1;
+            continue;
         }
         if resolution == Some(false) {
             p.submission_started = false;
@@ -651,7 +736,10 @@ fn tick_mode(
         }
         if p.proof.is_none() {
             if p.private_attempts >= ATTEMPTS && continuation.is_none() {
-                return status(root, claim, &ledger.policy);
+                // Its last proof was just resolved or expired; nothing of this
+                // claim remains in flight for a later claim to be confused with.
+                waiting += 1;
+                continue;
             }
             if continuation.is_none() && !ledger.policy.native() {
                 p.private_attempts += 1;
@@ -661,16 +749,18 @@ fn tick_mode(
                 fs::remove_file(&outcome)?;
                 fs::File::open(root)?.sync_all()?;
             }
+            let prover = shared_prover.get_or_init(PaymentProver::new);
+            chain = chain.with_payment_prover(prover);
             let sync = || {
                 let synced = match history {
-                    Some(path) => chain.sync_cached_with_history(&wallet, &operation, path)?,
-                    None => chain.sync_cached(&wallet, &operation)?,
+                    Some(path) => chain.sync_cached_with_history(wallet, &operation, path)?,
+                    None => chain.sync_cached(wallet, &operation)?,
                 };
                 Ok((synced, chain.expiry()?))
             };
             let build = |(synced, expiry): (crate::rpc::Synced, u64)| {
-                payments::build(
-                    &wallet,
+                prover.build(
+                    wallet,
                     &synced.state,
                     payer.pubkey().to_bytes(),
                     expiry,
@@ -709,20 +799,27 @@ fn tick_mode(
                 return Ok(result);
             }
         }
-        p.submission_started = true;
-        save(&path, &p)?;
-        chain.submit(
-            &payer,
-            p.proof.as_ref().ok_or("missing grant proof")?,
-            &operation,
-        )?;
-        p.private_done = !operation.staging.exists();
-        save(&path, &p)?;
-        return status(root, claim, &ledger.policy);
+        submit_grant(&path, &mut p, |proof| {
+            chain.submit(&payer, proof, &operation)?;
+            Ok(operation.staging.exists())
+        })?;
+        if !p.private_done {
+            return status(root, claim, &ledger.policy);
+        }
+        completed = Some(status(root, claim, &ledger.policy)?);
+        grants += 1;
     }
-    Ok(
-        json!({"idle":true,"reserved_claims":ledger.claims.len(),"max_claims":ledger.policy.max_claims}),
-    )
+    if let Some(mut result) = completed {
+        if ledger.policy.native() {
+            result["grants_completed"] = grants.into();
+        }
+        return Ok(result);
+    }
+    let mut result = json!({"idle":true,"reserved_claims":ledger.claims.len(),"max_claims":ledger.policy.max_claims});
+    if waiting > 0 {
+        result["needs_attention"] = waiting.into();
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -964,3 +1061,7 @@ mod operator_continuation_tests;
 #[cfg(test)]
 #[path = "faucet/attempt_tests.rs"]
 mod attempt_tests;
+
+#[cfg(test)]
+#[path = "faucet/tick_tests.rs"]
+mod tick_tests;
