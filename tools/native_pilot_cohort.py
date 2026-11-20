@@ -258,7 +258,8 @@ def initialize_issuance(root,expected,templates=ETC,*,base_config=BASE_CONFIG,fa
         return pin
 
 
-def issuance(root,expected,size=COHORT_SIZE):
+def issuance(root,expected,size):
+    # No default: every caller passes the sealed plan's cohort_size.
     names=set(slots(size))
     pin=private_json(root/'issuance-pin.json')
     if pin!=dict(format='zolana-native-cohort-issuance-pin-v1',plan_sha256=expected):raise ValueError('original issuance pin changed')
@@ -318,6 +319,41 @@ def issue(root,expected,slot,bind_fee=None,templates=ETC,*,base_config=BASE_CONF
             revoked=item['revoked'],redeemed=item['member'] is not None,export_written=True,published=False)
 
 
+def enlarged(plan,relay,faucet_policy,admission_policy,size):
+    """The reviewed documents of one existing cohort at another lifetime size; no I/O."""
+    relay=dict(relay,max_jobs=RELAY_MEMBER_JOBS*cohort_size(size))
+    faucet_policy=dict(faucet_policy,max_claims=size)
+    admission_policy=dict(admission_policy,max_invites=size,daily_admissions=size)
+    return dict(plan=validate_plan(dict(plan,**limits(size),relay_policy_sha256=hash_value(relay),
+        faucet_policy_sha256=hash_value(faucet_policy),admission_policy_sha256=hash_value(admission_policy))),
+        relay=relay,faucet_policy=faucet_policy,admission_policy=admission_policy)
+
+
+def replan(root,expected,size,templates=ETC,*,base_config=BASE_CONFIG,faucet=FAUCET):
+    """Read-only resize of a used cohort in place; nothing is written or issued.
+
+    Returns the plan, relay policy and both native policy blocks that a separate
+    seal migration must install together. Until then the sealed plan named by
+    `expected` stays the only valid one. Every existing slot, claim, invitation
+    and relay job must fit the new size; private and public budgets follow it.
+    """
+    root=Path(root).absolute();names=set(slots(size))
+    if not os.path.lexists(root/'issuance.lock'):raise ValueError('re-planning requires the original used issuance state')
+    with locked(root):
+        plan,claims,admission,_=checked(root,expected,templates,base_config=base_config,faucet=faucet)
+        state=issuance(root,expected,plan['cohort_size']);exports(root,state,admission)
+        jobs=root/'relay/jobs';relayed=0
+        if os.path.lexists(jobs):directory(jobs);relayed=sum(1 for _ in jobs.iterdir())
+        if (not set(state['slots'])<=names or len(claims['claims'])>size or len(admission['invitations'])>size
+                or relayed>RELAY_MEMBER_JOBS*size):
+            raise ValueError('cohort size cannot shrink below existing slots, claims, invitations or relay jobs')
+        value=enlarged(plan,public_json(Path(templates)/'relay.json'),claims['policy'],admission['policy'],size)
+        return dict(value,format='zolana-native-cohort-replan-v1',previous_plan_sha256=expected,
+            previous_cohort_size=plan['cohort_size'],plan_sha256=hash_value(value['plan']),
+            reserved_slots=len(state['slots']),issued=len(admission['invitations']),
+            reserved_claims=len(claims['claims']),relay_jobs=relayed,state_modified=False)
+
+
 def progress_counts(root,claims):
     counts=dict(queued=0,funding=0,ready=0,needs_attention=0)
     for claim in claims['claims']:
@@ -357,17 +393,20 @@ def audit(root=ROOT,expected=None,templates=ETC,*,base_config=BASE_CONFIG,faucet
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('plan','initialize-issuance','issue','audit'))
+    parser.add_argument('command',choices=('plan','replan','initialize-issuance','issue','audit'))
     parser.add_argument('--rehearsal',action='store_true');parser.add_argument('--plan-sha256')
     parser.add_argument('--slot');parser.add_argument('--bind-fee');parser.add_argument('--ttl',type=int,default=86400)
-    parser.add_argument('--cohort-size',type=int,help='plan only: lifetime wallets, 1..500 (default 10)')
+    parser.add_argument('--cohort-size',type=int,help='plan and replan only: lifetime wallets, 1..500 (plan default 10)')
     args=parser.parse_args();suffix='-rehearsal' if args.rehearsal else ''
     root=ROOT.with_name(ROOT.name+suffix);templates=ETC.with_name(ETC.name+suffix)
     if args.command=='plan':value=build_plan(root,templates,size=COHORT_SIZE if args.cohort_size is None else args.cohort_size)
     else:
-        if args.cohort_size is not None:parser.error('cohort size is fixed by the sealed reviewed plan')
         if args.plan_sha256 is None:parser.error('explicit reviewed plan-sha256 required')
-        if args.command=='initialize-issuance':value=initialize_issuance(root,args.plan_sha256,templates)
+        if args.command=='replan':
+            if args.cohort_size is None:parser.error('replan requires the new cohort size')
+            value=replan(root,args.plan_sha256,args.cohort_size,templates)
+        elif args.cohort_size is not None:parser.error('cohort size is fixed by the sealed reviewed plan')
+        elif args.command=='initialize-issuance':value=initialize_issuance(root,args.plan_sha256,templates)
         elif args.command=='audit':value=audit(root,args.plan_sha256,templates)
         else:
             if args.slot is None:parser.error('one fixed slot required')

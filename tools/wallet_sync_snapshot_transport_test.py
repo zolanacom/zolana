@@ -1,6 +1,7 @@
 """Disposable loopback transport regression; no pilot, wallet or authority data.
 
-The real four-slot BoundedServer and real Operator transport are exercised with
+The real BoundedServer, held to the four slots of the private capsule these
+cases reproduce, and real Operator transport are exercised with
 only a temporary dummy credential. Events/barriers hold two ordinary RPC reads
 while snapshot requests compete; no timing sleeps create the collision.
 """
@@ -100,6 +101,8 @@ class PrivateCapsule:
                                 owner.gateway_active -= 1
 
         self.server = BoundedServer(("127.0.0.1", 0), Handler)
+        # The capsule under test has four slots; the shared listener default is larger.
+        self.server.slots = threading.BoundedSemaphore(4)
         original_shutdown = self.server.shutdown_request
 
         def observed_shutdown(request):

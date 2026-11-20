@@ -14,6 +14,8 @@ Every client operation gets a durable start marker and completion receipt. An un
 
 Ten simultaneous admissions exposed the existing four-request faucet listener cap: excess connections closed before an HTTP response. Keep that bound intact. `WalletApp.cli` now retries transport errors only for invited `join`, `access-status` and `test-coins`, using the same wallet, invitation file and stdin password, at most four attempts with exponential backoff and small jitter. It does not retry authorization/quota failures, private sends, withdrawals or payment resolution. TLS validation and all native admission limits remain enforced.
 
+Update (2026-11-20): the shared listener bound is now 32 connections, with a listen backlog of 32 on listeners it binds itself (`BoundedServer` in `tools/test_faucet.py`), sized for larger cohorts. Connections above the bound are still closed before an HTTP response, and the retry rules above are unchanged.
+
 The native CLI binary and protocol are unchanged. The retry is in the wallet server/source runtime used by the local wallet and newly built standalone packages. Existing packaged/installed release artifacts are not silently modified or re-signed. Use the normal reviewed packaging/release process to distribute an updated client.
 
 A Darwin cleanup race also appeared after successful group SIGKILL: a second cleanup signal returned EPERM after the last process had already exited. The harness now accepts that error only when a fresh process-group inspection is empty. A still-live group or different owner remains an error; no administrator permission is requested to bypass it.

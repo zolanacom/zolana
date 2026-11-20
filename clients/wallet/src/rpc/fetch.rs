@@ -11,7 +11,8 @@ use solana_transaction_status_client_types::UiConfirmedBlock;
 
 pub(super) const PAGE: usize = 256;
 pub(super) const LEGACY_PAGE: usize = 16;
-// Leave two of the shared gateway's four slots for other wallets/control reads.
+// Sized for a shared gateway listener of four slots: two stay free for other
+// wallets/control reads. The listener bound has since been raised; this stays.
 pub(super) const WORKERS: usize = 2;
 pub(super) const WINDOW: usize = PAGE * WORKERS;
 const SIZE_ERROR_CODE: i64 = -32062;

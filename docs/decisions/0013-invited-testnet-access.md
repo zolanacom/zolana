@@ -13,3 +13,13 @@ Wallets sign network-, audience- and purpose-bound access proofs with their seed
 The durable policy bounds lifetime invitations (at most the original 1–100 faucet slots), daily new admissions and RPC requests per member per minute (1–10,000, rehearsal 2,000). Additional fixed quotas are 30 faucet operations per member/minute, 120 signed faucet operations globally/minute and 6,000 authenticated RPC requests globally/minute. Before signature parsing, ingress charges actual socket IP and global minute buckets: faucet 240/IP and 480/global; RPC 3,000/IP and 6,000/global. Forwarded-IP headers are ignored. At most 512 current-minute ingress identities are retained. One NAT can share a limit. Time uses a persisted high-water mark; rollback beyond 30 seconds fails closed. Limits replenish at UTC minute/day boundaries, never simply on restart. Local operator write access to these policy files remains trusted.
 
 Both services bind loopback, bound bodies and concurrency, reject browser origins and incorrect authorities, suppress request/access logging and disable proxy discovery and redirects. RPC accepts a fixed wallet method allowlist, single bounded envelopes and bounded replies. Only the genesis handshake is public; pool/history access and transaction submission require active admission. Private addresses and fee addresses are associated in operator admission/faucet records; public gas transfers and RPC/network metadata remain visible. There is no assertion of anonymity, distributed denial-of-service resistance or independent security review.
+
+## Status update (2026-11-20)
+
+The reasoning above is unchanged; these figures in it no longer describe the code in `clients/wallet/src/access.rs`:
+
+- A new admission lasts 30 days (`MEMBERSHIP_SECONDS`). A membership recorded with the earlier seven-day lifetime still loads and keeps the expiry it was written with (`LEGACY_MEMBERSHIP_SECONDS`); any other stored lifetime fails the whole ledger closed. Invitation codes still expire after at most seven days.
+- The fixed global quotas are 2,400 signed faucet operations per minute (`NETWORK_FAUCET_PER_MINUTE`) and 120,000 authenticated RPC units per minute (`NETWORK_RPC_UNITS_PER_MINUTE`). The per-member quotas (30 faucet operations per minute and the policy's 1–10,000 RPC requests per minute) are unchanged.
+- Ingress buckets are faucet 4,800 per IP and 9,600 global, and RPC 60,000 per IP and 120,000 global (`EDGE_FAUCET_PER_MINUTE`, `EDGE_RPC_PER_MINUTE`; the global bucket is twice the per-IP value).
+
+Lifetime invitations for a native cohort are bounded by its planned size, 1–500 (`NATIVE_MAX_CLAIMS` in `clients/wallet/src/faucet.rs`), not by the 1–100 range above, which still applies to the earlier gas-grant faucet.

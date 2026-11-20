@@ -474,3 +474,67 @@ fn missing_native_admission_state_fails_closed_without_resetting_claim_capacity(
     assert_eq!(fs::read(root.join("claims.json")).unwrap(), claims);
     assert!(initialize_native(&root, &root.join("profile.json"), PASSWORD, 10, None).is_err());
 }
+
+const LEGACY_CLAIMS: &[u8] = include_bytes!("legacy_ten_wallet/claims.json");
+const LEGACY_ADMISSION: &[u8] = include_bytes!("legacy_ten_wallet/admission.json");
+const LEGACY_FILES: [(&str, &[u8]); 3] = [
+    (
+        "profile.json",
+        include_bytes!("legacy_ten_wallet/profile.json"),
+    ),
+    ("claims.json", LEGACY_CLAIMS),
+    ("admission.json", LEGACY_ADMISSION),
+];
+
+#[test]
+fn ten_wallet_ledger_written_before_the_enlargement_loads_and_is_left_byte_identical() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("native-cohort");
+    for (name, bytes) in LEGACY_FILES {
+        write_private_new(&root.join(name), bytes).unwrap();
+    }
+    let (profile, ledger) = load(&root).unwrap();
+    assert_eq!(profile.pool_format, "NPOOL004");
+    assert_eq!(ledger.policy.format, NATIVE_FAUCET_FORMAT);
+    assert_eq!(ledger.policy.max_claims, 10);
+    assert!(ledger.policy.invite_required);
+    assert_eq!(ledger.claims.len(), 10);
+    // An unchanged ledger is also written back byte for byte.
+    assert_eq!(serde_json::to_vec_pretty(&ledger).unwrap(), LEGACY_CLAIMS);
+    let info = access::info(&root).unwrap();
+    assert_eq!(info["issued"], 10);
+    assert_eq!(info["max_invites"], 10);
+    for (name, bytes) in LEGACY_FILES {
+        assert_eq!(fs::read(root.join(name)).unwrap(), bytes, "{name}");
+    }
+    assert_eq!(fs::read_dir(&root).unwrap().count(), LEGACY_FILES.len());
+}
+
+#[test]
+fn largest_cohort_ledgers_stay_within_the_one_mebibyte_read_bound() {
+    // Both ledgers are read with a 1 MiB bound on every command. Fill every
+    // place, widen every counter and add the most ingress records allowed.
+    let mut claims: Value = serde_json::from_slice(LEGACY_CLAIMS).unwrap();
+    let claim = claims["claims"][0].clone();
+    claims["claims"] = vec![claim; NATIVE_MAX_CLAIMS].into();
+    assert!(serde_json::to_vec_pretty(&claims).unwrap().len() < 1024 * 1024);
+    let mut admission: Value = serde_json::from_slice(LEGACY_ADMISSION).unwrap();
+    let widest = json!({"period":u64::MAX,"count":u64::MAX});
+    let mut invitation = admission["invitations"][0].clone();
+    invitation["redeem_by"] = u64::MAX.into();
+    for field in ["admitted_at", "access_until"] {
+        invitation["member"][field] = u64::MAX.into();
+    }
+    for field in ["rpc", "faucet"] {
+        invitation["member"][field] = widest.clone();
+    }
+    admission["invitations"] = vec![invitation; NATIVE_MAX_CLAIMS].into();
+    let peer = "f".repeat(64);
+    admission["edge"] = vec![json!({"channel":"faucet","peer":peer,"bucket":widest}); 512].into();
+    for field in ["admissions", "global_rpc", "global_faucet"] {
+        admission[field] = widest.clone();
+    }
+    admission["last_time"] = u64::MAX.into();
+    let bytes = serde_json::to_vec_pretty(&admission).unwrap().len();
+    assert!(bytes < 1024 * 1024, "{bytes}");
+}
