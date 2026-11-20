@@ -1,0 +1,21 @@
+[package]
+name = "zolana-ledger-shrink"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline, content-verified LZ4 rewrite of a stopped Zolana validator blockstore"
+
+# Deliberately a workspace of its own: it must not be built inside the Agave tree.
+[workspace]
+
+[dependencies]
+# Exactly the revision and feature set the validator links (Agave 4.3.2
+# workspace Cargo.toml and ledger/Cargo.toml).
+rocksdb = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7", default-features = false, features = ["lz4"] }
+sha2 = "0.10"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
+debug = 0
+overflow-checks = true

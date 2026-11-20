@@ -1,0 +1,117 @@
+diff --git a/ledger/src/blockstore_db.rs b/ledger/src/blockstore_db.rs
+--- a/ledger/src/blockstore_db.rs
++++ b/ledger/src/blockstore_db.rs
+@@ -1340,7 +1340,32 @@
+ 
+ // Returns true if the column family enables compression.
+ fn should_enable_compression<C: 'static + Column + ColumnName>() -> bool {
+-    C::NAME == columns::TransactionStatus::NAME
++    should_enable_cf_compression(C::NAME)
++}
++
++// Returns whether compression should be enabled for the given column (name).
++//
++// TransactionStatus is the upstream choice. LOCAL-100 adds the columns that
++// hold nearly all of an unpruned ledger: the shred payloads and the per-slot
++// Index and SlotMeta records, together with their alternate-block twins.
++//
++// This only selects which columns follow LedgerColumnOptions::compression_type.
++// That option still defaults to None, so Blockstore::open() and every other
++// default open behave exactly as before. Compression changes how new SST
++// blocks are encoded and nothing else: no key is added, removed or skipped,
++// and files written earlier stay readable as they are.
++fn should_enable_cf_compression(cf_name: &str) -> bool {
++    matches!(
++        cf_name,
++        columns::TransactionStatus::NAME
++            | columns::ShredData::NAME
++            | columns::ShredCode::NAME
++            | columns::Index::NAME
++            | columns::SlotMeta::NAME
++            | columns::AlternateShredData::NAME
++            | columns::AlternateIndex::NAME
++            | columns::AlternateSlotMeta::NAME
++    )
+ }
+ 
+ // If the access type is read-only, we don't need to open all of the columns
+@@ -1438,6 +1463,36 @@
+     }
+ 
+     #[test]
++    fn test_should_enable_cf_compression() {
++        let columns_to_compress = [
++            columns::TransactionStatus::NAME,
++            columns::ShredData::NAME,
++            columns::ShredCode::NAME,
++            columns::Index::NAME,
++            columns::SlotMeta::NAME,
++            columns::AlternateShredData::NAME,
++            columns::AlternateIndex::NAME,
++            columns::AlternateSlotMeta::NAME,
++        ];
++        columns_to_compress.iter().for_each(|cf_name| {
++            assert!(should_enable_cf_compression(cf_name));
++        });
++        let columns_left_alone = [
++            columns::AddressSignatures::NAME,
++            columns::TransactionMemos::NAME,
++            columns::Root::NAME,
++            columns::BankHash::NAME,
++            "something else",
++        ];
++        columns_left_alone.iter().for_each(|cf_name| {
++            assert!(!should_enable_cf_compression(cf_name));
++        });
++        assert!(should_enable_compression::<columns::ShredData>());
++        assert!(should_enable_compression::<columns::ShredCode>());
++        assert!(!should_enable_compression::<columns::Root>());
++    }
++
++    #[test]
+     fn test_open_unknown_columns() {
+         agave_logger::setup();
+ 
+diff --git a/zolana-fast-check/src/main.rs b/zolana-fast-check/src/main.rs
+--- a/zolana-fast-check/src/main.rs
++++ b/zolana-fast-check/src/main.rs
+@@ -915,6 +915,11 @@
+     config.rpc_config.rpc_threads = 1;
+     config.rpc_config.rpc_blocking_threads = 1;
+     config.block_production_num_workers = NonZeroUsize::new(2).unwrap();
++    // LOCAL-100: LZ4-encode new Blockstore SST blocks in the columns selected by
++    // solana-ledger's should_enable_cf_compression. Nothing is pruned or skipped:
++    // blockstore_cleanup_strategy stays BlockstoreCleanupStrategy::None.
++    config.blockstore_options.column_options.compression_type =
++        solana_ledger::blockstore_options::BlockstoreCompressionType::Lz4;
+     config
+ }
+ 
+@@ -1444,3 +1449,27 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod ledger_compression_tests {
++    use {
++        super::*,
++        solana_ledger::blockstore_options::{BlockstoreCleanupStrategy, BlockstoreCompressionType},
++    };
++
++    #[test]
++    fn pilot_config_compresses_new_ledger_blocks_and_never_prunes() {
++        for initial_genesis in [true, false] {
++            let config = pilot_validator_config(initial_genesis);
++            assert_eq!(
++                config.blockstore_options.column_options.compression_type,
++                BlockstoreCompressionType::Lz4
++            );
++            assert!(matches!(
++                config.blockstore_cleanup_strategy,
++                BlockstoreCleanupStrategy::None
++            ));
++            assert!(config.blockstore_options.recovery_mode.is_none());
++        }
++    }
++}
