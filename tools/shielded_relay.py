@@ -90,6 +90,10 @@ def native_options(config):
     return ','.join(endpoints)
 
 
+# Six lifetime jobs for each wallet of the largest plannable 500-wallet cohort.
+MAX_JOBS = 3000
+
+
 class RelayCapacityError(ValueError):
     def __init__(self, scope):
         if scope not in ('member', 'network'):
@@ -115,7 +119,7 @@ class Relay:
             if (set(self.config) - (required | {'rpc_access_file', 'native_ingress', 'pool_format', 'native_profile'}) or not required <= set(self.config)
                     or self.config['format'] != 'native-shielded-relay-v1'
                     or any(type(self.config[k]) is not int or self.config[k] <= 0 for k in ('fee', 'gross_cap', 'max_jobs', 'per_member'))
-                    or self.config['max_jobs'] > 64 or self.config['per_member'] > 8
+                    or self.config['max_jobs'] > MAX_JOBS or self.config['per_member'] > 8
                     or self.config['fee'] > 100_000_000 or self.config['gross_cap'] > 250_000_000
                     or len(self.config['payer']) != 32):
                 raise ValueError('invalid bounded relay configuration')

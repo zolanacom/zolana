@@ -2,7 +2,8 @@
 """Offline finite LOCAL-060 cohort planning, invitation issuance and audit.
 
 Never initializes a faucet, sends funding, starts a worker, exports a seed or
-contacts RPC. Native Rust admission remains authoritative for its ten slots.
+contacts RPC. Native Rust admission remains authoritative for its lifetime slots.
+The plan's cohort_size is the single source for every derived capacity.
 """
 import argparse
 from contextlib import contextmanager
@@ -25,7 +26,12 @@ ROOT=Path('/var/lib/zolana-native-058/gateway/cohort-060')
 ETC=Path('/etc/zolana-native-058/cohort-060')
 FAUCET=PREFIX/'bin/native-faucet'
 WALLET=PREFIX/'bin/native-wallet'
-SLOTS=tuple(f'tester-{index:02}' for index in range(1,11))
+COHORT_SIZE=10
+# All 500 redeemed members plus a full edge table stay below the native 1 MiB
+# admission-state bound; a larger cohort first needs that bound reviewed.
+MAX_COHORT_SIZE=500
+RELAY_MEMBER_JOBS=6
+SLOTS=tuple(f'tester-{index:02}' for index in range(1,COHORT_SIZE+1))
 MODES={'cohort-060':(39443,39444),'cohort-060-rehearsal':(40443,40444)}
 HEX=re.compile('[a-f0-9]{64}')
 PLAN_KEYS={'format','network','pool_format','cohort_size','private_grant','gas_grant','attempts','payment_cap',
@@ -38,6 +44,21 @@ def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':')
 def hash_value(value):return hashlib.sha256(canonical(value)).hexdigest()
 def raw_hash(value):return hashlib.sha256(value).hexdigest()
 def bounded(value,low,high):return type(value) is int and low<=value<=high
+
+
+def cohort_size(value):
+    if not bounded(value,1,MAX_COHORT_SIZE):raise ValueError('cohort size must be an integer from 1 to 500')
+    return value
+
+
+def slots(size):return tuple(f'tester-{index:02}' for index in range(1,cohort_size(size)+1))
+
+
+def limits(size):
+    # Per-wallet grant, attempts and payment cap are fixed; only totals scale.
+    size=cohort_size(size)
+    return dict(cohort_size=size,private_grant=20_000_000,gas_grant=0,attempts=3,payment_cap=150_000_000,
+        private_budget=size*20_000_000,public_budget=size*3*150_000_000)
 
 
 def mode(root):
@@ -100,10 +121,8 @@ def native(binary,command,root=None,extra=(),password=None):
 
 def validate_plan(value):
     if (not isinstance(value,dict) or set(value)!=PLAN_KEYS or value['format']!='zolana-native-cohort-plan-v1'
-            or value['pool_format']!='NPOOL004' or type(value['cohort_size']) is not int or value['cohort_size']!=10
-            or any(type(value[key]) is not int or value[key]!=expected for key,expected in {
-                'private_grant':20_000_000,'gas_grant':0,'attempts':3,'payment_cap':150_000_000,
-                'private_budget':200_000_000,'public_budget':4_500_000_000}.items())
+            or value['pool_format']!='NPOOL004' or not bounded(value['cohort_size'],1,MAX_COHORT_SIZE)
+            or any(type(value[key]) is not int or value[key]!=expected for key,expected in limits(value['cohort_size']).items())
             or not public_key(value.get('source_fee_address')) or not isinstance(value.get('source_private_address'),str)
             or not 80<=len(value['source_private_address'])<=140
             or re.fullmatch('npriv1[1-9A-HJ-NP-Za-km-z]+',value['source_private_address']) is None):
@@ -119,8 +138,8 @@ def validate_plan(value):
     return value
 
 
-def inspect(root=ROOT,templates=ETC,password_file=None,base_config=BASE_CONFIG,faucet=FAUCET):
-    root=Path(root).absolute();templates=Path(templates).absolute();rpc_port,faucet_port=mode(root)
+def inspect(root=ROOT,templates=ETC,password_file=None,base_config=BASE_CONFIG,faucet=FAUCET,size=COHORT_SIZE):
+    root=Path(root).absolute();templates=Path(templates).absolute();rpc_port,faucet_port=mode(root);budget=limits(size)
     directory(root);directory(root/'faucet');directory(root/'relay')
     password_file=Path(password_file) if password_file is not None else root/'password'
     if password_file!=root/'password':raise ValueError('password must remain in its separate fixed cohort root')
@@ -150,7 +169,7 @@ def inspect(root=ROOT,templates=ETC,password_file=None,base_config=BASE_CONFIG,f
         profile_matches(private_json(root/relative,65536),template,mutable)
     expected={'network':network,'network_file':str(root/'operator.json'),'native_profile':str(root/'public-profile.json'),
         'payer_file':str(root.parent/'relay.key'),'binary':str(PREFIX/'bin/native-shielded'),
-        'fee':3_000_000,'gross_cap':100_000,'max_jobs':60,'per_member':6,'pool_format':'NPOOL004'}
+        'fee':3_000_000,'gross_cap':100_000,'max_jobs':RELAY_MEMBER_JOBS*size,'per_member':RELAY_MEMBER_JOBS,'pool_format':'NPOOL004'}
     if relay.get('format')!='native-shielded-relay-v1' or any(relay.get(key)!=value for key,value in expected.items()):
         raise ValueError('reviewed fixed native relay policy required')
     loopback(relay['rpc'],True)
@@ -165,35 +184,35 @@ def inspect(root=ROOT,templates=ETC,password_file=None,base_config=BASE_CONFIG,f
     if comparable!=relay:raise ValueError('relay changed outside reviewed runtime endpoint fields')
     claims=private_json(root/'faucet/claims.json');admission=private_json(root/'faucet/admission.json')
     p=claims['policy'];a=admission['policy']
-    required={'format':'native-test-faucet-native-v1','network':network,'max_claims':10,'invite_required':True,
+    required={'format':'native-test-faucet-native-v1','network':network,'max_claims':size,'invite_required':True,
         'private_amount':20_000_000,'gas_amount':0,'max_attempts':3,'payment_cap':150_000_000}
     if (any(p.get(key)!=value or type(p.get(key)) is not type(value) for key,value in required.items())
             or not public_key(p.get('source_fee_address')) or not isinstance(p.get('source_private_address'),str)
             or re.fullmatch('npriv1[1-9A-HJ-NP-Za-km-z]{74,134}',p['source_private_address']) is None
             or p.get('operator_rpc',False) is not False or p.get('operator_unix',False) is not False
-            or not isinstance(claims.get('claims'),list) or len(claims['claims'])>10):
-        raise ValueError('authoritative native claims policy differs from reviewed ten-slot budget')
+            or not isinstance(claims.get('claims'),list) or len(claims['claims'])>size):
+        raise ValueError('authoritative native claims policy differs from reviewed finite cohort budget')
     if (a.get('format')!='native-invited-testnet-v1' or a.get('network')!=network
-            or type(a.get('max_invites')) is not int or a['max_invites']!=10
-            or type(a.get('daily_admissions')) is not int or a['daily_admissions']!=10
+            or type(a.get('max_invites')) is not int or a['max_invites']!=size
+            or type(a.get('daily_admissions')) is not int or a['daily_admissions']!=size
             or not bounded(a.get('rpc_per_minute'),1,10000) or a.get('rpc_audience')!=public['rpc']['url']
             or a.get('faucet_audience')!=public['faucet']['url']
-            or not isinstance(admission.get('invitations'),list) or len(admission['invitations'])>10):
+            or not isinstance(admission.get('invitations'),list) or len(admission['invitations'])>size):
         raise ValueError('authoritative admission capacity or fixed audience changed')
     info=native(faucet,'access-info',root/'faucet')
-    if (info.get('invite_required') is not True or info.get('network')!=network or info.get('max_invites')!=10
+    if (info.get('invite_required') is not True or info.get('network')!=network
+            or type(info.get('max_invites')) is not int or info['max_invites']!=size
             or info.get('issued')!=len(admission['invitations']) or info.get('rpc_audience')!=a['rpc_audience']
             or info.get('faucet_audience')!=a['faucet_audience']):raise ValueError('native admission validation disagrees with original state')
-    plan=validate_plan(dict(format='zolana-native-cohort-plan-v1',network=network,pool_format='NPOOL004',cohort_size=10,
-        private_grant=20_000_000,gas_grant=0,attempts=3,payment_cap=150_000_000,private_budget=200_000_000,
-        public_budget=4_500_000_000,source_private_address=p['source_private_address'],source_fee_address=p['source_fee_address'],
+    plan=validate_plan(dict(budget,format='zolana-native-cohort-plan-v1',network=network,pool_format='NPOOL004',
+        source_private_address=p['source_private_address'],source_fee_address=p['source_fee_address'],
         source_wallet_sha256=raw_hash(wallet_raw),password_sha256=raw_hash(password),source_profile_sha256=hash_value(source),
         public_profile_sha256=hash_value(public),relay_policy_sha256=hash_value(relay),faucet_policy_sha256=hash_value(p),admission_policy_sha256=hash_value(a)))
     return plan,claims,admission,info
 
 
-def build_plan(root=ROOT,templates=ETC,password_file=None,*,base_config=BASE_CONFIG,faucet=FAUCET,wallet=WALLET):
-    root=Path(root).absolute();plan,claims,admission,_=inspect(root,templates,password_file,base_config,faucet)
+def build_plan(root=ROOT,templates=ETC,password_file=None,*,base_config=BASE_CONFIG,faucet=FAUCET,wallet=WALLET,size=COHORT_SIZE):
+    root=Path(root).absolute();plan,claims,admission,_=inspect(root,templates,password_file,base_config,faucet,size)
     if claims['claims'] or admission['invitations']:raise ValueError('planning requires fresh unused native capacity; never reset existing state')
     addresses=native(wallet,'address',extra=['--network',root/'source.json','--wallet',root/'faucet/wallet.enc.json',
         '--password-file','-'],password=read(root/'password',1024,secret=True))
@@ -206,7 +225,7 @@ def checked(root,expected,templates=ETC,*,base_config=BASE_CONFIG,faucet=FAUCET)
     if not isinstance(expected,str) or HEX.fullmatch(expected) is None:raise ValueError('explicit reviewed plan hash required')
     sealed=validate_plan(public_json(Path(templates)/'plan.json'))
     if hash_value(sealed)!=expected:raise ValueError('sealed native plan hash changed')
-    current,claims,admission,info=inspect(root,templates,None,base_config,faucet)
+    current,claims,admission,info=inspect(root,templates,None,base_config,faucet,sealed['cohort_size'])
     if current!=sealed:raise ValueError('native cohort source, policies or private root pins changed')
     return sealed,claims,admission,info
 
@@ -226,12 +245,12 @@ def locked(root):
 def initialize_issuance(root,expected,templates=ETC,*,base_config=BASE_CONFIG,faucet=FAUCET):
     root=Path(root).absolute()
     with locked(root):
-        _,claims,admission,_=checked(root,expected,templates,base_config=base_config,faucet=faucet)
+        plan,claims,admission,_=checked(root,expected,templates,base_config=base_config,faucet=faucet)
         marker=root/'issuance-pin.json';journal=root/'issuance.json'
         pin=dict(format='zolana-native-cohort-issuance-pin-v1',plan_sha256=expected)
         if os.path.lexists(marker):
             if private_json(marker)!=pin or not os.path.lexists(journal):raise ValueError('issuance journal missing or changed; never recreate capacity')
-            issuance(root,expected);return pin
+            issuance(root,expected,plan['cohort_size']);return pin
         if os.path.lexists(journal) or claims['claims'] or admission['invitations'] or os.path.lexists(root/'invitations'):
             raise ValueError('issuance initialization requires fresh unused native state')
         create(marker,encode(pin));fsync_dir(root)
@@ -239,15 +258,16 @@ def initialize_issuance(root,expected,templates=ETC,*,base_config=BASE_CONFIG,fa
         return pin
 
 
-def issuance(root,expected):
+def issuance(root,expected,size=COHORT_SIZE):
+    names=set(slots(size))
     pin=private_json(root/'issuance-pin.json')
     if pin!=dict(format='zolana-native-cohort-issuance-pin-v1',plan_sha256=expected):raise ValueError('original issuance pin changed')
     state=private_json(root/'issuance.json')
     if (not isinstance(state,dict) or set(state)!={'format','plan_sha256','slots'}
             or state['format']!='zolana-native-cohort-issuance-v1' or state['plan_sha256']!=expected
-            or not isinstance(state['slots'],dict) or len(state['slots'])>10):raise ValueError('invalid original named-slot journal')
+            or not isinstance(state['slots'],dict) or len(state['slots'])>size):raise ValueError('invalid original named-slot journal')
     for slot,item in state['slots'].items():
-        if slot not in SLOTS or not isinstance(item,dict) or set(item)!={'bind_fee'} or item['bind_fee'] is not None and not public_key(item['bind_fee']):
+        if slot not in names or not isinstance(item,dict) or set(item)!={'bind_fee'} or item['bind_fee'] is not None and not public_key(item['bind_fee']):
             raise ValueError('named cohort slot or binding changed')
     return state
 
@@ -276,11 +296,12 @@ def exports(root,state,admission):
 
 def issue(root,expected,slot,bind_fee=None,templates=ETC,*,base_config=BASE_CONFIG,faucet=FAUCET,ttl=86400):
     root=Path(root).absolute()
-    if slot not in SLOTS or bind_fee is not None and not public_key(bind_fee) or not bounded(ttl,1,604800):
-        raise ValueError('one of the ten named slots, valid binding and bounded TTL required')
+    if slot not in slots(MAX_COHORT_SIZE) or bind_fee is not None and not public_key(bind_fee) or not bounded(ttl,1,604800):
+        raise ValueError('one of the named cohort slots, valid binding and bounded TTL required')
     with locked(root):
-        _,_,admission,_=checked(root,expected,templates,base_config=base_config,faucet=faucet)
-        state=issuance(root,expected);exports(root,state,admission)
+        plan,_,admission,_=checked(root,expected,templates,base_config=base_config,faucet=faucet)
+        if slot not in slots(plan['cohort_size']):raise ValueError('slot is outside the reviewed cohort size')
+        state=issuance(root,expected,plan['cohort_size']);exports(root,state,admission)
         if slot not in state['slots']:
             state['slots'][slot]=dict(bind_fee=bind_fee);atomic(root/'issuance.json',state)
         if state['slots'][slot]!=dict(bind_fee=bind_fee):raise ValueError('reserved slot binding cannot change')
@@ -325,9 +346,9 @@ def audit(root=ROOT,expected=None,templates=ETC,*,base_config=BASE_CONFIG,faucet
     root=Path(root).absolute()
     with locked(root):
         plan,claims,admission,info=checked(root,expected,templates,base_config=base_config,faucet=faucet)
-        state=issuance(root,expected);exports(root,state,admission)
+        state=issuance(root,expected,plan['cohort_size']);exports(root,state,admission)
         counts=progress_counts(root,claims)
-        return dict(format='zolana-native-cohort-audit-v1',plan_sha256=expected,cohort_size=10,
+        return dict(format='zolana-native-cohort-audit-v1',plan_sha256=expected,cohort_size=plan['cohort_size'],
             reserved_slots=len(state['slots']),issued=info['issued'],reserved_claims=len(claims['claims']),
             claim_states=counts,progress_source='durable-faucet-journals',canonical_execution_rechecked=False,
             private_budget=plan['private_budget'],public_budget=plan['public_budget'],gas_grant=0,
@@ -338,11 +359,13 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command',choices=('plan','initialize-issuance','issue','audit'))
     parser.add_argument('--rehearsal',action='store_true');parser.add_argument('--plan-sha256')
-    parser.add_argument('--slot',choices=SLOTS);parser.add_argument('--bind-fee');parser.add_argument('--ttl',type=int,default=86400)
+    parser.add_argument('--slot');parser.add_argument('--bind-fee');parser.add_argument('--ttl',type=int,default=86400)
+    parser.add_argument('--cohort-size',type=int,help='plan only: lifetime wallets, 1..500 (default 10)')
     args=parser.parse_args();suffix='-rehearsal' if args.rehearsal else ''
     root=ROOT.with_name(ROOT.name+suffix);templates=ETC.with_name(ETC.name+suffix)
-    if args.command=='plan':value=build_plan(root,templates)
+    if args.command=='plan':value=build_plan(root,templates,size=COHORT_SIZE if args.cohort_size is None else args.cohort_size)
     else:
+        if args.cohort_size is not None:parser.error('cohort size is fixed by the sealed reviewed plan')
         if args.plan_sha256 is None:parser.error('explicit reviewed plan-sha256 required')
         if args.command=='initialize-issuance':value=initialize_issuance(root,args.plan_sha256,templates)
         elif args.command=='audit':value=audit(root,args.plan_sha256,templates)

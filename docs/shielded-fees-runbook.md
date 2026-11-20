@@ -68,7 +68,7 @@ and service margin. Exclude refundable staging rent from the net user charge.
 The operator's gross cap must separately cover staging rent, permanent markers,
 all potential broadcasts, cleanup reserve and minimum remaining public balance.
 
-At most 64 lifetime jobs and 8 jobs per member are allowed by the current schema;
+At most 3000 lifetime jobs and 8 jobs per member are allowed by the current schema;
 configuration can lower these limits. Completed/aborted jobs keep their slots
 across restarts. Quota reset or job deletion is not a recovery mechanism. The
 relay holds a single process lock and uses one bounded worker. Before spending
