@@ -4,10 +4,13 @@ Zolana is an independent Layer 1 blockchain derived from the
 [Agave](https://github.com/anza-xyz/agave) validator, with shielded payments
 implemented natively in the protocol. ZOL is the name of its native coin.
 
-This repository is an experimental preview. The only coins are valueless test
-coins, the code has not been independently audited and there is no mainnet.
-Read [Status and limitations](#status-and-limitations) before relying on
-anything here.
+Zolana's blockchain is currently in devnet. **Devnet test coins are valueless
+and distinct from the ZOL token issued on Solana.** The planned bridge will
+lock ZOL on Solana and mint an equal amount of native ZOL on Zolana, **1:1**.
+The blockchain code has not yet been independently audited. Zolana mainnet and
+the bridge are not yet live. Read
+[Status and limitations](#status-and-limitations) before relying on anything
+here.
 
 ## What it is
 
@@ -195,29 +198,30 @@ underlying logs are not part of this repository.
 
 ## Status and limitations
 
-**Stage: public devnet preview.** The project runs one preview network with
-test ZOL for trying the browser wallet. Access is capped by a small, finite
+**Stage: public devnet.** The project runs one devnet with valueless test
+coins for trying the browser wallet. Access is capped by a small, finite
 number of test-coin grants and relay jobs. The network has so far run in
 bounded windows and shuts itself down when its operational safety checks fail.
 Expect it to be offline, reset or withdrawn without notice. No availability is
 promised.
 
-**Test coins only.** ZOL on the preview has no monetary value and nothing
-redeems it. Earlier test networks have been replaced by fresh ones, and
+**Test coins only.** Devnet test coins have no monetary value and nothing
+redeems them. They are distinct from the ZOL token issued on Solana (see
+[Token](#token)). Earlier test networks have been replaced by fresh ones, and
 balances can be lost when that happens. No production supply, issuance, fee or
 rent schedule has been chosen; every amount in this repository is a development
 parameter.
 
-**No mainnet.** There is no mainnet and no production deployment. There is no
-bridge to Solana or to any other chain, and no exchange, swap or trading
-function.
+**No mainnet yet.** Zolana mainnet and the planned bridge are not yet live, and
+there is no production deployment. No bridge to Solana or to any other chain is
+implemented, and there is no exchange, swap or trading function.
 
 **Not audited.** No independent security audit or cryptographic review has
 been completed for the protocol, the validator modifications, the wallets or
 the operator tooling. Using an existing proof system does not make this
 integration secure.
 
-**Operated by the project.** Every validator of the preview network is run by
+**Operated by the project.** Every validator of the devnet is run by
 the project, and they are co-located on one host. Independent validators are
 not supported yet: there is no procedure for an outside operator to join.
 Liveness, and the correctness of what a wallet is shown, depend on the
@@ -255,8 +259,8 @@ Known limits:
   procedures have been exercised against process kills on test fixtures. Power
   loss, disk loss and host loss are not covered, and history retention has
   finite bounds.
-- **The hosted preview is not reproducible from this repository alone.** The
-  deployment, enrollment and backup automation used to host the preview is not
+- **The hosted devnet is not reproducible from this repository alone.** The
+  deployment, enrollment and backup automation used to host the devnet is not
   included here.
 - **Numbers are the project's own.** Timings and test counts quoted in the
   documents were measured by the project on its development machines. They are
