@@ -4,7 +4,7 @@ This experimental path uses the separate `native-shielded` binary. Existing
 wallet UI sends, user-paid public gas mode and installed wallet releases are not
 silently changed. Use a separately activated test network and a gateway whose
 operator explicitly enables the bounded shared relay. No real-money deployment
-or public service activation is part of LOCAL-054.
+or public service activation is part of this path.
 
 ## User
 

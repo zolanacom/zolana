@@ -81,5 +81,3 @@ RAYON_NUM_THREADS=2 nice -n 15 python3 -B tools/pilot_localnet.py \
 ```
 
 The first suite uses real native profile/key/admission operations and a worker-free admission HTTP server. It does not start validators or transfer coins. The second uses fresh keys/ledgers, two real local validators and one new invited sender plus an offline receiver. It funds the conservative one-slot budget, kills the grant worker after an actual gas acknowledgement is withheld, recovers the same grant, sends with user-paid gas, crashes/restarts both validators and restores the original spent seed. Both peers must agree on balances and six permanent nullifiers. The fixture's raw RPC/operator reader is explicitly local and is not a proof of deployed host isolation. Existing protected service and real wallets are untouched. The runner refuses existing roots and stops its owned validators in cleanup; completed evidence cannot be resumed or overwritten.
-
-See LOCAL-042 validation for observed results and remaining external-testnet gates.

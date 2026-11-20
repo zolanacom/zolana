@@ -18,3 +18,11 @@ node/agave/target/
 
 __pycache__/
 *.pyc
+
+# Local-only working directories
+/artifacts/
+/work/
+
+# Generated or OS files
+/clients/browser-core/pkg/
+.DS_Store

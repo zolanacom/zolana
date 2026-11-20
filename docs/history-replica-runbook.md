@@ -74,6 +74,6 @@ RAYON_NUM_THREADS=2 nice -n 15 python3 -B tools/replica_localnet.py \
   --root .data/<new-short-name> --replica-root .local/replica-operator/new-live-check
 ```
 
-This has a ten-minute limit and stops owned validators/receiver on success or failure. It tests real required-receiver outage/restart, fresh-seed recovery with both source history stores unavailable, recovered-witness spending, second seed restoration, exact pool/nullifiers, canonical pending-payment safety and damaged/rehashed history rejection. It never operates the original protected wallet/ledger root or publishes to GitHub.
+This has a ten-minute limit and stops owned validators/receiver on success or failure. It tests real required-receiver outage/restart, fresh-seed recovery with both source history stores unavailable, recovered-witness spending, second seed restoration, exact pool/nullifiers, canonical pending-payment safety and damaged/rehashed history rejection. It never operates the original protected wallet/ledger root.
 
 Actual off-host placement, alert delivery, storage/certificate operations, broader adversarial testing and independent review remain deployment work. History replication alone is not a backup of the entire chain.

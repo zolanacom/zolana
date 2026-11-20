@@ -14,4 +14,4 @@ Each receiver's incoming and committed stores have the existing 256 MiB budget a
 
 Local-only acceptance uses separate processes and private directories, then a real snapshot-only validator, fresh restored wallet seeds and a recovered-witness spend. The installed rehearsal uses a separate unprivileged receiver identity and preserves original private files/payment state. It restores the pre-test absence of replica configuration only after stopping the finite rehearsal, retaining all test policy/credential bytes privately for evidence. A deployed requirement marker must not be removed to work around an unavailable replica.
 
-See [the runbook](../history-replica-runbook.md) and LOCAL-030 validation. A successful loopback rehearsal does not establish actual off-host redundancy or authorize publication.
+See [the runbook](../history-replica-runbook.md). A successful loopback rehearsal does not establish actual off-host redundancy.

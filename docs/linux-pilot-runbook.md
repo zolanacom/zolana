@@ -27,13 +27,11 @@ The first candidate still runs both validators on one host with loopback peer
 transport. Split-validator networking is separate work. Keep recovery/history,
 full canonical archival RPC, and observer/pager/watchdog in independent failure
 domains before tester activation. RAID/mirrors do not replace off-host backups.
-Key custody and crypto payment to a host are separate from native test-unit
+Key custody and payment for hosting are separate from native test-unit
 funding; there is no need to buy ZOL or SOL to run this fresh private pilot.
 
-A dedicated AMD Ryzen server offering from a hosting provider that advertises
-direct crypto payments is a candidate for comparison. Inventory, final RAM and
-disk options, recurring billing, accepted checkout assets/networks, OS access and
-terms must be checked at purchase. No provider or price is pinned by this recipe.
+No provider or price is pinned by this recipe. Inventory, final RAM and disk
+options, recurring billing, OS access and terms must be checked at purchase.
 
 ## Native build, without touching the Mac target
 
@@ -140,8 +138,3 @@ are claimed compatible before real validator acceptance.
    with exact original wallets, balances, claims, ledger/tower and nullifiers.
 5. Independent retained history/canonical RPC recovery, trusted HTTPS and client
    delivery, off-host alerts with human receipt, and external-device acceptance.
-
-No local Linux VM is currently running. Docker's client is installed but its
-daemon is unavailable. This change does not start Docker, download a VM or heat
-the Mac with a cross-build. Linux compilation and the above host evidence remain
-open; all existing validators remain paused.

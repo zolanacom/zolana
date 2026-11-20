@@ -39,7 +39,7 @@ Repeat actual snapshot-peer acceptance on a fresh fixture:
 python3 -B tools/archive_localnet.py --root .data/archive-new
 ```
 
-The runner owns/stops two loopback validators. It checks collector restart/immutability, actual full-snapshot loading and new finalization, seed recovery that fails without retained history, a recovered-witness private send, a second seed restore, backend integration, corruption/missing files, payment omission with recomputed checksums, permanent nullifiers and pending-payment safety. Private evidence remains under its ignored root. See LOCAL-010 validation.
+The runner owns/stops two loopback validators. It checks collector restart/immutability, actual full-snapshot loading and new finalization, seed recovery that fails without retained history, a recovered-witness private send, a second seed restore, backend integration, corruption/missing files, payment omission with recomputed checksums, permanent nullifiers and pending-payment safety. Private evidence remains under its ignored root.
 
 ## Automatic dedicated-service retention
 
@@ -63,12 +63,12 @@ Repeat automatic collection, actual collector SIGKILL, fresh-seed snapshot-peer 
 PYTHONPATH=tools nice -n 15 python3 tools/retention_localnet.py --root .data/rh-new
 ```
 
-This uses a new disposable fixture, stops its own validators in cleanup and has a ten-minute acceptance timer. The installed-service rehearsal uses a separate finite deadline and restores the normal launchd definition to its unloaded state. See LOCAL-026 validation.
+This uses a new disposable fixture, stops its own validators in cleanup and has a ten-minute acceptance timer. The installed-service rehearsal uses a separate finite deadline and restores the normal launchd definition to its unloaded state.
 
 Before public testnet this needs independent replicated retention, operational alerting, sustained/adversarial load evidence. Production wallet/sponsor keys, launch parameters and independent protocol/runtime review remain separate release gates. No public deployment is authorized by these tools.
 
 ## Independent replica
 
-LOCAL-030 adds separately runnable TLS replication and source-stopped recovery. Optional configured replication must durably acknowledge the exact captured mirror checkpoint before retention reports success. Its persistent requirement survives service restart; removing or damaging the configuration cannot silently restore local-only health. A required receiver outage closes ingress and pauses validators through the existing supervisor. Only a dedicated history credential crosses this boundary; wallet/sponsor/validator/raw-RPC keys are excluded.
+The history replica adds separately runnable TLS replication and source-stopped recovery. Optional configured replication must durably acknowledge the exact captured mirror checkpoint before retention reports success. Its persistent requirement survives service restart; removing or damaging the configuration cannot silently restore local-only health. A required receiver outage closes ingress and pauses validators through the existing supervisor. Only a dedicated history credential crosses this boundary; wallet/sponsor/validator/raw-RPC keys are excluded.
 
 See the [replica runbook](history-replica-runbook.md). Actual TLS/process crashes, source-history-unavailable fresh-seed snapshot-peer recovery and a recovered-witness spend passed locally. The original installed service also preserved its pool/20 nullifiers and all 27 private files through receiver outage/restart. The final corrected receiver shutdown audit passed with validators paused. These independent processes remain on one Mac: real off-host placement, canonical archive redundancy and alert delivery remain external-testnet operations work. Ciphertext replicas do not replace canonical transaction-status evidence or validator/key/tower backups.

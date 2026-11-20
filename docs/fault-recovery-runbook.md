@@ -27,5 +27,3 @@ python3 -B tools/park_ledger.py restore .data/fixture/ledger-0.parked
 ```
 
 Parking acquires both ledger and RocksDB locks, renames the stopped directory, compresses large files and verifies decompressed SHA-256 before removing each plain copy. The manifest records original size, digest and mode. Restoration checks available space and every restored file before returning the original directory name. Keep the complete parked directory. Restoring may require several GiB of free space.
-
-The previous `.data/wn1/ledger-0` and `ledger-1` were parked to preserve their history after disk space ran low. Their keys, towers, wallets and network configuration remain alongside them. Completed large JSON evidence was separately retained as lossless `.json.gz` files. Neither earlier unexpected process exit is counted as an intentional crash acceptance result.

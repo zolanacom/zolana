@@ -32,7 +32,7 @@ target/debug/native-faucet invite-issue --root .data/new-invited-faucet \
   --output private-invitation.json --expires-in 86400
 ```
 
-Use `--bind-fee <tester-fee-address>` when that wallet authority is known. Otherwise anyone holding the unused code can redeem it first. The output contains the code and must be kept out of logs, URLs, Git, screenshots and bug reports. This local-only task does not send invitations. Revocation uses the nonsecret `invite_id` returned at issuance:
+Use `--bind-fee <tester-fee-address>` when that wallet authority is known. Otherwise anyone holding the unused code can redeem it first. The output contains the code and must be kept out of logs, URLs, Git, screenshots and bug reports. This procedure does not send invitations. Revocation uses the nonsecret `invite_id` returned at issuance:
 
 ```sh
 target/debug/native-faucet invite-revoke --root .data/new-invited-faucet \
@@ -63,7 +63,7 @@ python3 -B tools/invite_localnet.py --root .data/new-invite-check \
   --playwright-module <cached-playwright-module>
 ```
 
-This creates private rehearsal keys, funds one finite reservoir, disables operator sponsor material after setup, uses two real validators, races code redemption, tests rejection/quotas/revocation and service/validator recovery, then verifies actual browser admission and a native private send. It refuses existing roots unless one of the explicitly named narrow failed-checkpoint guards validates the original state; completed evidence cannot be resumed. It never automatically repeats a failed value operation. Evidence and original journals are preserved even on failure. See LOCAL-017 for the accepted run and limits.
+This creates private rehearsal keys, funds one finite reservoir, disables operator sponsor material after setup, uses two real validators, races code redemption, tests rejection/quotas/revocation and service/validator recovery, then verifies actual browser admission and a native private send. It refuses existing roots unless one of the explicitly named narrow failed-checkpoint guards validates the original state; completed evidence cannot be resumed. It never automatically repeats a failed value operation. Evidence and original journals are preserved even on failure.
 
 ### First-sync history reads
 
@@ -85,7 +85,7 @@ The checkpoint hashes canonical descriptor-prefix JSON and its network, with the
 
 Deploy the updated gateway before using the updated wallet binary. An old invited gateway fails with an update-required error. A gateway with no configured history, or an initial empty archive, returns null and the wallet tries complete canonical RPC. On a new device the wallet replays retained signatures/proofs, reads the recent canonical suffix and checks the live finalized header and full pool before saving its encrypted checkpoint. A valid checkpoint uses recent canonical RPC directly. No history directory is copied to the tester.
 
-Ordinary `getBlock/getBlocks/getTransaction/getSignatureStatuses/getBlockHeight` are unchanged. Checkpoints remember canonical coverage; old checkpoint provenance is unknown. Retained records supply neither canonical signature receipts nor absence. Unknown outcomes try a complete canonical scan without the retained endpoint; when unavailable the original pending record stays blocked. See LOCAL-027.
+Ordinary `getBlock/getBlocks/getTransaction/getSignatureStatuses/getBlockHeight` are unchanged. Checkpoints remember canonical coverage; old checkpoint provenance is unknown. Retained records supply neither canonical signature receipts nor absence. Unknown outcomes try a complete canonical scan without the retained endpoint; when unavailable the original pending record stays blocked.
 
 ## Canonical archival pending recovery
 
@@ -105,4 +105,4 @@ The runner retains evidence and journals and stops its owned validators in clean
 
 ### Independent recovery replica
 
-The v6 service can require an independently operated TLS history receiver before reporting retention healthy. Receiver outage fails closed, and the requirement persists across restart. LOCAL-030 passed real process crashes, fresh-seed recovery through a snapshot-only peer with source history unavailable, recovered spending and original-service outage/restart checks. Follow the [replica runbook](history-replica-runbook.md) for finite local rehearsal and credential/pin provisioning. No off-host receiver or permanent operator policy is configured by those tests. Actual separate-host storage, alerting, hosted ingress, release signing and independent review remain necessary before external invitations. Retained ciphertext history still cannot resolve old ambiguous outer transactions without canonical archival RPC.
+The v6 service can require an independently operated TLS history receiver before reporting retention healthy. Receiver outage fails closed, and the requirement persists across restart. Local acceptance passed real process crashes, fresh-seed recovery through a snapshot-only peer with source history unavailable, recovered spending and original-service outage/restart checks. Follow the [replica runbook](history-replica-runbook.md) for finite local rehearsal and credential/pin provisioning. No off-host receiver or permanent operator policy is configured by those tests. Actual separate-host storage, alerting, hosted ingress, release signing and independent review remain necessary before external invitations. Retained ciphertext history still cannot resolve old ambiguous outer transactions without canonical archival RPC.

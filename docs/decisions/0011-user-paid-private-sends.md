@@ -1,6 +1,6 @@
 # 0011: Extend bounded user fee authorization to private transfers
 
-Status: implemented and accepted locally; no deployment or publication
+Status: implemented and accepted locally; no deployment
 
 Private transfers already use the native NPAY0001 payment with zero public value balance and no public withdrawal destination. Its fee-payer field is bound into the proof authorization. The chain does not require that payer to be an operator. Extend the wallet's existing seed-derived fee account and durable cap to this shape without changing protocol bytes, consensus, features, staging accounts or nullifier rules.
 

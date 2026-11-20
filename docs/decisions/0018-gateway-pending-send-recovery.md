@@ -1,6 +1,6 @@
 # Recover the original pending send through the invited gateway
 
-The existing native client records a signed finalization identity before its first possible broadcast. Gateway acknowledgement loss must recover that original signature and staging record; a lost response is not authorization for another payment. The acceptance uses the same funded desktop seeds, network, grants, HTTPS profile and service identity as LOCAL-021.
+The existing native client records a signed finalization identity before its first possible broadcast. Gateway acknowledgement loss must recover that original signature and staging record; a lost response is not authorization for another payment. The acceptance uses the same funded desktop seeds, network, grants, HTTPS profile and service identity as the isolated-wallet acceptance.
 
 The test pauses the signing client only after its pending JSON is complete, then arms a service-owned gate for that exact signature. The gate delegates to the normal invited HTTPS gateway, holds only an authentic successful finalized status for the target, durably records its response hash/slot, and never returns that selected acknowledgement, including on timeout. It does not synthesize a successful transaction or expose a public fault-injection endpoint. The administrator-controlled launchd job temporarily selects `run-ack-test`; the ordinary `run` path uses the unchanged gateway. A service-owned ten-minute session deadline survives validator restarts and parks writers when expired.
 
@@ -14,4 +14,4 @@ Private-send resolution previously scanned from genesis even when an authenticat
 
 After successful resolution and original staging cleanup, a separate fault injection reinstates the exact saved pending JSON to simulate interruption between recording an outcome and durably removing its journal. Resolving that same identity again must leave balances and permanent nullifiers unchanged. This is journal replay without replacement broadcast, not a second payment or a claim that a conflicting proof was submitted.
 
-Tests remain local, with validators paused during coding and after acceptance. Public hosting, remote tester release, seed-only sync at large chain history, recipient-bound withdrawal performance and independent review remain separate work.
+Tests remain local. Public hosting, remote tester release, seed-only sync at large chain history, recipient-bound withdrawal performance and independent review remain separate work.

@@ -8,7 +8,7 @@ Prepare a new local, secret-free bundle:
 python3 -B tools/service_account.py prepare --output .local/new-service-bundle
 ```
 
-Review its exact manifest and digest, the account, paths and launchd configuration before administrator execution. The root bootstrap must pin both the installer bytes and manifest digest, run system Python in isolated mode, and pass the reviewed desktop UID. It must not execute an unverified user-writable installer or alter sudoers. Administrator authentication belongs in the macOS prompt; never send the administrator password through chat, files or command arguments.
+Review its exact manifest and digest, the account, paths and launchd configuration before administrator execution. The root bootstrap must pin both the installer bytes and manifest digest, run system Python in isolated mode, and pass the reviewed desktop UID. It must not execute an unverified user-writable installer or alter sudoers. Administrator authentication belongs in the macOS prompt; never send the administrator password through messages, files or command arguments.
 
 The sealed administrator command supports `install`, `update`, `test` and `verify`. Install refuses existing service account/group names, installation paths and launchd plists. It generates keys only as the unprivileged service identity, then launches the fixed daemon. A partial setup is retained for explicit recovery; rerunning initialization or deleting state is not a repair path.
 

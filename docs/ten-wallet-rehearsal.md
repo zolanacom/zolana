@@ -1,6 +1,6 @@
 # Ten-wallet pilot rehearsal
 
-This is an operator acceptance harness for the **preserved disposable** ten-slot pilot from LOCAL-046. It never creates a genesis, funds a reservoir, resets keys/claims, replaces an invitation or increases capacity. It does not use the real user's local wallet. External devices and real hosted availability remain separate launch gates.
+This is an operator acceptance harness for the **preserved disposable** ten-slot pilot fixture. It never creates a genesis, funds a reservoir, resets keys/claims, replaces an invitation or increases capacity. It does not use any pre-existing local wallet. External devices and real hosted availability remain separate launch gates.
 
 `tools/pilot_cohort_localnet.py` binds to the original accepted `.data/p46a` fixture, its genesis, native binaries, TLS files, runtime activation, funding records and encrypted source/tester wallets. Tester 01/02 reuse the earlier Alice/Bob seeds; the other eight receive separate encrypted wallets/backups. The initial accepted payment already moved 50,000 from Alice to Bob, so the final expected balances are 950,000 and 1,050,000 for those two testers and 1,000,000 each for the remaining eight.
 
