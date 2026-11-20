@@ -35,6 +35,7 @@ function fixture(source = current) {
     globalThis.app = { client, resetIdle, lockWallet,
       inspect: () => ({ locked: wallet.locked, fatal, lockCount, idleTimer, jobs: client.jobs.size }),
       hide: () => { document.hidden = true; },
+      setWallet: value => { wallet = value; },
       replaceClient: value => { client = value; },
     };
   `, context);
@@ -107,8 +108,8 @@ test('Progress cannot extend ordinary operations beyond sixty seconds', async ()
   assert.equal(f.terminated(), true);
 });
 
-test('Continued progress cannot extend the fifteen-minute absolute deadline', async () => {
-  const f = fixture(), sync = f.call('sync');
+test('Continued progress cannot extend the fifteen-minute absolute deadline of a payment recovery', async () => {
+  const f = fixture(), sync = f.call('recover_pending');
   for (let step = 1; step <= 17; step++) { await f.advance(50000); f.progress(sync.id, step * 100); }
   await f.advance(49999); f.progress(sync.id, 2000);
   await f.advance(1);
@@ -152,11 +153,81 @@ test('Explicit foreground progress preserves a healthy sync beyond five-minute i
   assert.equal(f.app.inspect().locked, true);
 });
 
-test('Background automatic sync preserves the five-minute idle lock', async () => {
+test('History verification that keeps adding blocks runs past fifteen minutes', async () => {
+  for (const action of ['sync', 'automatic_sync']) {
+    const f = fixture(), sync = f.call(action);
+    for (let step = 1; step <= 60; step++) { await f.advance(50000); f.progress(sync.id, step * 100); }
+    assert.equal(f.now(), 3000000); assert.equal(f.terminated(), false);
+    f.reply(sync.id, { verified: true }); await settle();
+    assert.equal(sync.result.value.verified, true);
+  }
+});
+
+test('History verification past fifteen minutes still stops sixty seconds after its last new block', async () => {
+  const f = fixture(), sync = f.call('automatic_sync');
+  for (let step = 1; step <= 20; step++) { await f.advance(50000); f.progress(sync.id, step * 100); }
+  await f.advance(50000); f.progress(sync.id, 2000);
+  await f.advance(9999); assert.equal(f.terminated(), false);
+  await f.advance(1);
+  assert.equal(f.terminated(), true); assert.ok(sync.result.error);
+});
+
+test('Continued block progress cannot extend history verification beyond its four-hour ceiling', async () => {
+  const f = fixture(), sync = f.call('sync');
+  for (let step = 1; step <= 287; step++) { await f.advance(50000); f.progress(sync.id, step); }
+  await f.advance(49999); f.progress(sync.id, 9000);
+  assert.equal(f.now(), 14399999); assert.equal(f.terminated(), false);
+  await f.advance(1);
+  assert.equal(f.terminated(), true); assert.ok(sync.result.error);
+});
+
+test('Background automatic sync of a verified wallet preserves the five-minute idle lock', async () => {
   const f = fixture(), sync = f.call('automatic_sync'); f.app.resetIdle();
+  f.app.setWallet({ locked: false, authoritativeSync: true });
   for (let step = 1; step <= 6; step++) { await f.advance(50000); f.progress(sync.id, step * 100); }
   assert.equal(f.app.inspect().locked, true);
   assert.equal(f.sent.at(-1).action, 'lock');
+});
+
+test('First verification by automatic sync holds the idle lock only while it reports new blocks', async () => {
+  const f = fixture(), sync = f.call('automatic_sync'); f.app.resetIdle();
+  f.app.setWallet({ locked: false, authoritativeSync: false });
+  for (let step = 1; step <= 14; step++) { await f.advance(50000); f.progress(sync.id, step * 100); }
+  assert.equal(f.now(), 700000); assert.equal(f.app.inspect().locked, false);
+  // Stage changes without a block, and repeated blocks, are not activity.
+  await f.advance(50000); f.progress(sync.id, undefined, { slot: undefined, target: undefined, stage: 'saving-verified-checkpoint' });
+  f.reply(sync.id); await settle();
+  await f.advance(249999); assert.equal(f.app.inspect().locked, false);
+  await f.advance(1);
+  assert.equal(f.app.inspect().locked, true);
+  assert.equal(f.sent.at(-1).action, 'lock');
+});
+
+test('A restarted first verification is not activity until it passes the highest block already reported', async () => {
+  const f = fixture(), first = f.call('automatic_sync'); f.app.resetIdle();
+  f.app.setWallet({ locked: false, authoritativeSync: false });
+  await f.advance(50000); f.progress(first.id, 5000);
+  f.reply(first.id); await settle();
+  const second = f.call('automatic_sync');
+  for (let step = 1; step <= 5; step++) { await f.advance(50000); f.progress(second.id, step * 900); }
+  assert.equal(f.now(), 300000); assert.equal(f.app.inspect().locked, false);
+  await f.advance(49999); assert.equal(f.app.inspect().locked, false);
+  await f.advance(1);
+  assert.equal(f.app.inspect().locked, true);
+  const third = fixture(), again = third.call('automatic_sync'); third.app.resetIdle();
+  third.app.setWallet({ locked: false, authoritativeSync: false });
+  await third.advance(50000); third.progress(again.id, 5000);
+  third.reply(again.id); await settle();
+  const later = third.call('automatic_sync');
+  for (let step = 1; step <= 7; step++) { await third.advance(50000); third.progress(later.id, step * 1100); }
+  assert.equal(third.now(), 400000); assert.equal(third.app.inspect().locked, false);
+});
+
+test('Hidden first verification cannot refresh the idle clock', async () => {
+  const f = fixture(), sync = f.call('automatic_sync'); f.app.resetIdle();
+  f.app.setWallet({ locked: false, authoritativeSync: false }); f.app.hide();
+  for (let step = 1; step <= 6; step++) { await f.advance(50000); f.progress(sync.id, step * 100); }
+  assert.equal(f.app.inspect().locked, true);
 });
 
 test('Healthy automatic sync preserves an explicit foreground request waiting in its queue', async () => {
