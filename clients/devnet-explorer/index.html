@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#06080c"><title>Explorer | Zolana</title><meta name="description" content="Recent blocks and transactions from the Zolana public devnet."><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/landing.css"><link rel="stylesheet" href="/pages.css"><link rel="stylesheet" href="/explorer.css"><script defer src="/recovery.js"></script><script defer src="/explorer.js"></script></head>
+<body><a class="skip" href="#main">Skip to content</a><header class="header"><a class="wordmark" href="/" aria-label="Zolana network"><img src="/zolana-mark.svg" width="27" height="24" alt=""><span>Zolana</span></a><div class="header-actions"><a class="header-explorer" href="/explorer/" data-route="explorer" aria-current="page">Explorer</a><a class="header-explorer header-github" href="https://github.com/zolanacom/zolana" rel="noopener">GitHub</a><a class="header-wallet" id="open-wallet" href="/wallet/" aria-label="Open wallet">Open wallet <span aria-hidden="true">↗</span></a><button class="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="site-menu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8H20M4 16H20"/></svg></button></div><nav id="site-menu" aria-label="Main navigation" hidden><a href="/" data-route="network">Network</a><a href="/explorer/" data-route="explorer" aria-current="page">Explorer</a><a href="/validators/" data-route="validators">Validators</a><a href="/build/" data-route="build">Build</a><a href="/status/" data-route="status">Status</a></nav></header><main id="main" tabindex="-1">
+<section id="hero" hidden></section><section class="content wrap" id="content" aria-labelledby="page-title" data-explorer-app>
+  <p class="page-kicker">Public devnet</p>
+  <div class="content-heading"><div><h1 id="page-title">Explorer</h1><p class="page-description">Recent blocks and transactions from the public devnet. Coins are valueless test coins.</p></div><form id="explorer-search" role="search" aria-label="Search recent blocks and transactions" novalidate><label class="sr-only" for="explorer-query">Slot number, blockhash or signature</label><div class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15L20 20"/></svg><input id="explorer-query" type="text" inputmode="text" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="140" placeholder="Slot, blockhash or signature" aria-describedby="explorer-search-note"><button class="search-submit" type="submit">Search</button></div></form></div>
+  <div class="explorer-rail" data-zolana-status><dl>
+    <div><dt>Network</dt><dd class="explorer-phase"><span class="status-dot unknown" aria-hidden="true" data-zolana-status-dot></span><span class="badge" data-zolana-status-text>Loading</span></dd></div>
+    <div><dt>Tip slot</dt><dd data-zolana-field="tip_slot">—</dd></div>
+    <div><dt>Finalized slot</dt><dd data-zolana-field="finalized_slot">—</dd></div>
+    <div><dt>Block height</dt><dd data-zolana-field="block_height">—</dd></div>
+    <div><dt>Average slot time</dt><dd data-zolana-field="slot_time">—</dd></div>
+    <div><dt>Active validators</dt><dd data-zolana-field="validators">—</dd></div>
+    <div><dt>Feed</dt><dd data-zolana-field="updated">Waiting for data</dd></div>
+  </dl></div>
+  <p class="notice explorer-notice" id="explorer-notice" role="status"></p>
+  <div id="view" class="explorer-view">
+    <noscript><p class="explorer-empty">The explorer needs JavaScript to load recent blocks.</p></noscript>
+    <p class="explorer-search-note" id="explorer-search-note" role="status"></p>
+    <p class="sr-only" id="explorer-announcer" role="status"></p>
+    <section class="explorer-detail" id="explorer-detail" aria-labelledby="explorer-detail-title" hidden></section>
+    <div class="explorer-columns" id="explorer-data" hidden>
+      <div class="explorer-list">
+        <h2 class="subheading" id="blocks-title">Latest blocks</h2>
+        <div class="table-wrap" id="blocks-wrap" role="region" aria-labelledby="blocks-title" tabindex="0"><table class="explorer-table"><caption class="sr-only">Latest blocks, newest first</caption><thead><tr><th scope="col">Slot</th><th scope="col">Blockhash</th><th scope="col">Age</th><th scope="col">Transactions</th><th scope="col">Non-vote<span class="sr-only"> transactions</span></th></tr></thead><tbody id="blocks-body"></tbody></table></div>
+        <p class="explorer-empty" id="blocks-empty" hidden>No blocks have been recorded yet.</p>
+        <p class="explorer-count" id="blocks-count"></p>
+        <button type="button" class="load-more" id="blocks-more" hidden>Show more<span class="sr-only"> blocks</span></button>
+      </div>
+      <div class="explorer-list">
+        <h2 class="subheading" id="transactions-title">Latest transactions</h2>
+        <div class="table-wrap" id="transactions-wrap" role="region" aria-labelledby="transactions-title" tabindex="0"><table class="explorer-table explorer-table-wide"><caption class="sr-only">Latest transactions, newest first</caption><thead><tr><th scope="col">Signature</th><th scope="col">Slot</th><th scope="col">Age</th><th scope="col">Result</th><th scope="col">Fee (ZOL)</th><th scope="col">Kind</th></tr></thead><tbody id="transactions-body"></tbody></table></div>
+        <p class="explorer-empty" id="transactions-empty" hidden>No transactions have been recorded yet.</p>
+        <p class="explorer-count" id="transactions-count"></p>
+        <button type="button" class="load-more" id="transactions-more" hidden>Show more<span class="sr-only"> transactions</span></button>
+      </div>
+    </div>
+  </div>
+  <p class="source-note">Private payment amounts and participants are not public. The explorer shows recent blocks only; full history search is in progress.</p>
+</section></main><footer class="footer wrap"><a class="wordmark" href="/"><img src="/zolana-mark.svg" width="25" height="22" alt=""><span>Zolana</span></a><div class="footer-links"><a href="/build/">Build</a><a href="/status/">Status</a><a href="https://github.com/zolanacom/zolana" rel="noopener">GitHub</a><button type="button" class="plain" data-global-privacy>Privacy</button></div></footer><dialog id="privacy-dialog" aria-labelledby="privacy-title"><button class="close-dialog" data-close aria-label="Close privacy explanation">×</button><img class="dialog-symbol" src="/zolana-mark.svg" alt="" width="48" height="42"><h2 id="privacy-title">Your privacy<br>has a boundary.</h2><p>Zolana is an independent blockchain for native shielded deposits, private transfers and withdrawals. The browser wallet creates proofs and decrypts its own notes locally.</p><div class="privacy-columns"><div><h3>Shielded details</h3><p>Payment amounts and receiving addresses are protected by proofs. Your spending and viewing keys stay on your device.</p></div><div><h3>Public evidence</h3><p>Blocks, timing, fees, nullifiers and public deposit or withdrawal accounts and amounts remain visible.</p></div></div><p>The invited gateway knows your membership and receiving address. It sees your IP address and request timing and can link your submissions. This is not a claim of complete anonymity.</p><p class="muted">Valueless test coins. No Solana bridge, SOL/USDC deposits, post-quantum protection or audited-security claim.</p><button class="primary" data-close>Got it</button></dialog></body></html>

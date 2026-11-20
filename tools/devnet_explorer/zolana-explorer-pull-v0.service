@@ -1,0 +1,39 @@
+# zolana-explorer-pull-v0.service
+#
+# Pulls the signed explorer feed from the chain host, verifies it and publishes
+# the verified copy at /var/lib/zolana-explorer-pull-v0/feed.json for the
+# static site.
+#
+# ============================ EDIT BEFORE INSTALL ============================
+# SOURCE_URL on the ExecStart line is a placeholder. Replace it with the feed
+# address of the chain host, for example http://203.0.113.10:18080
+# (http scheme, literal IPv4 address, explicit port, no path). The puller
+# refuses to run while the placeholder is still in place.
+# =============================================================================
+
+[Unit]
+Description=Zolana explorer feed puller (v0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zolana-explorer
+Group=zolana-explorer
+StateDirectory=zolana-explorer-pull-v0
+StateDirectoryMode=0755
+UMask=0022
+LoadCredential=hmac:/etc/zolana-explorer-pull-v0/hmac.key
+ExecStart=/usr/bin/python3 -I -B /opt/zolana-explorer-pull-v0/explorer_pull_v0.py --source SOURCE_URL --hmac-key-file %d/hmac
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=64M
+CPUQuota=10%
+
+[Install]
+WantedBy=multi-user.target

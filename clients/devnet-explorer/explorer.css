@@ -1,0 +1,88 @@
+/* Explorer and the shared GitHub link. Loaded on every page after style.css,
+   landing.css and pages.css, which stay unchanged. */
+
+/* The header link sits beside Explorer where the bar has room. The footer carries the
+   same link at every width. */
+@media(max-width:760px){.header-github{display:none}}
+
+/* Status dot beside a text value in an observation list. */
+.observation-details .status-dot{margin-right:9px;vertical-align:middle}
+
+/* Status row: one measured value per cell, read from the feed. */
+.explorer-rail{order:1;border-top:1px solid #25303f;border-bottom:1px solid #25303f}
+.explorer-rail dl{display:grid;grid-template-columns:repeat(6,minmax(0,1fr)) minmax(0,1.35fr);margin:0;padding:24px 0 26px}
+.explorer-rail dl>div{min-width:0;padding:2px 18px 2px 24px;border-left:1px solid #25303f}
+.explorer-rail dl>div:first-child{padding-left:0;border-left:0}
+.explorer-rail dt{margin:0 0 9px;font-size:11px;line-height:1.5;color:#7d97b7}
+.explorer-rail dd{margin:0;min-height:24px;font-size:15px;line-height:1.6;color:#d2e2f6;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.explorer-rail dd.explorer-phase{display:flex;align-items:center;gap:10px}
+.explorer-rail .status-dot{width:7px;height:7px;flex-basis:7px}
+.explorer-rail .badge{padding:3px 10px;font-size:12px}
+
+/* Feed state. Empty while live. */
+.explorer-notice{margin:26px 0 0;max-width:none;font-size:14px;line-height:1.7;color:#d2e2f6}
+.explorer-notice[data-tone=paused],.explorer-notice[data-tone=nodata]{padding:3px 0 3px 18px;border-left:2px solid #9cc8ff}
+.explorer-notice time{white-space:nowrap}
+
+.explorer-view{margin-top:34px}
+.explorer-search-note{margin:0 0 26px;max-width:80ch;font-size:14px;line-height:1.7;color:#a2afc1}
+.explorer-search-note:empty{display:none}
+
+/* Section headings keep the page outline (h1, then h2) at the size of a subheading. */
+.content h2.subheading{margin:0 0 14px;font-size:23px;font-weight:450;letter-spacing:-.035em;line-height:1.3}
+.content .detail-heading h2.subheading{margin:0}
+.content h2.subheading[tabindex="-1"]:focus{outline:none}
+
+/* Detail panel for one block or transaction. */
+.explorer-detail{margin:0 0 42px;border-top:1px solid #294475;scroll-margin-top:118px}
+.explorer-detail .detail-heading{margin:22px 0 22px}
+.explorer-detail .back-button{margin-left:auto}
+.explorer-detail .detail-grid{margin-bottom:0}
+.explorer-detail .detail-grid dt{display:flex;align-items:center}
+.explorer-detail .detail-grid dd{align-items:center;justify-content:flex-start;gap:18px;min-height:64px}
+.explorer-links{display:flex;flex-wrap:wrap;gap:8px 22px}
+
+/* Latest blocks and latest transactions: stacked, side by side on wide screens. */
+.explorer-columns{display:grid;grid-template-columns:minmax(0,1fr);gap:54px 56px}
+.explorer-list{min-width:0}
+/* The scroll container holds its visually hidden labels, so they cannot widen the page. */
+.explorer-list .table-wrap{position:relative}
+.explorer-list .table-wrap:focus-visible{outline:2px solid #9cc8ff;outline-offset:3px}
+.explorer-table{min-width:480px}
+.explorer-table.explorer-table-wide{min-width:570px}
+.explorer-table th{padding-top:13px;padding-bottom:13px}
+.explorer-table td,.explorer-table tbody th{padding-top:14px;padding-bottom:14px;vertical-align:middle;white-space:nowrap;font-variant-numeric:tabular-nums}
+.explorer-table tbody th{border-bottom:1px solid #182536;font-size:13px;font-weight:400;color:#b3c5dd}
+.explorer-table tbody tr:last-child th{border-bottom:0}
+.explorer-table th:first-child{padding-left:4px}
+.explorer-table th:last-child,.explorer-table td:last-child{padding-right:4px}
+.explorer-table .data-link{margin:-6px 0;padding:6px 0}
+.explorer-table .data-link:focus-visible,.explorer-detail .data-link:focus-visible{outline-offset:2px}
+.explorer-count{margin:16px 0 0;font-size:12px;line-height:1.7;color:#8391a4}
+.explorer-count:empty{display:none}
+.explorer-list .load-more{margin-top:16px}
+.explorer-empty{margin:0;padding:18px 0;font-size:14px;line-height:1.8;color:#8294ad}
+
+@media(min-width:1280px){.explorer-columns{grid-template-columns:minmax(0,5fr) minmax(0,6fr)}}
+@media(max-width:1179px){
+ .explorer-rail dl{grid-template-columns:repeat(4,minmax(0,1fr));row-gap:24px}
+ .explorer-rail dl>div:nth-child(4n+1){padding-left:0;border-left:0}
+}
+@media(max-width:699px){
+ .explorer-rail dl{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:20px;padding:20px 0 22px}
+ .explorer-rail dl>div{padding:1px 10px 1px 18px}
+ .explorer-rail dl>div:nth-child(2n+1){padding-left:0;border-left:0}
+ .explorer-rail dd{font-size:14px}
+}
+@media(max-width:600px){
+ .explorer-notice{margin-top:22px;font-size:13px}
+ .explorer-view{margin-top:28px}
+ .explorer-search-note{font-size:13px;margin-bottom:22px}
+ .content h2.subheading{font-size:21px}
+ .explorer-columns{row-gap:44px}
+ .explorer-detail{margin-bottom:36px}
+ .explorer-detail .detail-heading{margin:18px 0}
+ .explorer-detail .detail-grid dd{min-height:0}
+ .explorer-empty{font-size:13px}
+ .explorer-table tbody th{font-size:12px}
+}

@@ -1,0 +1,60 @@
+# Zolana devnet explorer feed (v0), chain side.
+#
+# Polls the local JSON-RPC node read-only and serves /feed.json and /feed.sig
+# on port 18080. The only place this service writes is its state directory.
+#
+# ALLOW_IP on the last line of ExecStart is a placeholder. It must be replaced
+# at install time with the address of the web host that pulls the feed, e.g.
+#   sed 's/ALLOW_IP/203.0.113.10/' zolana-explorer-feed-v0.service
+# The service refuses to start while the placeholder is still in place.
+
+[Unit]
+Description=Zolana devnet explorer feed v0 (read-only block feed for the public explorer page)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/zolana-explorer-feed-v0
+ExecStart=/usr/bin/python3 -I -B /opt/zolana-explorer-feed-v0/explorer_feed_v0.py \
+    --rpc-url http://127.0.0.1:49643 \
+    --state-dir /var/lib/zolana-explorer-feed-v0 \
+    --hmac-key-file %d/hmac \
+    --listen 0.0.0.0:18080 \
+    --allow-ip ALLOW_IP
+
+DynamicUser=yes
+StateDirectory=zolana-explorer-feed-v0
+StateDirectoryMode=0750
+LoadCredential=hmac:/etc/zolana-explorer-feed-v0/hmac.key
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=64
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
