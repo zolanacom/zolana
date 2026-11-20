@@ -17,3 +17,10 @@ Finalization charges 1,100,000 compute units before proof verification; fixture 
 The persisted development pool holds 256 nullifiers (128 payments including deposits and withdrawals) and 16 recent roots. It fails closed at capacity. Durable paging, long-lived witness maintenance, production metering, wallet scanning, snapshot restoration and multi-process network tests remain follow-up work. The account format and development IDs are experimental.
 
 Rust 1.92 is used throughout the tested root workspace. Changes in imported code include builtin and feature registration, matching syscall dependency pins, explicit lifetime annotations and narrow compatibility adjustments for compiler-generated warnings. Upstream ownership notices remain intact. The root lockfile is the tested dependency graph; the separate full Agave workspace and validator executable are not certified by these tests.
+
+## Status update (2026-11-20)
+
+This record describes the first integration and is kept as written. Two figures in its capacity paragraph no longer describe the code:
+
+- The pool no longer stores spent nullifiers, and the 128-payment cap is gone. Each nullifier is a permanent 40-byte marker account (`MARKER_BYTES` in `node/adapter/src/nullifiers.rs`; [decision 0004](0004-durable-nullifiers.md)).
+- The pool keeps 64 recent roots, not 16, in format `NPOOL003` (`MAX_ROOTS` in `protocol/payments/src/state.rs`; [decision 0006](0006-concurrent-anchor-window.md)). The later `NPOOL004` format keeps a 512-slot anchor history instead of per-payment roots (`ANCHOR_WINDOW_SLOTS` in `protocol/payments/src/anchors.rs`).

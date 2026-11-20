@@ -9,6 +9,13 @@ case "$#:${1-}" in
     *) printf 'Usage: %s [--development-only]\n' "$0" >&2; exit 2 ;;
 esac
 
+# The publication check is not in this repository: say so before the long build.
+if [ "$publication_check" = yes ] && [ ! -f tools/check_publication.py ]; then
+    printf '%s\n' 'tools/check_publication.py is not in this repository, so the publication check cannot run.' \
+        'Run the development checks with: sh tools/check.sh --development-only' >&2
+    exit 2
+fi
+
 # Format workspace members only. Cargo fmt --all also visits local vendor dependencies.
 sh tools/dev.sh fmt \
     -p native-payments -p payment-lab -p native-wallet -p native-wallet-seed \
