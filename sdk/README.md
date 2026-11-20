@@ -9,7 +9,7 @@ it.
 | Version | 0.1, the version of the workspace crates |
 | Distribution | Source only. Nothing is published to crates.io or npm, and there is no prebuilt Wasm module |
 | Review | Not independently audited |
-| Network | Devnet only, with valueless test coins. There is no mainnet |
+| Network | Devnet only. Devnet test coins are valueless and distinct from the ZOL token issued on Solana. Mainnet is not yet live |
 | Stability | Wire formats, account layouts, identifiers and the custom RPC methods are experimental and can change without migration |
 
 Read [Limits](#limits) before you plan around it.
