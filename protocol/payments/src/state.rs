@@ -336,8 +336,8 @@ impl Reader<'_> {
 mod tests {
     use super::*;
 
-    // Retained pre-in-place implementation (LOCAL065 r3-before state.rs,
-    // SHA256 057dd2f0b3f262429a8c621949c809f60b96774759bc6196f4e7518040924c45).
+    // Reference oracle: the earlier completion algorithm, which cloned the
+    // pool and recorded the checkpoint on the copy, kept here for comparison.
     // This oracle deliberately never calls either new completion entry point.
     fn old_completed_slot(pool: &PoolState, slot: u64) -> Result<PoolState, Error> {
         let mut next = pool.clone();

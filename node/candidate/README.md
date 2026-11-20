@@ -7,6 +7,11 @@ wallet crypto/history, bounded native ingress, slot-sealed payment anchors,
 original-ledger recovery, full-snapshot tests, and Linux acceptance drivers.
 The existing Agave 3.x runtime, wallets and ledgers are not changed.
 
+The `LOCAL-NNN` names in this directory are the revision identifiers of the
+patch series; a suffix such as `-r3` marks a reissue of that revision. The
+reconstruction plan and the source manifests refer to the files by these names
+and pin their SHA-256 hashes, so the names are kept as they are.
+
 ## Reconstruct the current source candidate
 
 Run the following from the repository root with Python 3.11 or newer and Git.
@@ -92,7 +97,7 @@ native ingress; the default parser retains its published transaction size limits
 
 Completed Linux acceptance evidence at this source freeze:
 
-- `private-v4-004`: three co-located validators finalized and recorded all three
+- Private-transfer run: three co-located validators finalized and recorded all three
   full-proof private transfers; every peer agreed on the pool and eight permanent
   nullifier accounts. An original-ledger node restart preserved those payments.
 - The same run stopped two of the three equal-stake validators. For eight seconds
@@ -102,7 +107,7 @@ Completed Linux acceptance evidence at this source freeze:
 - Full-snapshot recovery restored real AccountsDb state twice, checked exact pool,
   checkpoints and nullifiers, rejected duplicate spends and allowed recipient and
   change notes to be spent after recovery.
-- `smoke2`: a fresh process resumed the original ledgers, genesis, identity and
+- Smoke run: a fresh process resumed the original ledgers, genesis, identity and
   voting keys, signed voting histories and root ancestry after an orderly stop.
 
 Subsequent acceptance recovered the

@@ -167,7 +167,7 @@ development values.
   [TLS and raw RPC isolation](docs/tls-rpc-isolation-runbook.md),
   [private host RPC transport](docs/host-isolation-runbook.md),
   [direct HTTPS ingress](docs/direct-tls-runbook.md),
-  [public TLS certificate](docs/public-tls-certificate-074.md).
+  [public TLS certificate](docs/public-tls-certificate-runbook.md).
 - **Operator services:** [service account](docs/service-account-runbook.md),
   [isolated wallet ingress](docs/isolated-wallet-runbook.md),
   [operator health](docs/operator-health-runbook.md),
@@ -186,7 +186,7 @@ development values.
   [authenticated releases](docs/wallet-release-runbook.md),
   [path-remapped builds](docs/path-remapped-wallet-runbook.md),
   [Apple signing preparation](docs/apple-signing-runbook.md).
-- **Design notes:** [privacy and delivery review](docs/privacy-boundary-LOCAL-070.md),
+- **Design notes:** [privacy and delivery review](docs/privacy-boundary.md),
   [post-quantum migration plan](docs/post-quantum-roadmap.md),
   [module boundaries](docs/refactoring-plan.md),
   [browser storage adapter](clients/browser-wallet/storage.js),
@@ -237,7 +237,7 @@ Known limits:
   and request timing and can link submitted payments to a member. Shielding
   hides amounts and counterparties from the public ledger, not activity from
   the operator. See the
-  [privacy and delivery review](docs/privacy-boundary-LOCAL-070.md).
+  [privacy and delivery review](docs/privacy-boundary.md).
 - **Public metadata remains.** Fee payer or relay payee, the exact fee, timing
   and nullifiers are public. Deposits and withdrawals reveal their amounts and
   public accounts. There is no network-layer anonymity.

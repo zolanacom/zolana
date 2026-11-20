@@ -9,7 +9,7 @@ validates the complete invited HTTPS profile before output. Native private sends
 use shielded fees; the separately funded public-fee requirement in the historical
 legacy instructions below applies to withdrawals and legacy sends. A configured
 faucet URL does not prove that grants are available. The UI now reports configured
-endpoints and explicit grant status. See the [privacy and delivery review](privacy-boundary-LOCAL-070.md)
+endpoints and explicit grant status. See the [privacy and delivery review](privacy-boundary.md)
 for limits and remaining browser/external-delivery gates.
 
 Build an archive against an existing network's public identity:

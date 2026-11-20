@@ -59,4 +59,4 @@ python3 -B tools/wallet_ui.py \
   --binary /absolute/path/pinned/native-wallet --duration 600
 ```
 
-The profile must preserve `private_send_transport: native-inline-v1` and `retained_history_format: compact-v2`, invited HTTPS and its exact pinned identity/trust. Existing storage is bound to its original profile; do not edit that profile or overwrite a wallet to make a new launch work. A configured admission endpoint does not establish live funding. See the [privacy and delivery review](privacy-boundary-LOCAL-070.md) for limits. The NPOOL003 fixture commands above intentionally start local validators; this remote-profile path does not.
+The profile must preserve `private_send_transport: native-inline-v1` and `retained_history_format: compact-v2`, invited HTTPS and its exact pinned identity/trust. Existing storage is bound to its original profile; do not edit that profile or overwrite a wallet to make a new launch work. A configured admission endpoint does not establish live funding. See the [privacy and delivery review](privacy-boundary.md) for limits. The NPOOL003 fixture commands above intentionally start local validators; this remote-profile path does not.

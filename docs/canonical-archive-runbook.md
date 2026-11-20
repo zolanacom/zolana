@@ -4,10 +4,10 @@ This runbook describes bounded canonical capture and serving in the invited
 gateway. It is a configuration and recovery reference; live gateway activation
 and pruning of an existing ledger remain separate gates. The native exporter
 candidate is described in
-[LOCAL-094-README](../node/candidate/LOCAL-094-README.md).
+[its candidate note](../node/candidate/LOCAL-094-README.md).
 
 A separate indexed full-metadata archive is described in
-[LOCAL-095-README](../node/candidate/LOCAL-095-README.md). Its finite bounds are
+[a later candidate note](../node/candidate/LOCAL-095-README.md). Its finite bounds are
 not unbounded multi-year retention. It does not change the canonical SQLite
 store, CLI, coverage semantics or activation instructions below. Metadata cannot
 replace full transaction history for pending acceptance/absence. No
