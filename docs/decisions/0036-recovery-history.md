@@ -11,3 +11,7 @@ Do not use archive transaction identities to resolve unknown finalizations. The 
 The archive contains public on-chain ciphertexts/metadata, not wallet seeds, passwords or decrypted notes. Initial collection requires full history from genesis and must start before pruning. Snapshot-only peers can serve recovery only when the independent archive supplies the missing prefix and recent RPC blocks supply a continuous suffix. Missing, modified, mismatched or discontinuous data must fail closed, never report a partial zero balance.
 
 This is local retention/recovery infrastructure. Operators still need archive replication, monitoring, durable backups, capacity planning, production key/sponsor architecture and independent security review before public testnet. No service exposure or public network is authorized.
+
+## Numbering note (2026-11-20)
+
+This record was first filed on 17 October 2026 as 0006, a number it shared with [0006: bounded concurrent anchor history](0006-concurrent-anchor-window.md), filed earlier the same day. It now carries the next free number, 0036; its text above is unchanged. Records are otherwise numbered in the order they were written, so this one sits out of sequence.

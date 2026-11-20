@@ -13,3 +13,10 @@ Proof validation, public movement, marker allocation, frontier/backing changes a
 The pool format is now `NPOOL002`, 1,601 bytes: network domain, rent floor, backing, commitment count, root count, a 32-level frontier and 16 recent anchors. The old format is rejected. This is an incompatible local-development revision: use a fresh genesis, preserve the previous network and never point the new binary at its old ledger. No migration or public upgrade is claimed. The proof authorization and submission wire formats remain version 1 because their cryptographic statements have not changed.
 
 The 128-payment storage cap is removed. The compact frontier explicitly fails closed at 4,294,967,294 commitments (2,147,483,647 two-action payments), avoiding overflow of the fixed-depth tree; tree rollover is separate future work. Checking two markers remains bounded as history grows. This does not remove the shared-pool write lock, the 16-root witness freshness window, the need for a wallet/indexer, storage growth, or the need to benchmark and audit the protocol. Nullifiers, sponsors, submission timing and public boundaries remain visible.
+
+## Status update (2026-11-20)
+
+The marker design above is kept as written. The pool format and root window it names have since been replaced:
+
+- `NPOOL002` (1,601 bytes, 16 recent anchors) is rejected by the current decoder (`PoolState::decode` in `protocol/payments/src/state.rs`). The accepted formats are `NPOOL003`, 3,137 bytes with 64 recent roots (`STATE_BYTES`, `MAX_ROOTS`; [decision 0006](0006-concurrent-anchor-window.md)), and `NPOOL004`, which keeps a 512-slot anchor history instead of per-payment roots (`SLOT_STATE_BYTES` in `state.rs`; `ANCHOR_WINDOW_SLOTS` in `protocol/payments/src/anchors.rs`).
+- The "16-root witness freshness window" in the last paragraph is accordingly 64 roots under `NPOOL003` and 512 slots under `NPOOL004`.

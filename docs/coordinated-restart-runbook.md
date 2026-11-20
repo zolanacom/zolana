@@ -31,7 +31,7 @@ To repeat the complete wallet and restart acceptance on a new disposable network
 ```
 python3 -B tools/wallet_localnet.py --root .data/<new-wallet-network>
 python3 -B tools/restart_localnet.py --root .data/<new-wallet-network>
-sh tools/check.sh
+sh tools/check.sh --development-only
 ```
 
 The adverse runner reads the seed-restored wallet balances and requires their sum to equal native backing, with no open staging accounts. It preserves logs and signed tower copies, tests wrong hashes/shred versions, missing/corrupt towers and an isolated minority, then performs majority and whole-cluster restarts. It requires fresh finalization across an epoch, sends one unit privately, reconstructs its already-public proof from archive staging transactions and rejects that proof after another restart while its authorization remains live. A three-unit deposit and two-unit withdrawal then increase backing by one and add six commitments/nullifier accounts in total. For a fresh wallet fixture starting at 5/15 with ten commitments, the final balances are 7/14, backing 21 and 16 commitments/markers. The receipt records the actual starting and final values.

@@ -67,6 +67,9 @@ from permanent nullifier rent, actual transaction fees, allowed upload repair
 and service margin. Exclude refundable staging rent from the net user charge.
 The operator's gross cap must separately cover staging rent, permanent markers,
 all potential broadcasts, cleanup reserve and minimum remaining public balance.
+The invited-cohort tooling does not take the example values: it pins `fee`
+3,000,000 and `gross_cap` 100,000 and refuses any other relay configuration
+(`tools/native_pilot_cohort.py`, `tools/native_cohort_service.py`).
 
 At most 64 lifetime jobs and 8 jobs per member are allowed by the current schema;
 configuration can lower these limits. Completed/aborted jobs keep their slots
@@ -80,13 +83,18 @@ an interrupted partial upload is closed, not regenerated or blindly retried.
 Activate `SHIELDED_FEE_ACTIVATION_ID` through the chain's reviewed feature process.
 New disposable genesis configurations enable it. Existing ledgers/genesis files
 are preserved; copying a new wallet or gateway alone cannot activate native V3
-acceptance. Build `native-validator` in the same root workspace to link the exact
+acceptance. Build the validator in the same root workspace to link the exact
 native adapter and feature set; never test this upgrade with an older validator
-binary. This target reuses the imported validator CLI entrypoint and root lockfile.
+binary. The local scripts build and start `agave-validator`
+(`sh tools/build_localnet.sh`, `tools/localnet.py`); the `native-validator`
+target in `node/localnet` reuses the same imported validator CLI entrypoint and
+root lockfile.
 
 ## Acceptance
 
-On Linux, build native-wallet (all binaries), native-localnet and native-validator.
+On Linux, build native-wallet (all binaries), native-localnet and agave-validator
+(`sh tools/build_localnet.sh` builds the last two; the harness starts
+`target/debug/agave-validator` through `tools/localnet.py`).
 Run `python3 -B tools/shielded_fees_localnet.py --name f54a` only with a new fixture
 name. It refuses macOS and existing fixture roots. Test listeners are loopback
 only and are shut down after the run. The disposable public-key genesis is not

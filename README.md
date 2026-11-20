@@ -135,6 +135,8 @@ build caches.
 
 ## Documentation
 
+The documentation site is at <https://zolana.com/docs>.
+
 Runbooks describe how to run one tool or procedure. Most were written for local
 rehearsals on one development machine, so amounts, limits and paths in them are
 development values.
@@ -183,7 +185,7 @@ development values.
 - **Design notes:** [privacy and delivery review](docs/privacy-boundary-LOCAL-070.md),
   [post-quantum migration plan](docs/post-quantum-roadmap.md),
   [module boundaries](docs/refactoring-plan.md),
-  [browser storage adapter](clients/browser-wallet/storage.README.txt),
+  [browser storage adapter](clients/browser-wallet/storage.js),
   [Agave 4.3.2 candidate](node/candidate/README.md).
 - **Decisions:** numbered records under [docs/decisions/](docs/decisions/).
 
