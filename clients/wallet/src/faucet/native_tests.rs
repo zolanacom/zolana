@@ -3,7 +3,7 @@
 use super::*;
 use crate::{access, connection::Endpoint};
 
-const PASSWORD: &[u8] = b"independent-native-cohort-password";
+pub(super) const PASSWORD: &[u8] = b"independent-native-cohort-password";
 
 fn source(pool_format: &str) -> TesterProfile {
     TesterProfile {

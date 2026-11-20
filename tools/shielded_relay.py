@@ -92,6 +92,10 @@ def native_options(config):
 
 # Six lifetime jobs for each wallet of the largest plannable 500-wallet cohort.
 MAX_JOBS = 3000
+# Most relay children that may run at once. One is the original serial worker.
+# Each job keeps its own directory, lock and journals, so more workers share
+# only the payer account, the private RPC and the service's CPU allowance.
+MAX_WORKERS = 4
 
 
 class RelayCapacityError(ValueError):
@@ -139,8 +143,12 @@ class Relay:
             self.mutex = threading.Lock()
             self.stop = threading.Event()
             self.wake = threading.Event()
-            self.child = None
+            self.broken = threading.Event()
+            self.width = 1
+            self.held = {}      # job name -> member, for every job a worker holds
+            self.children = {}  # job name -> its running child
             self.worker = None
+            self.helpers = []
 
         except BaseException:
             # A retained initialization traceback can keep this object alive.
@@ -230,62 +238,104 @@ class Relay:
                             signature=value.get('signature'))
             return dict(id=params[0], state='pending')
 
+    def claim(self, path):
+        """Reserve one job for the calling worker, or refuse it.
+
+        No two workers hold the same job, and none holds a second job of a
+        member whose job is running: a wallet's payments keep their order, and
+        two proofs that spend the same note are never sent side by side.
+        """
+        with self.mutex:
+            if path.name in self.held:
+                return False
+            member = json.loads(private(path / 'owner.json')) if self.width > 1 else None
+            if member is not None and member in self.held.values():
+                return False
+            self.held[path.name] = member
+            return True
+
+    def release(self, path):
+        with self.mutex:
+            self.held.pop(path.name, None)
+
     def work_once(self):
         for path in sorted(self.jobs.iterdir()):
             if self.stop.is_set(): return
             self.check_transport(path)
             if (path / 'done').exists() and not self.pending(path): continue
-            tries = json.loads(private(path / 'tries.json')) if (path / 'tries.json').exists() else 0
-            if tries >= 3 and not self.pending(path) and not (path / 'outcome.json').exists():
-                save(path / 'outcome.json', dict(accepted=False, aborted=True))
-                save(path / 'done', True)
-                continue
-            save(path / 'tries.json', tries + 1)
-            args = [self.config['binary'], 'relay', '--network', self.config['network_file'],
-                    '--rpc', self.config['rpc'], '--payer', self.config['payer_file'], '--job', str(path),
-                    '--gross-cap', str(self.config['gross_cap']), '--fee', str(self.config['fee'])]
-            if self.native_ingress is not None:
-                args += ['--native-ingress', self.native_ingress, '--pool-format', 'NPOOL004']
-            if self.config.get('rpc_access_file'):
-                args += ['--rpc-access-file', self.config['rpc_access_file']]
-            # One proof/worker at a time; an unknown transaction retains its
-            # original journals. Never reset a cap or start a second payment.
-            with self.mutex:
-                if self.stop.is_set(): return
-                self.child = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    env=dict(os.environ, RAYON_NUM_THREADS='2'))
-                child = self.child
+            if not self.claim(path): continue
             try:
-                child.wait(timeout=180)
-            except subprocess.TimeoutExpired:
-                child.kill(); child.wait()
+                self.attempt(path)
             finally:
-                with self.mutex: self.child = None
-            if child.returncode == 0 and (path / 'outcome.json').exists() and not self.pending(path):
-                save(path / 'done', True)
+                self.release(path)
 
-    def start(self):
+    def attempt(self, path):
+        """One bounded try at a job the calling worker holds."""
+        # Another worker may have finished this job before it was claimed.
+        if (path / 'done').exists() and not self.pending(path): return
+        tries = json.loads(private(path / 'tries.json')) if (path / 'tries.json').exists() else 0
+        if tries >= 3 and not self.pending(path) and not (path / 'outcome.json').exists():
+            save(path / 'outcome.json', dict(accepted=False, aborted=True))
+            save(path / 'done', True)
+            return
+        save(path / 'tries.json', tries + 1)
+        args = [self.config['binary'], 'relay', '--network', self.config['network_file'],
+                '--rpc', self.config['rpc'], '--payer', self.config['payer_file'], '--job', str(path),
+                '--gross-cap', str(self.config['gross_cap']), '--fee', str(self.config['fee'])]
+        if self.native_ingress is not None:
+            args += ['--native-ingress', self.native_ingress, '--pool-format', 'NPOOL004']
+        if self.config.get('rpc_access_file'):
+            args += ['--rpc-access-file', self.config['rpc_access_file']]
+        # One child for each job; an unknown transaction retains its original
+        # journals. Never reset a cap or start a second payment. Two workers
+        # use one thread each, so their proofs take the CPU one worker took.
+        with self.mutex:
+            if self.stop.is_set(): return
+            child = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=dict(os.environ, RAYON_NUM_THREADS='2' if self.width == 1 else '1'))
+            self.children[path.name] = child
+        try:
+            child.wait(timeout=180)
+        except subprocess.TimeoutExpired:
+            child.kill(); child.wait()
+        finally:
+            with self.mutex: self.children.pop(path.name, None)
+        if child.returncode == 0 and (path / 'outcome.json').exists() and not self.pending(path):
+            save(path / 'done', True)
+
+    def start(self, workers=1):
         if self.worker is not None: raise ValueError('relay worker already started')
+        if type(workers) is not int or not 1 <= workers <= MAX_WORKERS:
+            raise ValueError('relay workers must be an integer from 1 to %d' % MAX_WORKERS)
+        self.width = workers
+        self.helpers = [threading.Thread(target=self.work, daemon=True) for _ in range(workers - 1)]
         self.worker = threading.Thread(target=self.work, daemon=True)
-        self.worker.start()
+        for thread in [self.worker] + self.helpers:
+            thread.start()
 
     def work(self):
-        while not self.stop.is_set():
-            # Clear before scanning: a publication during the scan must still
-            # wake the following wait. Keep the periodic scan for old jobs,
-            # cross-process publications and recovery without an event.
-            self.wake.clear()
-            self.work_once()
-            if not self.stop.is_set():
-                self.wake.wait(1)
+        try:
+            while not self.stop.is_set() and not self.broken.is_set():
+                # Clear before scanning: a publication during the scan must still
+                # wake the following wait. Keep the periodic scan for old jobs,
+                # cross-process publications and recovery without an event.
+                self.wake.clear()
+                self.work_once()
+                if not self.stop.is_set():
+                    self.wake.wait(1)
+        except BaseException:
+            # A worker that fails ends every worker, so the supervisor that
+            # watches the first one sees the loss and no capacity vanishes quietly.
+            self.broken.set(); self.wake.set()
+            raise
 
     def close(self):
         with self.mutex:
             self.stop.set()
             self.wake.set()
-            if self.child is not None:
-                self.child.kill(); self.child.wait()
-        if self.worker is not None:
-            self.worker.join(timeout=15)
-            if self.worker.is_alive(): raise RuntimeError("relay worker failed to stop; lock retained")
+            for child in self.children.values():
+                child.kill(); child.wait()
+        for thread in ([] if self.worker is None else [self.worker]) + self.helpers:
+            thread.join(timeout=15)
+            if thread.is_alive(): raise RuntimeError("relay worker failed to stop; lock retained")
         self.lock_file.close()

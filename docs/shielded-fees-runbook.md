@@ -77,6 +77,30 @@ expiry and nullifier accounts. Per-attempt gas debits reuse the durable gross-ca
 journal. Unknown pending transactions are resolved canonically before cleanup;
 an interrupted partial upload is closed, not regenerated or blindly retried.
 
+### Relay capacity and workers
+
+One worker runs one child at a time and waits for that job's finality before it
+starts the next. A wallet's proof expires 512 slots after it is built, so a
+burst is served only while its proofs are still valid: with 0.2-second slots
+and about five seconds a job, one worker relays about twelve payments a minute
+(about 700 an hour), and about twenty from one burst before the proofs queued
+behind them expire. An expired job is aborted after its three tries and still
+counts against the member's lifetime jobs.
+
+`Relay.start(workers)` accepts 1 to 4 workers; `start()` keeps the single
+worker. With more than one, a job is held by exactly one worker, two jobs of
+the same member never run together (a wallet's payments keep their order and
+two proofs spending one note are never sent side by side), each child runs with
+one proof thread instead of two, and a worker that fails ends all of them so
+the supervising service notices. Every job keeps its own directory, lock and
+journals. What workers share is the payer account, the private RPC and the
+service's CPU allowance, which the grant worker also uses under its own time
+limit; the payer's balance check is not atomic across jobs, so keep the payer
+funded well above one job's cap for each worker. The cohort service starts one
+worker (`RELAY_WORKERS` in `tools/native_cohort_service.py`). Raise it only
+after measuring grant duration and RPC latency on the host with that many
+relay children running.
+
 Activate `SHIELDED_FEE_ACTIVATION_ID` through the chain's reviewed feature process.
 New disposable genesis configurations enable it. Existing ledgers/genesis files
 are preserved; copying a new wallet or gateway alone cannot activate native V3
