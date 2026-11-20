@@ -259,6 +259,22 @@ Known limits:
   documents were measured by the project on its development machines. They are
   not independent benchmarks.
 
+## Token
+
+ZOL launches first as a token on Solana, to reach users and wallets where they
+already are while the Zolana network is in development.
+
+Token address on Solana:
+
+```
+UQLWvkwiSsnViuVBy7oArMtzb5RAZyrdJ79amQFrzoL
+```
+
+A bridge is planned: holders will lock ZOL on Solana and mint the same amount
+on the Zolana network. The bridge is not built yet and has no release date.
+Until it exists, the Solana token and the devnet are separate, and devnet coins
+remain valueless test coins. Nothing in this repository implements the bridge.
+
 ## Licence and third-party code
 
 First-party code is under the MIT licence; see [LICENSE](LICENSE).
