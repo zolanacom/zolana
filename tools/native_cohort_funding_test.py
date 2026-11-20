@@ -37,6 +37,38 @@ class WireTests(unittest.TestCase):
             with self.assertRaises(ValueError):funding.un58(bad,32)
 
 
+class PlanSizeTests(unittest.TestCase):
+    """Plan-size guards that run before any signer, journal or allocation RPC."""
+    def plan(self,size):
+        value=dict(format='zolana-native-cohort-plan-v1',network={'network':[67]*32,
+            'genesis_hash':funding.b58(bytes([9])*32)},pool_format='NPOOL004',cohort_size=size,
+            private_grant=20_000_000,gas_grant=0,attempts=3,payment_cap=150_000_000,
+            private_budget=size*20_000_000,public_budget=size*450_000_000,
+            source_private_address='npriv1'+'A'*90,source_fee_address=funding.b58(bytes([6])*32))
+        for name in ('source_wallet','password','source_profile','public_profile','relay_policy','faucet_policy','admission_policy'):
+            value[name+'_sha256']='a'*64
+        return value
+
+    def test_only_the_scaled_budget_of_a_validated_cohort_size_reaches_allocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();root.chmod(0o700);payer=funding.b58(bytes([1])*32);calls=[]
+            def rpc(method,params):
+                calls.append(method);return funding.b58(bytes([1])*32)  # A foreign genesis stops before any signer.
+            plan=self.plan(200);self.assertEqual(plan['public_budget'],90_000_000_000)
+            message=funding.message(payer,plan['source_fee_address'],funding.b58(bytes([3])*32),plan['public_budget'])
+            self.assertEqual(len(message),150);self.assertEqual(struct.unpack('<IQ',message[138:]),(2,90_000_000_000))
+            invalid=[dict(plan,public_budget=4_500_000_000),dict(plan,private_budget=200_000_000),dict(plan,cohort_size=10),
+                     dict(plan,cohort_size=True),self.plan(0),self.plan(501)]
+            for value in invalid:
+                with self.subTest(size=value['cohort_size']),self.assertRaises(ValueError):
+                    funding.fund_public(root,value,rpc,root/'relay.key',payer)
+            self.assertEqual(calls,[]);self.assertFalse((root/'funding').exists())
+            for size in (10,200,500):
+                with self.subTest(size=size),self.assertRaisesRegex(ValueError,'genesis mismatch'):
+                    funding.fund_public(root,self.plan(size),rpc,root/'relay.key',payer)
+            self.assertEqual(calls,['getGenesisHash']*3);self.assertFalse((root/'funding/public.json').exists())
+
+
 class RPC:
     def __init__(self,plan,payer):
         self.plan=plan;self.payer=payer;self.calls=[];self.packets=[]
@@ -141,6 +173,20 @@ class FundingTests(unittest.TestCase):
         self.assertEqual(len(self.rpc.packets),1)
         self.journal.unlink()
         with self.assertRaisesRegex(ValueError,'journal missing'):self.run_funding()
+        self.assertEqual(len(self.rpc.packets),1)
+
+    def test_two_hundred_wallet_plan_allocates_its_scaled_budget_exactly_once(self):
+        self.plan.update(cohort_size=200,private_budget=4_000_000_000,public_budget=90_000_000_000)
+        short=self.root/'short';short.mkdir(mode=0o700);rpc=RPC(self.plan,self.payer)
+        rpc.payer_balance=90_000_000_000+5000+funding.RETAIN-1
+        with self.assertRaises(ValueError):self.run_funding(root=short,rpc=rpc)
+        self.assertEqual(rpc.packets,[]);self.assertFalse((short/'funding/public.json').exists())
+        self.rpc.payer_balance=90_000_000_000+5000+funding.RETAIN
+        self.pending();self.rpc.final=True;receipt=self.run_funding()
+        self.assertEqual(receipt['amount'],90_000_000_000)
+        self.assertEqual(receipt['plan_sha256'],hash_value(self.plan))
+        ten=dict(self.plan,cohort_size=10,private_budget=200_000_000,public_budget=4_500_000_000)
+        with self.assertRaises(ValueError):self.run_funding(plan=ten)
         self.assertEqual(len(self.rpc.packets),1)
 
     def test_tampered_plan_target_policy_signature_and_packet_fail_without_broadcast(self):

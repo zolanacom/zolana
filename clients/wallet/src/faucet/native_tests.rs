@@ -130,7 +130,7 @@ fn native_capacity_never_expands_or_reinitializes_a_legacy_root() {
     let directory = tempfile::tempdir().unwrap();
     let profile = source("NPOOL004");
     let file = profile_file(directory.path(), &profile);
-    for count in [0, 11, 100] {
+    for count in [0, NATIVE_MAX_CLAIMS + 1, 1000, usize::MAX] {
         let root = directory.path().join(format!("invalid-capacity-{count}"));
         assert!(initialize_native(&root, &file, PASSWORD, count, None).is_err());
         assert!(!root.exists());
@@ -147,13 +147,99 @@ fn native_capacity_never_expands_or_reinitializes_a_legacy_root() {
 }
 
 #[test]
+fn native_capacity_is_bounded_by_the_largest_plannable_cohort() {
+    assert_eq!(NATIVE_MAX_CLAIMS, 500);
+    let directory = tempfile::tempdir().unwrap();
+    let profile = source("NPOOL004");
+    let file = profile_file(directory.path(), &profile);
+    for (count, private, public) in [
+        (1, 20_000_000u64, 450_000_000u64),
+        (200, 4_000_000_000, 90_000_000_000),
+        (500, 10_000_000_000, 225_000_000_000),
+    ] {
+        let root = directory.path().join(format!("capacity-{count}"));
+        let receipt = initialize_native(&root, &file, PASSWORD, count, None).unwrap();
+        assert_eq!(receipt["max_claims"], count);
+        assert_eq!(receipt["private_units_required"], private);
+        assert_eq!(receipt["conservative_public_units"], public);
+        let (_, ledger) = load(&root).unwrap();
+        assert_eq!(ledger.policy.max_claims, count);
+        assert_eq!(ledger.policy.private_amount, 20_000_000);
+        assert_eq!(access_context(&root).unwrap().1, count);
+    }
+    // A stored policy is re-checked at every load, not only at initialization.
+    let root = directory.path().join("capacity-500");
+    let original = fs::read(root.join("claims.json")).unwrap();
+    for count in [0, 501, 1000] {
+        let mut ledger: Value = serde_json::from_slice(&original).unwrap();
+        ledger["policy"]["max_claims"] = json!(count);
+        save(&root.join("claims.json"), &ledger).unwrap();
+        assert!(load(&root).is_err(), "native capacity {count} accepted");
+    }
+    replace(&root.join("claims.json"), &original).unwrap();
+    assert_eq!(load(&root).unwrap().1.policy.max_claims, 500);
+    // Invitations and daily admissions take their bound from that capacity alone.
+    let mut public = profile.clone();
+    public.invite_required = true;
+    public.rpc.url = "http://127.0.0.1:18898".into();
+    public.faucet = Some(Endpoint {
+        transport: "loopback-http".into(),
+        url: "http://127.0.0.1:8780".into(),
+    });
+    let path = directory.path().join("invited.json");
+    fs::write(&path, serde_json::to_vec(&public).unwrap()).unwrap();
+    for daily in [0, 501] {
+        assert!(access::initialize(&root, &path, daily, 2000).is_err());
+        assert!(!root.join("admission.json").exists());
+    }
+    let admission = access::initialize(&root, &path, 500, 2000).unwrap();
+    assert_eq!(admission["max_invites"], 500);
+    assert_eq!(admission["daily_admissions"], 500);
+    assert_eq!(access::info(&root).unwrap()["max_invites"], 500);
+}
+
+#[test]
+fn ten_wallet_native_state_written_before_the_larger_bound_loads_unchanged() {
+    let (_directory, root, _) = fixture(10);
+    let (_, ledger) = load(&root).unwrap();
+    // Exact bytes a ten-wallet native faucet wrote under the former 1..10 bound.
+    let stored = format!(
+        concat!(
+            "{{\n  \"policy\": {{\n    \"format\": \"native-test-faucet-native-v1\",\n",
+            "    \"network\": {},\n    \"source_fee_address\": \"{}\",\n",
+            "    \"source_private_address\": \"{}\",\n    \"max_claims\": 10,\n",
+            "    \"private_amount\": 20000000,\n    \"gas_amount\": 0,\n",
+            "    \"max_attempts\": 3,\n    \"payment_cap\": 150000000\n  }},\n  \"claims\": []\n}}"
+        ),
+        serde_json::to_string_pretty(&ledger.policy.network)
+            .unwrap()
+            .replace('\n', "\n    "),
+        ledger.policy.source_fee_address,
+        ledger.policy.source_private_address,
+    );
+    assert_eq!(
+        fs::read(root.join("claims.json")).unwrap(),
+        stored.as_bytes()
+    );
+    let (_, reloaded) = load(&root).unwrap();
+    assert_eq!(reloaded.policy.max_claims, 10);
+    assert_eq!(access_context(&root).unwrap().1, 10);
+    assert_eq!(
+        fs::read(root.join("claims.json")).unwrap(),
+        stored.as_bytes()
+    );
+}
+
+#[test]
 fn native_policy_rejects_amount_mode_capacity_and_profile_downgrades() {
     let (_directory, root, _) = fixture(10);
     let original = fs::read(root.join("claims.json")).unwrap();
     for (field, value) in [
         ("private_amount", json!(1_000_000)),
         ("gas_amount", json!(1)),
-        ("max_claims", json!(11)),
+        ("max_claims", json!(0)),
+        ("max_claims", json!(NATIVE_MAX_CLAIMS + 1)),
+        ("max_claims", json!(true)),
         ("max_attempts", json!(4)),
         ("payment_cap", json!(150_000_001)),
         ("format", json!("native-test-faucet-v1")),
@@ -387,4 +473,68 @@ fn missing_native_admission_state_fails_closed_without_resetting_claim_capacity(
     assert!(accept(&root, claim).is_err());
     assert_eq!(fs::read(root.join("claims.json")).unwrap(), claims);
     assert!(initialize_native(&root, &root.join("profile.json"), PASSWORD, 10, None).is_err());
+}
+
+const LEGACY_CLAIMS: &[u8] = include_bytes!("legacy_ten_wallet/claims.json");
+const LEGACY_ADMISSION: &[u8] = include_bytes!("legacy_ten_wallet/admission.json");
+const LEGACY_FILES: [(&str, &[u8]); 3] = [
+    (
+        "profile.json",
+        include_bytes!("legacy_ten_wallet/profile.json"),
+    ),
+    ("claims.json", LEGACY_CLAIMS),
+    ("admission.json", LEGACY_ADMISSION),
+];
+
+#[test]
+fn ten_wallet_ledger_written_before_the_enlargement_loads_and_is_left_byte_identical() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("native-cohort");
+    for (name, bytes) in LEGACY_FILES {
+        write_private_new(&root.join(name), bytes).unwrap();
+    }
+    let (profile, ledger) = load(&root).unwrap();
+    assert_eq!(profile.pool_format, "NPOOL004");
+    assert_eq!(ledger.policy.format, NATIVE_FAUCET_FORMAT);
+    assert_eq!(ledger.policy.max_claims, 10);
+    assert!(ledger.policy.invite_required);
+    assert_eq!(ledger.claims.len(), 10);
+    // An unchanged ledger is also written back byte for byte.
+    assert_eq!(serde_json::to_vec_pretty(&ledger).unwrap(), LEGACY_CLAIMS);
+    let info = access::info(&root).unwrap();
+    assert_eq!(info["issued"], 10);
+    assert_eq!(info["max_invites"], 10);
+    for (name, bytes) in LEGACY_FILES {
+        assert_eq!(fs::read(root.join(name)).unwrap(), bytes, "{name}");
+    }
+    assert_eq!(fs::read_dir(&root).unwrap().count(), LEGACY_FILES.len());
+}
+
+#[test]
+fn largest_cohort_ledgers_stay_within_the_one_mebibyte_read_bound() {
+    // Both ledgers are read with a 1 MiB bound on every command. Fill every
+    // place, widen every counter and add the most ingress records allowed.
+    let mut claims: Value = serde_json::from_slice(LEGACY_CLAIMS).unwrap();
+    let claim = claims["claims"][0].clone();
+    claims["claims"] = vec![claim; NATIVE_MAX_CLAIMS].into();
+    assert!(serde_json::to_vec_pretty(&claims).unwrap().len() < 1024 * 1024);
+    let mut admission: Value = serde_json::from_slice(LEGACY_ADMISSION).unwrap();
+    let widest = json!({"period":u64::MAX,"count":u64::MAX});
+    let mut invitation = admission["invitations"][0].clone();
+    invitation["redeem_by"] = u64::MAX.into();
+    for field in ["admitted_at", "access_until"] {
+        invitation["member"][field] = u64::MAX.into();
+    }
+    for field in ["rpc", "faucet"] {
+        invitation["member"][field] = widest.clone();
+    }
+    admission["invitations"] = vec![invitation; NATIVE_MAX_CLAIMS].into();
+    let peer = "f".repeat(64);
+    admission["edge"] = vec![json!({"channel":"faucet","peer":peer,"bucket":widest}); 512].into();
+    for field in ["admissions", "global_rpc", "global_faucet"] {
+        admission[field] = widest.clone();
+    }
+    admission["last_time"] = u64::MAX.into();
+    let bytes = serde_json::to_vec_pretty(&admission).unwrap().len();
+    assert!(bytes < 1024 * 1024, "{bytes}");
 }
