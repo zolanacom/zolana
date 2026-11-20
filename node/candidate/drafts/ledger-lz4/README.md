@@ -1,8 +1,10 @@
-# Draft: LZ4 compression for the large ledger columns
+# LZ4 compression for the large ledger columns
 
-Status: **draft, not built into any release.** The validator patch has not yet
-been compiled against the full workspace and nothing here has run on Linux
-x86-64. See "What has and has not been verified" before relying on any of it.
+Status: **running on the public devnet since 20 November 2026.** The patch was
+built on Linux x86-64, passed the runner's test gate, and the three devnet
+ledgers were rewritten once with the tool in this directory. It is kept under
+`drafts/` because it is not yet part of `reconstruction-plan.json`; see
+"What has and has not been verified".
 
 ## Why
 
@@ -70,15 +72,25 @@ zolana-ledger-shrink shrink  --db /abs/path/rocksdb --receipt /abs/new.json
 
 ## Measurements
 
-All on macOS (Apple silicon), on copies, with the tool in this directory.
+Devnet upgrade, 20 November 2026 (Linux x86-64, three validators, chain stopped
+for 34 minutes in total):
 
 | Measurement | Result |
 | --- | --- |
-| Three devnet ledger copies, on disk | about 1,597 MB to about 284 MB each, 5.6x |
-| Data shreds | 8.9x |
-| Coding shreds | 3.7x |
+| Each validator ledger, on disk | 26.1 GiB to 4.1 GiB, 6.4x |
+| All three ledgers | 78 GiB to 12 GiB |
+| Content digests before and after, every column family, all three ledgers | identical |
+| Rewritten files carrying the LZ4 table property | all |
+| Block production after restart on the rewritten ledgers | normal, 5.00 slots per second |
+| Newest `OPTIONS-*` in each ledger | `kLZ4Compression` for `data_shred`, `kNoCompression` for `root` |
+
+Earlier measurements on copies (macOS, Apple silicon):
+
+| Measurement | Result |
+| --- | --- |
+| Three earlier, smaller devnet ledger copies | about 1,597 MB to about 284 MB each, 5.6x |
+| Data shreds / coding shreds | 8.9x / 3.7x |
 | 30 GB synthetic database, shrink with full content check | 103 s |
-| Content digests before and after, all column families | identical in all four runs |
 
 Two things compression does not change: write-ahead logs are never compressed,
 and a deduplicating backup that already compresses its input gains little
@@ -88,26 +100,28 @@ and a deduplicating backup that already compresses its input gains little
 
 Done:
 
-- the patch applies cleanly to a freshly reconstructed source tree;
-- both changed files parse with rustfmt (edition 2024);
-- a reduced model of the changed function and its test compiles and passes;
-- the shrink tool builds and passes its content check on the four databases
-  above, on macOS.
+- the patch applies cleanly to a freshly reconstructed source tree, on macOS
+  and on the Linux build host;
+- validator built on Linux x86-64 with the patch; the runner test gate passes
+  with 130 tests: the 129 retained cases plus
+  `ledger_compression_tests::pilot_config_compresses_new_ledger_blocks_and_never_prunes`;
+- the shrink tool built on Linux x86-64; trial on a copy of a real 19.9 GiB
+  ledger (2.9 GiB afterwards, contents identical), then the three live ledgers;
+- the patched validator started on the rewritten ledgers and the devnet has
+  been producing blocks on it since.
 
 Not done:
 
-- the patched validator has not been compiled or tested against the full
-  workspace;
-- neither the tool nor the patched validator has run on Linux x86-64;
-- no replay of a compressed ledger by a patched validator;
-- compression ratio on later, fuller blocks.
+- `blockstore_db::tests::test_should_enable_cf_compression` in the ledger crate
+  was not run on the build host (only the runner gate was);
+- on-disk growth per hour with compression on has not yet been measured over a
+  full window;
+- the patch is written against the runner revision that follows LOCAL-098-r3
+  and is not wired into `reconstruction-plan.json`.
 
-## Before this can ship
+## Remaining
 
-1. Build the validator with the patch and run the runner test gate plus
-   `blockstore_db::tests::test_should_enable_cf_compression`.
-2. Replay drill on a disposable ledger copy: shrink it, start the patched
-   validator on it, and confirm the newest `OPTIONS-*` file shows
-   `kLZ4Compression` for `data_shred`, `code_shred`, `index` and `meta`, and
-   `kNoCompression` for `root`.
-3. Size backup storage for one full re-upload of the rewritten ledger.
+1. Run the ledger crate test above on the build host.
+2. Publish the intermediate runner revision and add this patch to the
+   reconstruction plan, then move it out of `drafts/`.
+3. Record measured growth per hour over several windows.
