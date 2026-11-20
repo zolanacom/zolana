@@ -1,4 +1,5 @@
-"""The cohort gateway is built with bulk authorization; no listener is opened."""
+"""The cohort gateway is built with bulk authorization, the compact retained-page
+charge and the optional first-sync mirror; no listener is opened."""
 import os
 from pathlib import Path
 import sys
@@ -12,14 +13,14 @@ import native_cohort_service as service
 
 
 class BulkAuthorization(unittest.TestCase):
-    def test_gateway_is_constructed_with_authorize_many_and_nothing_else_new(self):
+    def test_gateway_is_constructed_with_authorize_many_the_compact_charge_and_the_retained_source(self):
         service.select_mode(False)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.addCleanup(service.select_mode, False)
         root = Path(temp.name).resolve() / "cohort"
         root.mkdir(mode=0o700)
-        stop, seen = threading.Event(), []
+        stop, seen, apps = threading.Event(), [], []
 
         class Parent:
             def __init__(self, faucet_root, password, binary):
@@ -31,6 +32,9 @@ class BulkAuthorization(unittest.TestCase):
         class Gateway:
             def __init__(self, faucet, *args, **kwargs):
                 seen.append((faucet.arguments, args, kwargs))
+                apps.append(self)
+                # gateway() reads the network identity for the retained source.
+                self.info = dict(network=dict(network="stand-in", genesis_hash="stand-in"))
                 self.relay = types.SimpleNamespace(native_ingress="127.0.0.1:1", close=lambda: None)
                 stop.set()  # leave before any activation, listener or worker
 
@@ -54,8 +58,13 @@ class BulkAuthorization(unittest.TestCase):
         arguments, positional, keywords = seen[0]
         self.assertEqual(arguments, (root / "faucet", root / "password", service.PREFIX / "bin/native-faucet"))
         self.assertEqual(positional, ())
-        self.assertEqual(keywords, dict(relay_root=root / "relay", authorize_many=True))
+        self.assertEqual(keywords, dict(relay_root=root / "relay", authorize_many=True, compact_headers_per_unit=256))
         self.assertIs(keywords["authorize_many"], True)
+        history = apps[0].history
+        self.assertIsInstance(history, service.RetainedFirstSync)
+        self.assertEqual(history.root, service.RETAINED)
+        self.assertEqual(history.network, apps[0].info["network"])
+        self.assertIsNone(history.inner)  # nothing is opened or looked for while the gateway is built
 
 
 if __name__ == "__main__":

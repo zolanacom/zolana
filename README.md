@@ -152,6 +152,7 @@ development values.
   [crash and fork faults](docs/fault-recovery-runbook.md),
   [offline and damaged snapshots](docs/offline-recovery-runbook.md),
   [retained history](docs/recovery-history-runbook.md),
+  [first-sync mirror](docs/first-sync-mirror-runbook.md),
   [history replica](docs/history-replica-runbook.md),
   [canonical archive](docs/canonical-archive-runbook.md),
   [gateway acknowledgement loss](docs/gateway-pending-recovery-runbook.md).

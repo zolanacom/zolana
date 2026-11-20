@@ -155,6 +155,8 @@ class RelayWorkerCount(unittest.TestCase):
         class Gateway:
             def __init__(self, *_, **__):
                 self.relay = types.SimpleNamespace(native_ingress="127.0.0.1:1", start=start, close=lambda: None)
+                # gateway() reads the network identity for the retained source.
+                self.info = dict(network=dict(network="stand-in", genesis_hash="stand-in"))
 
         base = types.SimpleNamespace(
             sandbox=lambda config, role: 1, stop_event=lambda: stop, real_directory=lambda *a: None,
