@@ -61,6 +61,7 @@ anything here.
 | `clients/browser-lab/` | Loopback page that measures synthetic proofs in a browser ([README](clients/browser-lab/README.md)) |
 | `clients/wallet-ui/` | Device-local wallet UI, served by `tools/wallet_ui.py` |
 | `clients/network-portal/` | Network portal and read-only explorer, served by `tools/network_portal.py` |
+| `sdk/` | Developer SDK 0.1: runnable Rust examples, the browser-core Wasm build script, TypeScript types and a JSON-RPC client ([README](sdk/README.md)) |
 | `tools/` | Build wrappers, local-network runners, operator services and their tests |
 | `docs/decisions/` | Architecture decisions |
 | `docs/` | Runbooks, design notes and the tester quick-start |

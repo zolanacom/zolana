@@ -12356,6 +12356,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zolana-sdk-examples"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "native-payments",
+ "native-wallet-core",
+ "native-wallet-seed",
+ "orchard",
+ "payment-lab",
+ "serde_json",
+ "zolana-browser-core",
+]
+
+[[package]]
 name = "zstd"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

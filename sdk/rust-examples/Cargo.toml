@@ -1,0 +1,21 @@
+[package]
+name = "zolana-sdk-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The three crates below do not depend on the vendored validator in node/agave.
+[dependencies]
+native-payments = { path = "../../protocol/payments" }
+native-wallet-core = { path = "../../clients/wallet-core" }
+native-wallet-seed = { path = "../../clients/wallet-seed" }
+orchard.workspace = true
+bs58 = "0.5"
+
+[dev-dependencies]
+# Public synthetic proof fixture and the browser core's public reference vector.
+payment-lab = { path = "../../clients/cli" }
+zolana-browser-core = { path = "../../clients/browser-core" }
+serde_json = "1"
