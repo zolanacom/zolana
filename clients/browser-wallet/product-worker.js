@@ -238,7 +238,7 @@ async function responseJSON(path, { raw, access, limit = 4096 } = {}) {
     if (!response.ok) {
       const error = publicFailure(response.status === 403 ? "access" : response.status === 429 ? "rate_limit" : "transport", response.status === 403 ? "Invitation or access is invalid, expired, revoked or bound to another wallet." :
         response.status === 429 ? "The testnet request limit was reached. Wait before checking this same wallet again." :
-        response.status === 409 ? "The current testnet admission capacity is full. Your wallet was preserved." :
+        response.status === 409 ? "This devnet cohort is full. The first cohort is limited to 10 wallets while network capacity is being raised, and every place is taken. Your wallet is saved on this device, but it cannot join, receive or send on this network until the next cohort opens. Nothing is wrong with your wallet." :
         "The gateway response is unavailable. Its outcome may be unknown; check this same wallet before retrying.");
       if (response.status === 502 && value && Object.keys(value).sort().join("|") === "automatic_retry|error|outcome" &&
           value.error === "upstream_unavailable" && value.outcome === "unknown" && value.automatic_retry === false) interruptedReadFailures.add(error);
@@ -278,7 +278,7 @@ async function rpc(method, params, at, value, unsigned = false, limit = 16 * 102
         response.error.data && !Array.isArray(response.error.data) &&
         Object.keys(response.error.data).join("|") === "scope") {
       if (response.error.data.scope === "member") fail("member_payment_limit", "This test wallet has reached its payment limit. Contact the testnet operator to continue.");
-      if (response.error.data.scope === "network") fail("network_payment_limit", "Testnet payment capacity is full. Contact the testnet operator to continue.");
+      if (response.error.data.scope === "network") fail("network_payment_limit", "The devnet has reached its shared limit for private payments in this cohort, so no new payment can be sent right now. Sending reopens when network capacity is raised.");
     }
     if (method === "getWalletSyncSnapshot" && response.error.code === -32601) fail("rpc_method_missing", "This gateway does not support the bounded wallet snapshot method.");
     fail("rpc", "The invited RPC could not supply complete finalized data. Your saved checkpoint was preserved.");
@@ -493,7 +493,7 @@ async function syncWallet({ rejectPending = false } = {}) {
   catch (error) { if (error.code !== "rpc_method_missing") throw error; }
   if (canonicalTail === null) {
     await checkAccess(); session.assertCurrent(at, value);
-    if (!session.admission.admitted) fail("access", "Join this test network with your invitation before syncing.");
+    if (!session.admission.admitted) fail("access", "This wallet has not joined the devnet yet, so it cannot sync. Use Join the test network first. If the cohort is full, joining reopens when the next cohort opens.");
   }
   if (snapshot === undefined) {
     const genesis = await rpc("getGenesisHash", [], at, value, true);

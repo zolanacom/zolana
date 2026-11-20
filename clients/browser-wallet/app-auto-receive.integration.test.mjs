@@ -157,7 +157,7 @@ function fixture(options = {}) {
 }
 
 let cases = 0;
-for (const [submissionLimit, message] of [["member", "This test wallet has reached its payment limit."], ["network", "Testnet payment capacity is full."]]) {
+for (const [submissionLimit, message] of [["member", "This test wallet has reached its payment limit."], ["network", "The devnet has reached its shared limit for private payments in this cohort."]]) {
   const f = fixture({ handlers: { send: async () => walletState({
     pendingPayment: true, authoritativeSync: false, paymentOutcome: "unknown", submissionLimit,
   }) } });
