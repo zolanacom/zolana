@@ -462,7 +462,7 @@ $("confirm-send").addEventListener("click", () => {
     if (result.paymentOutcome === "accepted") return "Payment finalized on Zolana. The recipient's unlocked wallet can now verify the incoming payment.";
     if (result.paymentOutcome === "expired-absent") return "This payment expired without execution. Your balance was rechecked; review again if you still want to send.";
     if (result.submissionLimit === "member") return "This test wallet has reached its payment limit. Check the saved original payment to finish recovery, then contact the testnet operator.";
-    if (result.submissionLimit === "network") return "Testnet payment capacity is full. Check the saved original payment to finish recovery, then contact the testnet operator.";
+    if (result.submissionLimit === "network") return "The devnet has reached its shared limit for private payments in this cohort. Check the saved original payment to finish recovery; new payments reopen when network capacity is raised.";
     return "The original payment is saved, but its outcome is not confirmed. Check the original payment before any new send.";
   });
 });
