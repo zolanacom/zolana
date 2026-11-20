@@ -16,12 +16,18 @@ use crate::{
     Error,
 };
 
-const MAGIC: &[u8; 8] = b"NPAY0001";
-const WITHDRAWAL_MAGIC: &[u8; 8] = b"NPAY0002";
-const SHIELDED_FEE_MAGIC: &[u8; 8] = b"NPAY0003";
-const ACTION_BYTES: usize = 884;
-const HEADER_BYTES: usize = 122;
+/// Tag of a deposit, a private send or a sponsor withdrawal.
+pub const MAGIC: &[u8; 8] = b"NPAY0001";
+/// Tag of a withdrawal bound to a recipient: 32 more bytes follow the sponsor.
+pub const WITHDRAWAL_MAGIC: &[u8; 8] = b"NPAY0002";
+/// Tag of a payment with a shielded fee: 8 more bytes follow the sponsor.
+pub const SHIELDED_FEE_MAGIC: &[u8; 8] = b"NPAY0003";
+/// Encoded size of one action.
+pub const ACTION_BYTES: usize = 884;
+/// Bytes before the first action of a [`MAGIC`] payment, from the tag to the action count.
+pub const HEADER_BYTES: usize = 122;
 
+#[derive(Debug)]
 pub struct DecodedPayment {
     pub context: AuthorizationContext,
     pub bundle: Bundle<Authorized, i64>,

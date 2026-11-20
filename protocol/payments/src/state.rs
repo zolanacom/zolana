@@ -18,7 +18,7 @@ pub const STATE_BYTES: usize = 8 + 32 + 8 + 8 + 8 + 1 + 32 * 32 + MAX_ROOTS * 32
 /// Fresh-network V4 state: frontier and slot checkpoints, without per-payment roots.
 pub const SLOT_STATE_BYTES: usize = 8 + 32 + 8 + 8 + 8 + 32 * 32 + 4 + MAX_ANCHOR_HISTORY_BYTES;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PoolState {
     pub network: [u8; 32],
     pub rent_floor: u64,

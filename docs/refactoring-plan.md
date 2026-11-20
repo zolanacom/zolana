@@ -50,7 +50,7 @@ offline checks and remaining limitations have been recorded.
 | Gateway and relay | Gateway POST handling separates framing, authorization, routing and response writing while retaining stage labels, deadlines, quotas and upstream response bytes. Relay construction releases its worker lock on every initialization failure, including failures whose traceback is retained. |
 | Release tooling | Installation construction separates trust and state loading while retaining pending-operation and anti-rollback checks. Lock ownership has one failure cleanup path. Existing service, archive, renewal, monitoring and signing modules retain their focused boundaries. |
 | Candidate provenance | `node/candidate/reconstruction-plan.json` declares all ten retained source transitions. `tools/reconstruct_native_candidate.py` verifies archive and patch identities, applies the complete chain to fresh output and writes final source identities. Historical patch and acceptance packages remain pinned. |
-| Contributor checks | `tools/check.sh --development-only` checks all ten first-party Rust crates, builds workspace CLI prerequisites and runs Rust, Python and Node regressions. Cargo compilation and tests use cached, locked dependencies. |
+| Contributor checks | `tools/check.sh --development-only` checks all eleven first-party Rust crates, builds workspace CLI prerequisites and runs Rust, Python and Node regressions. Cargo compilation and tests use cached, locked dependencies. |
 
 The scope review also covered protocol envelopes, authorization domains,
 anchors, pool/nullifier invariants, shared wallet scanning and encrypted state,

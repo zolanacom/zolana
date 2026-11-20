@@ -1,9 +1,11 @@
 //! Pins the values the examples print and the claims `sdk/README.md` makes.
 //! Offline. One test builds real proofs; the others are immediate.
 use native_payments::{
+    envelope,
     native_accounts::{nullifier_address, pool_address, PROGRAM_ID},
     state::{PoolState, SLOT_STATE_BYTES, STATE_BYTES},
-    wire,
+    verification::ACTION_COUNT,
+    wire, Error,
 };
 use native_wallet_core::{
     decode_address,
@@ -104,6 +106,10 @@ fn pool_state_sizes_tags_and_anchor_window() {
         (STATE_BYTES, &b"NPOOL003"[..])
     );
     assert_eq!(STATE_BYTES, 3_137);
+    // The pool state is printable, so a refused account can be unwrapped.
+    assert!(format!("{decoded:?}").starts_with("PoolState {"));
+    let refused = PoolState::decode(&legacy[..100]).unwrap_err();
+    assert_eq!(refused, Error::InvalidEncoding);
 }
 
 #[test]
@@ -119,7 +125,15 @@ fn deposit_has_the_documented_header_and_replays_into_a_balance() {
         .build(&alice, &state, [0x53; 32], 100, payment)
         .unwrap();
     assert_eq!(bytes.len(), 9_222);
-    assert_eq!(&bytes[..8], b"NPAY0001");
+    // The public layout constants describe exactly these bytes.
+    assert_eq!(wire::MAGIC, b"NPAY0001");
+    assert_eq!(wire::WITHDRAWAL_MAGIC, b"NPAY0002");
+    assert_eq!(wire::SHIELDED_FEE_MAGIC, b"NPAY0003");
+    assert_eq!((wire::HEADER_BYTES, wire::ACTION_BYTES), (122, 884));
+    let actions_end = wire::HEADER_BYTES + ACTION_COUNT * wire::ACTION_BYTES;
+    let proof_bytes = u32::from_le_bytes(bytes[actions_end..][..4].try_into().unwrap());
+    assert_eq!(bytes.len(), actions_end + 4 + proof_bytes as usize + 64);
+    assert_eq!(&bytes[..8], wire::MAGIC);
     assert_eq!(bytes[8..40], NETWORK);
     assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), 100);
     assert_eq!(i64::from_le_bytes(bytes[48..56].try_into().unwrap()), -25);
@@ -133,4 +147,15 @@ fn deposit_has_the_documented_header_and_replays_into_a_balance() {
     assert_eq!(state.balance().unwrap(), 25);
     assert_eq!(state.pool.backing, 25);
     assert!(state.accept(&decoded.bundle, &decoded.context, 1).is_err());
+    // Decoded payments and envelopes are printable, so refusals can be unwrapped.
+    assert!(format!("{decoded:?}").starts_with("DecodedPayment {"));
+    assert_eq!(
+        wire::decode(NETWORK, &bytes[..bytes.len() - 1]).unwrap_err(),
+        Error::InvalidLength
+    );
+    // Bare payment bytes are not an inline envelope.
+    assert_eq!(
+        envelope::decode(NETWORK, 1, &bytes).unwrap_err(),
+        Error::UnsupportedVersion
+    );
 }

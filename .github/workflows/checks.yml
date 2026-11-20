@@ -1,0 +1,95 @@
+# Checks for the packages that build without the vendored validator in
+# node/agave: the protocol library, the wallet libraries, the proof fixture
+# tool, the browser core and the SDK examples, plus the JavaScript suites.
+#
+# The validator, the native program, the command-line wallet and the Python
+# suites are not covered here. Run them locally with
+# `sh tools/check.sh --development-only`.
+name: Checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  # None of these packages has a dependency path into node/agave.
+  PACKAGES: >-
+    -p native-payments
+    -p native-wallet-core
+    -p native-wallet-seed
+    -p payment-lab
+    -p zolana-browser-core
+    -p zolana-sdk-examples
+
+jobs:
+  validator-independent:
+    name: Rust and JavaScript (validator-independent packages)
+    runs-on: ubuntu-latest
+    # Estimated at about ten minutes on a four-core runner, most of it compiling
+    # the proof system; the tests build real proofs. The limit leaves room for a
+    # slower runner.
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      # rust-toolchain.toml pins the channel with the minimal profile, which
+      # has neither rustfmt nor clippy.
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy --no-self-update
+
+      # The only native build input of these packages is a C compiler: the
+      # blake3 build script assembles its x86-64 routines with it, and rustc
+      # links with it. No C++ compiler, protoc, libclang or CMake is needed.
+      - name: Show tool versions
+        run: |
+          uname -srm
+          nproc
+          cc --version
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+          node --version
+          python3 --version
+
+      - name: Check formatting
+        run: sh tools/dev.sh fmt $PACKAGES -- --check
+
+      # tools/dev.sh keeps the dependency cache in .tools/cargo. Nothing is
+      # cached between runs: Cargo downloads what these packages need, at the
+      # versions in Cargo.lock.
+      - name: Run Clippy with warnings denied
+        run: sh tools/dev.sh clippy --locked --all-targets --no-deps $PACKAGES -- -D warnings
+
+      - name: Build the Rust tests
+        run: sh tools/dev.sh test --locked --no-run $PACKAGES
+
+      - name: Run the Rust tests
+        run: sh tools/dev.sh test --locked $PACKAGES
+
+      # One browser-wallet suite starts python3 to run the archival adapter in
+      # tools/. It needs no Python packages.
+      - name: Run the JavaScript tests
+        if: ${{ !cancelled() }}
+        run: node --test sdk/js/*.test.mjs clients/browser-wallet/*.test.mjs clients/network-portal/*.test.mjs

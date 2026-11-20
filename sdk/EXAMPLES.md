@@ -112,6 +112,7 @@ What it shows:
 - The layout of an `NPAY0001` payment: a 122-byte header, two 884-byte actions,
   the proof and a 64-byte binding signature. The other two variants insert a
   fee (`NPAY0003`) or a withdrawal recipient (`NPAY0002`) after the sponsor.
+  The sizes and tags are public constants of `native_payments::wire`.
 - The value balance is negative for a deposit, zero for a private send and
   positive when value leaves the pool.
 - The anchor here is the root of the empty note tree.

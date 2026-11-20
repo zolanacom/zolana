@@ -27,7 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = prover.build(&alice, &state, sponsor, 100, payment)?;
     println!("{} bytes", bytes.len());
 
-    // The fixed 122-byte header of a deposit, send or sponsor withdrawal.
+    // The fixed 122-byte header (wire::HEADER_BYTES) of a deposit, send or
+    // sponsor withdrawal. Its tag is wire::MAGIC.
+    assert_eq!(&bytes[..8], wire::MAGIC);
     println!("tag           {}", std::str::from_utf8(&bytes[..8])?);
     println!("network       {}", hex(&bytes[8..40]));
     let expiry = u64::from_le_bytes(bytes[40..48].try_into()?);
@@ -39,8 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("anchor        {}", hex(&bytes[88..120]));
     println!("flags {}, actions {}", bytes[120], bytes[121]);
     // Then: two 884-byte actions, a u32 proof length, the proof, a 64-byte signature.
-    let proof_bytes = u32::from_le_bytes(bytes[122 + 2 * 884..][..4].try_into()?);
+    let actions_end = wire::HEADER_BYTES + ACTION_COUNT * wire::ACTION_BYTES;
+    let proof_bytes = u32::from_le_bytes(bytes[actions_end..][..4].try_into()?);
     println!("proof         {proof_bytes} bytes");
+    assert_eq!(bytes.len(), actions_end + 4 + proof_bytes as usize + 64);
 
     // The decoder checks all of that and returns a typed Orchard bundle.
     // Decoding is not verification: see the verify_proof example.
@@ -56,11 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("decoded and re-encoded to identical bytes");
 
-    let truncated = wire::decode(NETWORK, &bytes[..bytes.len() - 1]).err();
-    println!("one byte short: {:?}", truncated.ok_or("accepted")?);
+    let truncated = wire::decode(NETWORK, &bytes[..bytes.len() - 1]).unwrap_err();
+    println!("one byte short: {truncated:?}");
     let unknown_tag = [b"NPAY9999".as_slice(), &bytes[8..]].concat();
-    let refused = wire::decode(NETWORK, &unknown_tag).err();
-    println!("unknown tag: {:?}", refused.ok_or("accepted")?);
+    let refused = wire::decode(NETWORK, &unknown_tag).unwrap_err();
+    println!("unknown tag: {refused:?}");
     // The single-transaction envelope carries shielded-fee payments only.
     let framed = envelope::encode(NETWORK, &bytes).err();
     println!(
