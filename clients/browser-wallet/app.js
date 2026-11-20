@@ -10,6 +10,13 @@ let paymentReview;
 let automaticReceive, preservingSendReview = false, reviewCancellation = null, automaticNotice = false;
 const IDLE_MS = 5 * 60 * 1000;
 const WORKER_IDLE_MS = 60 * 1000, WORKER_PROGRESS_LIMIT_MS = 15 * 60 * 1000;
+// History verification is bounded by its progress: each sixty seconds must report a new
+// block or stage, up to this ceiling. Every other long operation keeps fifteen minutes.
+const WORKER_HISTORY_LIMIT_MS = 4 * 60 * 60 * 1000;
+const historyActions = new Set(["sync", "automatic_sync"]);
+// First verification of this unlocked session: the highest block an automatic check has
+// reported, and the sample its time estimate is measured from. Cleared on every lock.
+let verificationMark = -1, verificationSample = null;
 const progressActions = new Set(["sync", "automatic_sync", "recover_pending", "quote_payment", "send"]);
 const foregroundProgressActions = new Set(["sync", "recover_pending", "quote_payment", "send"]);
 const workerProgressStages = new Set(["reading-finalized-state", "checking-retained-history", "verifying-downloaded-history",
@@ -136,7 +143,8 @@ class WalletWorker {
   startNext() {
     const job = this.jobs.values().next().value;
     if (!job || job.deadline !== undefined) return;
-    job.deadline = performance.now() + (progressActions.has(job.action) ? WORKER_PROGRESS_LIMIT_MS : WORKER_IDLE_MS);
+    job.deadline = performance.now() + (historyActions.has(job.action) ? WORKER_HISTORY_LIMIT_MS :
+      progressActions.has(job.action) ? WORKER_PROGRESS_LIMIT_MS : WORKER_IDLE_MS);
     this.arm(job);
   }
   arm(job) {
@@ -160,7 +168,14 @@ class WalletWorker {
     this.arm(job);
     const foregroundWaiting = job.action === "automatic_sync" &&
       [...this.jobs.values()].some(waiting => foregroundProgressActions.has(waiting.action));
-    if ((foregroundProgressActions.has(job.action) || foregroundWaiting) && !document.hidden && wallet && !wallet.locked) resetIdle();
+    if (document.hidden || !wallet || wallet.locked) return;
+    // An automatic check of a wallet with no verified balance yet counts as activity only
+    // when it reports a block beyond every block reported since unlock. A check that
+    // restarts or stalls cannot hold the wallet open; a verified wallet's checks never do.
+    const firstVerification = job.action === "automatic_sync" && hasCursor &&
+      wallet.authoritativeSync !== true && value.slot > verificationMark;
+    if (firstVerification) verificationMark = value.slot;
+    if (foregroundProgressActions.has(job.action) || foregroundWaiting || firstVerification) resetIdle();
   }
   async password(action, parameters, value) {
     try { return await this.call(action, { ...parameters, password: value }); }
@@ -184,7 +199,7 @@ function clearInputs() {
 }
 function lockView() {
   automaticReceive?.pause();
-  clearTimeout(idleTimer); clearInputs();
+  clearTimeout(idleTimer); clearInputs(); verificationMark = -1; verificationSample = null;
   if (wallet) wallet = { ...wallet, locked: true, identity: undefined };
   if ($("address-dialog").open) $("address-dialog").close();
   if ($("send-dialog").open) $("send-dialog").close(); paymentReview = undefined;
@@ -197,6 +212,18 @@ function formatZol(units) {
   const value = BigInt(units); if (value > 18446744073709551615n) return null;
   const whole = value / 1000000000n, fraction = (value % 1000000000n).toString().padStart(9, "0").replace(/0+$/, "");
   return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+// Shown only while a wallet without a verified balance still has a long way to go.
+// The estimate is this device's own measured rate; it is display text, never a bound.
+function firstVerificationNote(value) {
+  if (wallet.authoritativeSync === true || !Number.isSafeInteger(value.slot) || !Number.isSafeInteger(value.target) ||
+      value.target - value.slot < 5000) return "";
+  const at = performance.now();
+  if (!verificationSample || value.slot < verificationSample.slot) verificationSample = { at, slot: value.slot };
+  const seconds = (at - verificationSample.at) / 1000, blocks = value.slot - verificationSample.slot;
+  const minutes = seconds >= 10 && blocks > 0 ? Math.ceil((value.target - value.slot) / (blocks / seconds) / 60) : null;
+  return (minutes === null ? "" : ` About ${minutes.toLocaleString()} ${minutes === 1 ? "minute" : "minutes"} left on this device.`) +
+    " Keep this tab open and in front until it finishes.";
 }
 function showProgress(value) {
   if (!wallet || wallet.locked || document.hidden) return;
@@ -213,7 +240,7 @@ function showProgress(value) {
     "saving-verified-checkpoint": "Saving your verified wallet state…", synced: "History verified and saved." };
   if (!Object.hasOwn(stages, value.stage)) return;
   const output = $("send-dialog").open ? $("send-progress") : $("sync-progress");
-  output.textContent = stages[value.stage] + (Number.isSafeInteger(value.slot) && Number.isSafeInteger(value.target) ? ` Block ${value.slot.toLocaleString()} of ${value.target.toLocaleString()}.` : "");
+  output.textContent = stages[value.stage] + (Number.isSafeInteger(value.slot) && Number.isSafeInteger(value.target) ? ` Block ${value.slot.toLocaleString()} of ${value.target.toLocaleString()}.` : "") + firstVerificationNote(value);
   output.hidden = false;
 }
 function render() {
@@ -244,7 +271,7 @@ function render() {
   $("balance-caption").textContent = balance === null ? "Not synced. No balance has been verified." : `Test coins only. Verified through block ${wallet.verified.slot.toLocaleString()}.`;
   $("history-detail").textContent = balance === null ? "Not verified yet" : `Verified through block ${wallet.verified.slot.toLocaleString()}`;
   $("sync-title").textContent = balance === null ? "Connect and verify your wallet history." : "History checked and saved on this device.";
-  $("sync-detail").textContent = balance === null ? "Sending stays off until history has been verified and saved." : "Finality relies on the invited RPC's consensus view. Private fees come from your shielded balance.";
+  $("sync-detail").textContent = balance === null ? "Sending stays off until history has been verified and saved. A new wallet's first check verifies every block of the network's history on this device and can take a quarter of an hour or longer; later checks continue from the saved state. Keep this tab open and in front: leaving the tab locks the wallet and an unfinished check starts again. The wallet does not lock for inactivity while this check keeps making new progress." : "Finality relies on the invited RPC's consensus view. Private fees come from your shielded balance.";
   const admitted = wallet?.admission?.admitted === true;
   $("invitation-form").hidden = admitted;
   $("access-title").textContent = admitted ? "Connected to the invited testnet." : "Join the test network.";
