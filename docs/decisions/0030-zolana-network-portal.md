@@ -11,3 +11,7 @@ Read only the sanitized service heartbeat for last observations, with an explici
 The existing saved wallet and the retained archive are different development-genesis fixtures. Preserve the existing wallet and identify that mismatch at handoff. Never migrate funds, substitute a profile or imply a bridge between them. The portal can show recorded chain evidence while the old wallet remains accessible offline.
 
 The first visual direction used large typography, quiet navigation and a table-driven explorer; the portal's styling has since been revised. Reuse the repository's dependency-free HTML/CSS/JavaScript conventions. No hosted frontend, remote font, analytics, dependency download or service privilege change is needed.
+
+## Status update (2026-11-20)
+
+This record is kept as written. When it was written the name created no Solana token. ZOL has since been issued as a token on Solana, and the project runs a public devnet; see [Token](../../README.md#token) in the README. Devnet test coins are valueless and distinct from that token. The bridge is planned and not built, and there is still no mainnet.

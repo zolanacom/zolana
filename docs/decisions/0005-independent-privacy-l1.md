@@ -11,3 +11,7 @@ A future bridge can connect supported Solana assets without changing where this 
 Forking Agave is compatible with several architectures: independent L1s, custom execution networks and systems that commit state to another chain. Settlement is additional infrastructure rather than a consequence of copying the runtime. This project currently chooses independent finality, with wallet safety, load testing, archive availability, production parameters and independent review ahead of any public release.
 
 Development remains local. No public testnet or mainnet deployment is authorized by this decision.
+
+## Status update (2026-11-20)
+
+This record is kept as written. Its last line described the project at the time. A public devnet with valueless test coins has since been opened, and ZOL has been issued as a token on Solana ahead of the planned bridge; see [Status and limitations](../../README.md#status-and-limitations) and [Token](../../README.md#token) in the README. There is still no mainnet, and the bridge is not implemented.
