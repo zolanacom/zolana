@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Anything else is refused.
-    let refused = PoolState::decode(&bytes[..100]).err();
-    println!("truncated account: {:?}", refused.ok_or("accepted")?);
+    let refused = PoolState::decode(&bytes[..100]).unwrap_err();
+    println!("truncated account: {refused:?}");
     Ok(())
 }

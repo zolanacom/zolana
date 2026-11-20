@@ -21,6 +21,7 @@ pub const ENVELOPE_HEADER_BYTES: usize = 8 + 2 + 16 + 32 + 8 + 32 + 4;
 pub const MAX_ENVELOPE_BYTES: usize = 16_384;
 pub const MAX_INNER_PAYMENT_BYTES: usize = MAX_ENVELOPE_BYTES - ENVELOPE_HEADER_BYTES;
 
+#[derive(Debug)]
 pub struct DecodedEnvelope {
     /// Exact canonical inner V3 payload identity, also used by staged recovery.
     /// This is not an execution receipt or proof that the payment was accepted.
