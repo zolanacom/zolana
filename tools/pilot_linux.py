@@ -27,6 +27,41 @@ FILES = (tuple('tools/' + n for n in runtime.CODE) +
          tuple('target/debug/' + n for n in runtime.BINARIES) +
          ('LICENSE', 'THIRD_PARTY.md', 'node/agave/LICENSE'))
 RECEIPT = 'LINUX-BUILD.json'
+UNIT_ENVIRONMENT = ''
+
+
+def described(environment=None):
+    """The installed bundle is an exact file list, so this tool reads the deployment description itself.
+
+    With ZOLANA_DEPLOYMENT unset the built-in prefix, account and approval path
+    stand. A set one may bind the file's bytes with ZOLANA_DEPLOYMENT_SHA256.
+    """
+    global PREFIX, ACCOUNT, APPROVAL, UNIT_ENVIRONMENT
+    environment = os.environ if environment is None else environment
+    path, expected = (environment.get(name) for name in ('ZOLANA_DEPLOYMENT', 'ZOLANA_DEPLOYMENT_SHA256'))
+    if path is None:
+        if expected is not None:
+            raise ValueError('ZOLANA_DEPLOYMENT_SHA256 is set without ZOLANA_DEPLOYMENT')
+        return False
+    if not Path(path).is_absolute() or any(c.isspace() or not c.isprintable() for c in path):
+        raise ValueError('deployment description needs an absolute path without spaces')
+    raw = cohort.code_bytes(Path(path), 65536)
+    if expected is not None and sha(raw) != expected:
+        raise ValueError('deployment description differs from its SHA-256')
+    chosen = decode(raw)['pilot']
+    if (set(chosen) != {'prefix', 'account', 'approval'} or any(not isinstance(item, str) for item in chosen.values())
+            or any(not Path(chosen[name]).is_absolute() or len(Path(chosen[name]).parts) < 3
+                   or '..' in Path(chosen[name]).parts for name in ('prefix', 'approval'))
+            or not chosen['account'].isascii() or not chosen['account'].replace('_', '').replace('-', '').isalnum()):
+        raise ValueError('deployment description does not name a pilot prefix, account and approval file')
+    PREFIX, ACCOUNT, APPROVAL = Path(chosen['prefix']), chosen['account'], Path(chosen['approval'])
+    # The rendered unit starts the installed copy for the same description.
+    UNIT_ENVIRONMENT = ('Environment=ZOLANA_DEPLOYMENT=' + path + '\n'
+                        'Environment=ZOLANA_DEPLOYMENT_SHA256=' + sha(raw) + '\n')
+    return True
+
+
+described()
 
 
 def linux():
@@ -231,7 +266,7 @@ AmbientCapabilities=
 ReadWritePaths={PREFIX}/.data
 Environment=RAYON_NUM_THREADS=2 RUST_LOG=warn PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 Environment=PATH=/usr/bin:/bin
-StandardOutput=append:{PREFIX}/.data/host.stdout.log
+{UNIT_ENVIRONMENT}StandardOutput=append:{PREFIX}/.data/host.stdout.log
 StandardError=append:{PREFIX}/.data/host.stderr.log
 '''.encode()
 

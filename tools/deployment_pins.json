@@ -1,0 +1,397 @@
+{
+ "files": {
+  "tools/canonical_archive_service.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/devnet_explorer/explorer_feed_v0.py": {
+   "pins": [
+    "/var/lib/zolana-explorer-feed-v0",
+    "Vote111111111111111111111111111111111111111",
+    "e111111111111111111111111111111111111111"
+   ],
+   "reason": "explorer"
+  },
+  "tools/devnet_explorer/explorer_pull_v0.py": {
+   "pins": [
+    "/var/lib/zolana-explorer-pull-v0/feed.json"
+   ],
+   "reason": "explorer"
+  },
+  "tools/devnet_explorer/zolana-explorer-feed-v0.service": {
+   "pins": [
+    "/etc/zolana-explorer-feed-v0/hmac.key",
+    "/opt/zolana-explorer-feed-v0",
+    "/opt/zolana-explorer-feed-v0/explorer_feed_v0.py",
+    "/opt/zolana-explorer-feed-v0/rpc_env.py",
+    "/run/zolana-explorer-feed-v0.env",
+    "/var/lib/zolana-explorer-feed-v0",
+    "zolana-explorer-feed-v0.service"
+   ],
+   "reason": "explorer"
+  },
+  "tools/devnet_explorer/zolana-explorer-pull-v0.service": {
+   "pins": [
+    "/etc/zolana-explorer-pull-v0/hmac.key",
+    "/opt/zolana-explorer-pull-v0/explorer_pull_v0.py",
+    "/var/lib/zolana-explorer-pull-v0/feed.json",
+    "zolana-explorer-pull-v0.service"
+   ],
+   "reason": "explorer"
+  },
+  "tools/explorer_service_acceptance.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/gateway_ack_loss.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/gateway_history_service.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/health_service_acceptance.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "/Library/NativePayLocal/tools"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/human_paging.py": {
+   "pins": [
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/mac_wan_acceptance.py": {
+   "pins": [
+    "/srv/zolana-live-src",
+    "/srv/zolana-wan-src"
+   ],
+   "reason": "acceptance-rig"
+  },
+  "tools/monitor_package.py": {
+   "pins": [
+    "/Library/NativePayLocal/health/heartbeat.json"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/monitor_rehearsal.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/native_fast_cash_audit.py": {
+   "pins": [
+    "40000000000000000000000000000000224698fc094cf91b992d30ed00000001",
+    "ComputeBudget111111111111111111111111111111"
+   ],
+   "reason": "protocol-constant"
+  },
+  "tools/native_history_candidate.py": {
+   "pins": [
+    "/etc/zolana-native-058/cohort-060-rehearsal/binding.json",
+    "/etc/zolana-native-058/config.json",
+    "/etc/zolana-native-063/config.json",
+    "/opt/zolana-native-058",
+    "/opt/zolana-native-063",
+    "b043578eb7e8128bd79785100b0df68351fe36948633786a12a4dfdb8ee31397",
+    "zolana-native-060-rehearsal-faucet",
+    "zolana-native-060-rehearsal-faucet.socket",
+    "zolana-native-060-rehearsal-gateway",
+    "zolana-native-060-rehearsal-gateway.service",
+    "zolana-native-060-rehearsal-rpc",
+    "zolana-native-060-rehearsal-rpc.socket",
+    "zolana-native-061-faucet",
+    "zolana-native-061-faucet.socket",
+    "zolana-native-061-gateway",
+    "zolana-native-061-gateway.service",
+    "zolana-native-061-rpc",
+    "zolana-native-061-rpc.socket",
+    "zolana-native-062-faucet",
+    "zolana-native-062-faucet.socket",
+    "zolana-native-062-gateway",
+    "zolana-native-062-gateway.service",
+    "zolana-native-062-rpc",
+    "zolana-native-062-rpc.socket",
+    "zolana-native-063-faucet",
+    "zolana-native-063-faucet.socket",
+    "zolana-native-063-gateway",
+    "zolana-native-063-gateway.service",
+    "zolana-native-063-rpc",
+    "zolana-native-063-rpc.socket"
+   ],
+   "reason": "installed-alone"
+  },
+  "tools/native_linux_service.py": {
+   "pins": [
+    "/etc/zolana-native-058",
+    "/opt/zolana-native-058",
+    "/run/zolana-native-058",
+    "/var/lib/zolana-native-058",
+    "a203300045b405f86c9c84308b2eae76af69ac3b",
+    "zolana-native-058-",
+    "zolana-native-058-faucet",
+    "zolana-native-058-faucet.socket",
+    "zolana-native-058-gateway",
+    "zolana-native-058-gateway.service",
+    "zolana-native-058-rpc",
+    "zolana-native-058-rpc.socket",
+    "zolana-native-058-validator",
+    "zolana-native-058-validator.service",
+    "zolana058",
+    "zolana058g",
+    "zolana058link",
+    "zolana058v"
+   ],
+   "reason": "accepted-source"
+  },
+  "tools/native_network_service.py": {
+   "pins": [
+    "/etc/zolana-native-058",
+    "/opt/zolana-native-058",
+    "/run/zolana-native-058",
+    "/var/lib/zolana-native-058",
+    "a203300045b405f86c9c84308b2eae76af69ac3b",
+    "zolana-native-058-",
+    "zolana-native-058-faucet",
+    "zolana-native-058-faucet.socket",
+    "zolana-native-058-gateway",
+    "zolana-native-058-gateway.service",
+    "zolana-native-058-rpc",
+    "zolana-native-058-rpc.socket",
+    "zolana-native-058-validator",
+    "zolana-native-058-validator.service",
+    "zolana058",
+    "zolana058g",
+    "zolana058link",
+    "zolana058v"
+   ],
+   "reason": "replacement-table"
+  },
+  "tools/native_snapshot_startup.py": {
+   "pins": [
+    "/etc/zolana-native-072/validator-startup.py",
+    "/opt/zolana-native-058/tools/native_linux_service.py",
+    "/opt/zolana-native-072/bin/zolana-fast-check",
+    "5f102297516b40ff8299def02e6a993e4277e3f80bc6ed958102b5781b106a7a"
+   ],
+   "reason": "installed-alone"
+  },
+  "tools/native_validator_startup.py": {
+   "pins": [
+    "/etc/zolana-native-065/validator-startup.py",
+    "/opt/zolana-native-058/tools/native_linux_service.py",
+    "5f102297516b40ff8299def02e6a993e4277e3f80bc6ed958102b5781b106a7a"
+   ],
+   "reason": "installed-alone"
+  },
+  "tools/operator_monitor.py": {
+   "pins": [
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/paging_rehearsal.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/pilot_host.py": {
+   "pins": [
+    "_nativepay"
+   ],
+   "reason": "macos-pilot"
+  },
+  "tools/pilot_install.py": {
+   "pins": [
+    "/Library/ZolanaPilot",
+    "_nativepay",
+    "_zolanapilot"
+   ],
+   "reason": "macos-pilot"
+  },
+  "tools/pilot_linux.py": {
+   "pins": [
+    "/etc/zolana-pilot/activation.json",
+    "/opt/zolana",
+    "zolanapilot"
+   ],
+   "reason": "installed-alone"
+  },
+  "tools/prepare_native_candidate.py": {
+   "pins": [
+    "57a947addd2dff75665241af64a40be3ed9d07b9bd64e3e57cc94e2c37bb10d2",
+    "727c5dc94fb20cb5f3cd512360ea4f7492664b9ee9101afa59772fed00e24a2c",
+    "8ee2c21f73527f49dec403eb9e64cca412b230a5fde50b6bdf3000534e06dfe6",
+    "917912ac67fc0b6ffec94e33e1ce113db581e1f1706aa1ecbe4224b967b15f30",
+    "a203300045b405f86c9c84308b2eae76af69ac3b",
+    "d11952a9f613a7dcfc679f4eff9dd5de6081d47740688d1863226db7b113ec19"
+   ],
+   "reason": "source-pin"
+  },
+  "tools/repair_service_test_tls.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/replica_service_acceptance.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "history-replica-session-030"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/replica_service_final_audit.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/restart_tail_acceptance.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/restart_tail_desktop.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "/Library/NativePayLocal/target/debug/native-wallet"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/restart_tail_diagnostic_run.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "/Library/NativePayLocal/.data/s20",
+    "/Library/NativePayLocal/.data/s20/ledger",
+    "/Library/NativePayLocal/target/debug/agave-validator",
+    "/Library/NativePayLocal/tools"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/restart_tail_service.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/retention_service.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "history-retention-session-026"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/service_account.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "_nativepay",
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/service_ingress.py": {
+   "pins": [
+    "ComputeBudget111111111111111111111111111111"
+   ],
+   "reason": "protocol-constant"
+  },
+  "tools/service_ingress_recovery.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/service_runtime.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "history-replica-session-030",
+    "history-retention-session-026"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/service_wallet_acceptance.py": {
+   "pins": [
+    "/Library/NativePayLocal/.data/s20",
+    "/Library/NativePayLocal/.data/s20/rpc"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/tester_gateway_recovery.py": {
+   "pins": [
+    "/Library/NativePayLocal"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/wallet_apple.py": {
+   "pins": [
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/wallet_apple_rehearsal.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/wallet_pilot_release_acceptance.py": {
+   "pins": [
+    "1095b9cb3dd35b9599f4f939c8fc1c86c343ec4168223e00d98414b330316e05",
+    "67c14f78a5faac7e5170bfac3520ef2506ab5daf6f2ab9b0843c72e7406fec40",
+    "79eb52a0ea54e715fb72d34302195f7f691c0374f7f20f654979f0767fca2e2a"
+   ],
+   "reason": "release-record"
+  },
+  "tools/wallet_release_rehearsal.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/watchdog_notify.py": {
+   "pins": [
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  },
+  "tools/watchdog_rehearsal.py": {
+   "pins": [
+    "/Library/NativePayLocal",
+    "nativepay"
+   ],
+   "reason": "local-macos-service"
+  }
+ },
+ "format": "zolana-deployment-pins-v1",
+ "reasons": {
+  "acceptance-rig": "Source directories on the hosts of one acceptance run.",
+  "accepted-source": "The accepted service source. Two startup wrappers and their tests bind its exact bytes, so it cannot be edited. native_network_service.py runs it for any description.",
+  "explorer": "The explorer feed and puller are installed on their own and take their settings from their unit files; not in the description yet. The feed also names the vote program, which is the same on every network.",
+  "installed-alone": "Installed without its sibling modules (a single sealed file or an exact file list), so the built-in values stay in the file. The tool reads its own fields of a description named by ZOLANA_DEPLOYMENT, and deployment_test.py holds the built-in values equal to the built-in description.",
+  "local-macos-service": "The local macOS validator service and its acceptance tools. Its install root, account and label are not in the description yet.",
+  "macos-pilot": "The macOS invite pilot installer and host plan. Not in the description yet.",
+  "protocol-constant": "A program address or a curve constant. The same on every network.",
+  "release-record": "Hashes of the profile, verifier and builder of one accepted wallet release.",
+  "replacement-table": "The text of the accepted service source that this tool replaces with values from the description.",
+  "source-pin": "Hashes of the upstream validator source and of the patches applied to it. They identify the build, not an installation."
+ }
+}

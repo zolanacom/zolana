@@ -29,21 +29,27 @@ import threading
 import time
 import urllib.request
 
+import deployment
 import native_gateway_acceptance as previous
 
-PREFIX = Path('/opt/zolana-native-058')
-CONFIG = Path('/etc/zolana-native-058/config.json')
-STATE = Path('/var/lib/zolana-native-058')
+DEPLOYMENT = deployment.active()
+SERVICE = DEPLOYMENT['service']
+PREFIX = Path(SERVICE['prefix'])
+CONFIG = Path(SERVICE['etc'])/'config.json'
+TESTER_PROFILE = Path(SERVICE['etc'])/'public-profile.json'
+STATE = Path(SERVICE['state'])
 VALROOT = STATE/'validator'
 NETWORK = VALROOT/'network'
 GWROOT = STATE/'gateway'
 CLIENT = STATE/'client'
-READY = Path('/run/zolana-native-058/ready.json')
+READY = Path(SERVICE['run'])/'ready.json'
 GATE = GWROOT/'acceptance-gate'
-ACCOUNTS = ('zolana058v','zolana058g','zolana058t')
-UNITS = {'validator':'zolana-native-058-validator.service','gateway':'zolana-native-058-gateway.service'}
-SOCKET_UNITS = ('zolana-native-058-rpc.socket','zolana-native-058-faucet.socket')
-TLS_PORTS = (38443,38444)
+VALIDATOR_ACCOUNT, GATEWAY_ACCOUNT, TESTER_ACCOUNT = ACCOUNTS = tuple(
+    SERVICE['users'][role] for role in ('validator','gateway','tester'))
+LINK_GROUP = SERVICE['link_group']
+UNITS = dict(SERVICE['units'])
+SOCKET_UNITS = (SERVICE['sockets']['rpc'],SERVICE['sockets']['faucet'])
+TLS_PORTS = (SERVICE['ports']['rpc'],SERVICE['ports']['faucet'])
 HEX64 = re.compile('[a-f0-9]{64}')
 MAXIMUM = 16384
 
@@ -109,7 +115,7 @@ class NativeAckGate:
     """
     def __init__(self,ingress,directory=GATE):
         if Path(directory)!=GATE:raise ValueError('test gate requires its fixed LOCAL-058 directory')
-        expected=identity('zolana058g')
+        expected=identity(GATEWAY_ACCOUNT)
         if os.geteuid()!=expected.pw_uid:raise PermissionError('test gate requires gateway identity')
         if not isinstance(ingress,list) or not 1<=len(ingress)<=3 or len(set(ingress))!=len(ingress):
             raise ValueError('bounded unique fixed native endpoints required')
@@ -198,9 +204,9 @@ def denied_open(path):
 
 
 def outsider_probe(document):
-    account=identity('zolana058t');status=proc_status()
+    account=identity(TESTER_ACCOUNT);status=proc_status()
     service_uids={identity(name).pw_uid for name in ACCOUNTS[:2]}
-    service_gids={identity(name).pw_gid for name in ACCOUNTS[:2]}|{grp.getgrnam('zolana058link').gr_gid}
+    service_gids={identity(name).pw_gid for name in ACCOUNTS[:2]}|{grp.getgrnam(LINK_GROUP).gr_gid}
     if (os.getuid()!=account.pw_uid or os.geteuid()!=account.pw_uid or account.pw_uid in service_uids
             or service_gids.intersection(os.getgroups())
             or any(int(status[key].strip(),16)!=0 for key in ('CapEff','CapPrm','CapAmb'))
@@ -278,7 +284,7 @@ def namespace_rpc(document):
 
 def sandbox_probe(role):
     if role not in UNITS:raise ValueError('only fixed service sandbox roles permitted')
-    account=identity('zolana058v' if role=='validator' else 'zolana058g')
+    account=identity(VALIDATOR_ACCOUNT if role=='validator' else GATEWAY_ACCOUNT)
     if os.getuid()!=account.pw_uid or os.geteuid()!=account.pw_uid:raise PermissionError('probe must run as actual service UID')
     directory=VALROOT if role=='validator' else GWROOT
     outside=STATE/(role+'-canary')
@@ -301,7 +307,7 @@ def service_properties(role,runner=subprocess.run):
     result=runner(['/usr/bin/systemctl','show',UNITS[role],*['--property='+key for key in keys]],
         capture_output=True,text=True,check=True,timeout=10)
     values=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-    expected=identity('zolana058v' if role=='validator' else 'zolana058g')
+    expected=identity(VALIDATOR_ACCOUNT if role=='validator' else GATEWAY_ACCOUNT)
     group=values.get('ControlGroup','')
     if (set(values)!=set(keys) or values['User']!=expected.pw_name or values['Group']!=expected.pw_name
             or not values['MainPID'].isdecimal() or int(values['MainPID'])<=1
@@ -354,7 +360,7 @@ def kernel_cgroup_kill(role,main_pid):
         pids=members.decode('ascii').splitlines()
         if not 1<=len(pids)<=64 or any(not value.isdecimal() or int(value)<=1 for value in pids) or str(main_pid) not in pids:
             raise ValueError('pinned main process is not in the exact live cgroup')
-        account=identity('zolana058v' if role=='validator' else 'zolana058g');pinned=[]
+        account=identity(VALIDATOR_ACCOUNT if role=='validator' else GATEWAY_ACCOUNT);pinned=[]
         for value in pids:
             status=proc_status(value)
             if (set(map(int,status['Uid'].split()))!={account.pw_uid}
@@ -483,7 +489,7 @@ class ServiceTrial(previous.Trial):
     """Root operator lifecycle; actual client API subprocesses remain UID058t."""
     def __init__(self,args):
         if platform.system()!='Linux' or os.geteuid()!=0:raise PermissionError('fixed Linux root operator acceptance only')
-        from native_linux_service import validate_config
+        validate_config=__import__(SERVICE['module'][:-3]).validate_config
         raw=read_owned(CONFIG,0,65536,0o444)
         if hashlib.sha256(raw).hexdigest()!=args.config_sha256:raise ValueError('explicit sealed config digest mismatch')
         self.sealed=validate_config(json.loads(raw))
@@ -493,11 +499,11 @@ class ServiceTrial(previous.Trial):
         self.accounts={name:identity(name) for name in ACCOUNTS}
         if len({item.pw_uid for item in self.accounts.values()})!=3 or len({item.pw_gid for item in self.accounts.values()})!=3:
             raise ValueError('three distinct user and primary group identities required')
-        for role,name in (('validator','zolana058v'),('gateway','zolana058g')):
+        for role,name in (('validator',VALIDATOR_ACCOUNT),('gateway',GATEWAY_ACCOUNT)):
             for suffix,actual in (('uid',self.accounts[name].pw_uid),('gid',self.accounts[name].pw_gid)):
                 if self.sealed[role+'_'+suffix]!=actual:raise ValueError('sealed service account differs from installed identity')
-        self.gateway_uid=self.accounts['zolana058g'].pw_uid;self.client_uid=self.accounts['zolana058t'].pw_uid
-        client_groups=set(os.getgrouplist('zolana058t',self.accounts['zolana058t'].pw_gid))
+        self.gateway_uid=self.accounts[GATEWAY_ACCOUNT].pw_uid;self.client_uid=self.accounts[TESTER_ACCOUNT].pw_uid
+        client_groups=set(os.getgrouplist(TESTER_ACCOUNT,self.accounts[TESTER_ACCOUNT].pw_gid))
         if client_groups.intersection({self.sealed['validator_gid'],self.sealed['gateway_gid'],self.sealed['link_gid']}):
             raise ValueError('outside client account shares a protected service/link group')
         checked_directory(VALROOT,self.sealed['validator_uid']);checked_directory(GWROOT,self.gateway_uid)
@@ -519,7 +525,7 @@ class ServiceTrial(previous.Trial):
         self.properties={role:service_properties(role) for role in UNITS}
         self._pin_namespace()
         self.faults=argparse.Namespace(record=None,packets={})
-        self.pool=json.loads(read_owned(Path('/etc/zolana-native-058/public-profile.json'),0,65536,0o444))['pool']
+        self.pool=json.loads(read_owned(TESTER_PROFILE,0,65536,0o444))['pool']
         self.result=dict(format='zolana-native-service-acceptance-v1',status='running',events=[],
             scope='fixed co-located Linux service sandbox, invited TLS and actual outside-UID wallet API; trusted canonical RPC',
             systemd_services_provisioned=False,genesis_created=False,mac_validators_started=False)
@@ -529,7 +535,7 @@ class ServiceTrial(previous.Trial):
     def _check_clients(self):
         if (set(self.config)!={'wallet','tester','password','clients','timeout'}
                 or self.config.get('wallet')!=str(PREFIX/'bin/native-wallet')
-                or self.config.get('tester')!='/etc/zolana-native-058/public-profile.json'
+                or self.config.get('tester')!=str(TESTER_PROFILE)
                 or self.config.get('password')!=str(CLIENT/'password')
                 or set(self.config.get('clients',{}))!={'alice','bob','charlie'}
                 or type(self.config.get('timeout')) is not int or not 60<=self.config['timeout']<=900):
@@ -596,9 +602,9 @@ class ServiceTrial(previous.Trial):
         if name not in ('alice','bob','charlie') or name in self.children:raise ValueError('only bounded existing outside-UID wallet clients may start')
         log_path=CLIENT/(name+'-acceptance-'+str(time.time_ns())+'.log')
         descriptor=os.open(log_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-        os.fchown(descriptor,self.client_uid,self.accounts['zolana058t'].pw_gid)
+        os.fchown(descriptor,self.client_uid,self.accounts[TESTER_ACCOUNT].pw_gid)
         log=os.fdopen(descriptor,'wb');self.logs.append(log)
-        command=['/usr/sbin/runuser','-u','zolana058t','--','/usr/bin/setpriv','--no-new-privs',
+        command=['/usr/sbin/runuser','-u',TESTER_ACCOUNT,'--','/usr/bin/setpriv','--no-new-privs',
             '/usr/bin/python3','-B',str(PREFIX/'tools/native_gateway_acceptance.py'),
             '--service-config',str(CLIENT/'services.json'),'--wallet-service',name]
         child=subprocess.Popen(command,stdout=log,stderr=log,start_new_session=True,env=self.environment)
@@ -654,14 +660,14 @@ class ServiceTrial(previous.Trial):
         for peer in self.host['peers']:
             if self.rpc(peer['rpc'],'getGenesisHash')!=self.host['network']['genesis_hash']:
                 raise ValueError('all three original raw RPC positive controls required')
-        result=subprocess.run(['/usr/sbin/runuser','-u','zolana058t','--','/usr/bin/setpriv','--no-new-privs',
+        result=subprocess.run(['/usr/sbin/runuser','-u',TESTER_ACCOUNT,'--','/usr/bin/setpriv','--no-new-privs',
             '/usr/bin/python3','-B',str(PREFIX/'tools/native_service_acceptance.py'),'--outsider-probe'],
             input=json.dumps(document),capture_output=True,text=True,timeout=30)
         if result.returncode:raise RuntimeError('actual different-UID negative isolation probe failed: '+result.stderr[-600:])
         observations=json.loads(result.stdout)
         sandbox=[]
         for role,properties in self.properties.items():
-            name='zolana058v' if role=='validator' else 'zolana058g';account=self.accounts[name]
+            name=VALIDATOR_ACCOUNT if role=='validator' else GATEWAY_ACCOUNT;account=self.accounts[name]
             canary=STATE/(role+'-canary')
             if not os.path.lexists(canary):
                 descriptor=os.open(canary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -677,9 +683,9 @@ class ServiceTrial(previous.Trial):
         self.event('actual_different_uid_fs_netns_cgroup_controls',negative_probes=observations,mount_controls=sandbox,private_listener_positive=json.loads(positive.stdout),
             private_genesis_positive_control=True,services_share_private_namespace=True)
     def tls_controls(self):
-        profile=json.loads(read_owned(Path('/etc/zolana-native-058/public-profile.json'),0,65536,0o444))
+        profile=json.loads(read_owned(TESTER_PROFILE,0,65536,0o444))
         if (profile.get('private_send_transport')!='native-inline-v1' or profile.get('pool_format')!='NPOOL004'
-                or profile['rpc']['url']!='https://127.0.0.1:38443' or profile['faucet']['url']!='https://127.0.0.1:38444'):
+                or profile['rpc']['url']!='https://127.0.0.1:'+str(TLS_PORTS[0]) or profile['faucet']['url']!='https://127.0.0.1:'+str(TLS_PORTS[1])):
             raise ValueError('fixed invited native TLS public profile changed')
         context=ssl.create_default_context(cadata=profile['local_tls_ca_pem'])
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=context))
@@ -780,7 +786,7 @@ class ServiceTrial(previous.Trial):
             raise ValueError('fault gate must be fresh; never reset prior evidence')
         nonce=secrets.token_hex(32);arm=GATE/'arm.json'
         previous.save(arm,dict(format='zolana-native-058-ack-arm-v1',nonce=nonce,expires_at=int(time.time())+180))
-        os.chown(arm,0,self.accounts['zolana058g'].pw_gid);arm.chmod(0o640)
+        os.chown(arm,0,self.accounts[GATEWAY_ACCOUNT].pw_gid);arm.chmod(0o640)
         user=CLIENT/'alice/wallet-ui/wallet.json.shielded.json'
         with ThreadPoolExecutor(max_workers=1) as pool:
             sending=pool.submit(self.api,'alice','send',recipient=self.addresses['bob']['address'],amount=1_000_000,fee_mode='shielded',max_shielded_fee=3_000_000)

@@ -19,13 +19,26 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 
+
+def load_description():
+    # Python -I excludes siblings/PYTHONPATH. Execute the deployment description
+    # module from beside this tool, without a bytecode cache.
+    path=Path(__file__).resolve().with_name('deployment.py');module=types.ModuleType('zolana_deployment')
+    module.__file__=str(path);exec(compile(path.read_bytes(),str(path),'exec'),module.__dict__)
+    return module
+
+
+description=load_description()
+DEPLOYMENT=description.active()
 PUBLIC_IP_SETTING='ZOLANA_PUBLIC_IP'
-SERVICE_UID=994
-TLS_ROOT=Path('/etc/zolana-native-074/tls')
-LETSENCRYPT=Path('/etc/letsencrypt')
+SERVICE_UID=DEPLOYMENT['public_tls']['service_uid']
+TLS_ROOT=Path(DEPLOYMENT['public_tls']['root'])
+LETSENCRYPT=Path(DEPLOYMENT['public_tls']['certificate_source'])
+MINIMUM_VALIDITY=DEPLOYMENT['public_tls']['minimum_validity_seconds']
 OPENSSL='/usr/bin/openssl'
-GATEWAY='zolana-native-060-gateway.service'
+GATEWAY=description.cohort_mode(DEPLOYMENT)['unit']
 FORMAT='zolana-public-tls-bundle-v1'
 HEX=re.compile('[a-f0-9]{64}\\Z')
 CERTIFICATE_LIMIT=65536
@@ -102,7 +115,7 @@ def _bytes_context(certificate,key,public_ip,minimum_validity,trust_directory):
     return context,metadata
 
 
-def verified_context(cert,key,public_ip,expected_uid,minimum_validity=3600,trust_directory='/etc/ssl/certs'):
+def verified_context(cert,key,public_ip,expected_uid,minimum_validity=MINIMUM_VALIDITY,trust_directory='/etc/ssl/certs'):
     """Return (server SSLContext, public metadata), loading only captured exact bytes.
 
     The caller seals path ancestry and expected hashes. The pure trust_directory
@@ -240,6 +253,7 @@ def _restart_active():
 def deploy(restart_active=False,public_ip=None):
     require(sys.platform=='linux' and os.getuid()==os.geteuid()==0,'fixed certificate deployment requires Linux root')
     require(type(restart_active) is bool,'explicit restart choice required')
+    require(description.active(sealed=True)==DEPLOYMENT,'deployment description changed or is not sealed')
     public_ip=_public_ip(os.environ.get(PUBLIC_IP_SETTING) if public_ip is None else public_ip)
     _root_directory(TLS_ROOT.parent.parent)
     _mkdir(TLS_ROOT.parent);_mkdir(TLS_ROOT)
@@ -249,7 +263,7 @@ def deploy(restart_active=False,public_ip=None):
             and stat.S_IMODE(m.st_mode)==0o600,'fixed root600 deployment lock required')
         fcntl.flock(fd,fcntl.LOCK_EX)
         certificate,key=_lineage_bytes(public_ip)
-        _,metadata=_bytes_context(certificate,key,public_ip,3600,'/etc/ssl/certs')
+        _,metadata=_bytes_context(certificate,key,public_ip,MINIMUM_VALIDITY,'/etc/ssl/certs')
         value,changed=_publish(certificate,key,metadata)
         # Explicit reload is retryable even if a previous publication succeeded
         # but its service restart failed. Default unchanged deployment is a no-op.

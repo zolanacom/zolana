@@ -7,15 +7,18 @@ from pathlib import Path
 import socket
 import stat
 
+import deployment
 import direct_tls
 from public_tls_certificate import verified_context
 from service_tls import check_activated_socket,listener
 
-CONFIG=Path('/etc/zolana-native-074/public-ingress.json')
-MANIFEST=Path('/etc/zolana-native-074/tls/current.json')
-BUNDLES=Path('/etc/zolana-native-074/tls/bundles')
-LOCAL_PORTS={'rpc':39443,'faucet':39444}
-PUBLIC_PORTS={'rpc':443,'faucet':8444}
+DEPLOYMENT=deployment.active()
+PUBLIC_TLS=DEPLOYMENT['public_tls']
+CONFIG=Path(PUBLIC_TLS['ingress_config'])
+MANIFEST=Path(PUBLIC_TLS['root'])/'current.json'
+BUNDLES=Path(PUBLIC_TLS['root'])/'bundles'
+LOCAL_PORTS=deployment.cohort_mode(DEPLOYMENT)['ports']
+PUBLIC_PORTS=dict(PUBLIC_TLS['ports'])
 NAMES={'rpc','faucet','public-rpc','public-faucet'}
 
 
@@ -85,8 +88,9 @@ class PublicPilotIngress:
             if parent.resolve()!=parent or not stat.S_ISDIR(m.st_mode) or m.st_uid!=0 or m.st_mode&0o022:
                 raise ValueError('immutable root-owned versioned certificate directories required')
         self.cert,self.key=folder/'server.crt',folder/'server.key'
-        self.context,metadata=verified_context(self.cert,self.key,self.config['public_ip'],expected_uid=994,
-            minimum_validity=3600,trust_directory='/etc/ssl/certs')
+        self.context,metadata=verified_context(self.cert,self.key,self.config['public_ip'],
+            expected_uid=PUBLIC_TLS['service_uid'],minimum_validity=PUBLIC_TLS['minimum_validity_seconds'],
+            trust_directory='/etc/ssl/certs')
         if (metadata['certificate_sha256']!=manifest['certificate_sha256']
                 or metadata['key_sha256']!=manifest['key_sha256'] or metadata['public_ip']!=self.config['public_ip']):
             raise ValueError('rolling public certificate bundle differs from root manifest')
