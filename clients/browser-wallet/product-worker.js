@@ -167,17 +167,46 @@ const session = new WalletSession();
 async function sha(value) {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", value))].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
+const differentNetwork = "This site serves a different network than the one this wallet build is pinned to. Nothing was synced or sent, and saved wallet data was not changed.";
+function networkIdentity(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join("|") === "genesis_hash|network" &&
+    Array.isArray(value.network) && value.network.length === 32 && value.network.some(Boolean) &&
+    value.network.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255) &&
+    typeof value.genesis_hash === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value.genesis_hash);
+}
+function sameNetwork(a, b) {
+  return a.genesis_hash === b.genesis_hash && a.network.every((byte, index) => byte === b.network[index]);
+}
 function validateConfiguration(value) {
   if (!value || value.format !== "zolana-browser-wallet-config-v1" || value.coin !== "ZOL" ||
       !["testnet", "mainnet"].includes(value.environment) || typeof value.label !== "string" || value.label.length < 1 || value.label.length > 64 ||
-      !value.network || Object.keys(value.network).sort().join("|") !== "genesis_hash|network" ||
-      !Array.isArray(value.network.network) || value.network.network.length !== 32 || !value.network.network.some(Boolean) ||
-      !value.network.network.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255) ||
-      typeof value.network.genesis_hash !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value.network.genesis_hash)) {
+      !networkIdentity(value.network)) {
     fail("configuration", "This site has no valid Zolana network configuration. Wallet creation is unavailable.");
   }
   return { format: value.format, coin: "ZOL", environment: value.environment,
     label: value.label, network: { network: [...value.network.network], genesis_hash: value.network.genesis_hash } };
+}
+// The network this build is for. network-pin.js is written into the bundle when
+// it is built (tools/browser_wallet_pin.py) and is loaded as part of the wallet's
+// own code. What the site serves at run time is compared with it, never trusted
+// in its place. A bundle without a valid pin opens no wallet.
+async function loadNetworkPin() { return (await import("./network-pin.js")).default; }
+async function networkPin() {
+  let value;
+  try { value = await loadNetworkPin(); } catch { value = undefined; }
+  if (!value || typeof value !== "object" || Object.keys(value).sort().join("|") !== "environment|format|network" ||
+      value.format !== "zolana-browser-network-pin-v1" || !["testnet", "mainnet"].includes(value.environment) ||
+      !networkIdentity(value.network)) {
+    fail("network_pin", "This wallet build's network pin is missing or invalid, so it cannot tell which network this site serves. No wallet was opened or created.");
+  }
+  // Key order is part of the stored wallet's network identifier: keep network, then genesis_hash.
+  return { environment: value.environment, network: { network: [...value.network.network], genesis_hash: value.network.genesis_hash } };
+}
+function pinnedConfiguration(pin, served) {
+  if (served.environment !== pin.environment || !sameNetwork(served.network, pin.network)) {
+    fail("network_mismatch", "This site serves a different network than the one this wallet build is pinned to. No wallet was opened, created or changed.");
+  }
+  return { format: served.format, coin: served.coin, environment: pin.environment, label: served.label, network: pin.network };
 }
 async function core() {
   if (!corePromise) corePromise = (async () => {
@@ -253,16 +282,28 @@ async function responseJSON(path, { raw, access, limit = 4096 } = {}) {
     throw error;
   } finally { clearTimeout(timer); session.requests.delete(controller); }
 }
+// The first request to a gateway's RPC, before any signed request, invitation
+// or sync: the genesis it reports must be the pinned one. It carries no wallet
+// identity. This is a statement by the gateway, not a proof about the chain.
+async function confirmGenesis() {
+  const id = crypto.randomUUID();
+  const response = await responseJSON("/rpc", { raw: JSON.stringify({ jsonrpc: "2.0", id, method: "getGenesisHash", params: [] }) });
+  if (!response || response.jsonrpc !== "2.0" || response.id !== id || Object.hasOwn(response, "error") || typeof response.result !== "string") {
+    fail("rpc", "The gateway did not report which network it serves. Nothing was synced or sent; saved wallet data was not changed.");
+  }
+  if (response.result !== configuration.network.genesis_hash) fail("genesis", differentNetwork);
+}
 async function loadTransport() {
   const value = await responseJSON("/transport.json");
-  if (!value || value.format !== "zolana-browser-transport-v1" || value.network?.genesis_hash !== configuration.network.genesis_hash ||
-      !Array.isArray(value.network?.network) || value.network.network.length !== 32 || value.network.network.some((byte, index) => byte !== configuration.network.network[index]) ||
+  if (value?.format === "zolana-browser-transport-v1" && networkIdentity(value.network) && !sameNetwork(value.network, configuration.network)) fail("network_mismatch", differentNetwork);
+  if (!value || value.format !== "zolana-browser-transport-v1" || !networkIdentity(value.network) || !sameNetwork(value.network, configuration.network) ||
       value.rpc_path !== "/rpc" || value.join_path !== "/admission/join" || value.status_path !== "/admission/status" ||
       !audience(value.rpc_audience) || !audience(value.faucet_audience) || value.operator_metadata_visible !== true || value.automatic_retry !== false ||
       typeof value.pool !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value.pool) ||
       typeof value.program !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value.program)) {
     fail("transport", "The browser gateway configuration does not match this wallet network.");
   }
+  await confirmGenesis();
   transport = value; return value;
 }
 async function rpc(method, params, at, value, unsigned = false, limit = 16 * 1024 * 1024) {
@@ -445,6 +486,8 @@ async function scanCanonicalArchive(value, at, cursor, target, targetHeader) {
 function syncSnapshot(snapshot, savedSlot) {
   const object = value => value && typeof value === "object" && !Array.isArray(value);
   const invalid = () => fail("sync", "The gateway returned an invalid finalized wallet snapshot. Your original checkpoint was preserved.");
+  if (object(snapshot) && ((typeof snapshot.genesis === "string" && snapshot.genesis !== configuration.network.genesis_hash) ||
+      (networkIdentity(snapshot.network) && !sameNetwork(snapshot.network, configuration.network)))) fail("genesis", differentNetwork);
   if (!object(snapshot) || Object.keys(snapshot).sort().join("|") !== "canonical_tail|fallback|format|genesis|network|pool|saved_header|target_header" ||
       snapshot.format !== "zolana-wallet-sync-snapshot-v1" || snapshot.genesis !== configuration.network.genesis_hash ||
       !object(snapshot.network) || Object.keys(snapshot.network).sort().join("|") !== "genesis_hash|network" ||
@@ -497,7 +540,7 @@ async function syncWallet({ rejectPending = false } = {}) {
   }
   if (snapshot === undefined) {
     const genesis = await rpc("getGenesisHash", [], at, value, true);
-    if (genesis !== configuration.network.genesis_hash) fail("genesis", "The gateway serves a different network. Saved wallet data was preserved.");
+    if (genesis !== configuration.network.genesis_hash) fail("genesis", differentNetwork);
   }
   const pool = snapshot === undefined ? await rpc("getAccountInfo", [transport.pool, { commitment: "finalized", encoding: "base64" }], at, value) : snapshot.pool;
   const target = pool?.context?.slot;
@@ -865,7 +908,7 @@ async function dispatch(message) {
   if (message.action === "initialize") {
     if (configuration) fail("initialized", "Wallet worker is already initialized.");
     if (!self.isSecureContext || !crypto?.subtle || !indexedDB) fail("unsupported", "Use a secure HTTPS or localhost origin with browser storage enabled.");
-    configuration = validateConfiguration(message.configuration); networkJson = JSON.stringify(configuration.network);
+    configuration = pinnedConfiguration(await networkPin(), validateConfiguration(message.configuration)); networkJson = JSON.stringify(configuration.network);
     networkId = await sha(encoder.encode(JSON.stringify(["zolana-browser-product-network-v1", configuration.network])));
     catalog = await openCatalog(); record = await readRecord(); await core(); return status();
   }

@@ -19,6 +19,7 @@ import zlib
 from test_faucet import BoundedServer
 from testnet_gateway import read_calls, history_slots, retained_window
 from browser_gateway_transport import UpstreamTransport
+from browser_wallet_pin import PIN_URL, render as render_pin
 
 RPC_LIMIT = 32768
 ACCESS_LIMIT = 4096
@@ -37,6 +38,8 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".css": "text/css; charset=utf-8", ".wasm": "application/wasm", ".svg": "image/svg+xml",
         ".woff2": "font/woff2", ".json": "application/json"}
 RESERVED = {"/rpc", "/admission/join", "/admission/status", "/wallet-config.json", "/transport.json"}
+# The only environment this gateway serves. A bundle pinned to another one is refused.
+ENVIRONMENT = "testnet"
 
 
 def unique(pairs):
@@ -162,6 +165,13 @@ class BrowserGateway:
     def __init__(self, profile, bundle, *, fixture_http=False, allow_blob_workers=False, upstream_context=None):
         self.network, self.rpc_audience, self.faucet_audience = public_profile(profile, fixture_http)
         self.profile, self.bundle = profile, bundle
+        # A bundle that carries a network pin is served only for that network. The
+        # wallet in the browser makes the same comparison; refusing here turns a
+        # wrong profile or bundle into a start-up error, before any user sees it.
+        # A bundle without a pin is still served: its worker predates the pin.
+        pin = bundle.get(PIN_URL)
+        if pin is not None and pin[0] != render_pin(self.network, ENVIRONMENT):
+            raise ValueError("The browser bundle is pinned to a different network than this profile.")
         self.allow_blob_workers = bool(allow_blob_workers)
         self.rpc_url = profile["rpc"]["url"]
         self.faucet_url = profile["faucet"]["url"].rstrip("/")
@@ -173,7 +183,7 @@ class BrowserGateway:
 
     def config(self):
         return {"format": "zolana-browser-wallet-config-v1", "network": self.network,
-                "label": self.profile["label"], "coin": "ZOL", "environment": "testnet"}
+                "label": self.profile["label"], "coin": "ZOL", "environment": ENVIRONMENT}
 
     def transport(self):
         return {"format": "zolana-browser-transport-v1", "network": self.network,
