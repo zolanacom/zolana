@@ -53,13 +53,19 @@ class CacheBoundaryTests(unittest.TestCase):
         return codes[0],json.loads(handler.wfile.getvalue()),seen,hits
 
     def test_each_warm_snapshot_prepays_fresh21_before_any_cache_lookup(self):
-        f=self.fixture();start=len(f.calls)
+        f=self.fixture()
         for _ in range(2):
+            start=len(f.calls)
             code,body,seen,hits=self.request(f)
             self.assertEqual(code,200);self.assertEqual(body['id'],'original')
             self.assertEqual([x for x in seen if x[0]=='authorize-many'],[('authorize-many',{'signature':'valid'},['--units','21'])])
             self.assertTrue(any(key is not None for key in hits))
-        self.assertEqual([c['method'] for c in f.calls[start:]],['getGenesisHash','getAccountInfo','getBlocksWithLimit']*2)
+            # The genesis and pool reads are sent in parallel, so the order in which the
+            # upstream receives them is not fixed. Both precede the range read, and a warm
+            # snapshot reads nothing else upstream.
+            methods=[c['method'] for c in f.calls[start:]]
+            self.assertEqual(sorted(methods[:2]),['getAccountInfo','getGenesisHash'])
+            self.assertEqual(methods[2:],['getBlocksWithLimit'])
 
     def test_missing_invalid_revoked_quota_and_incomplete_prepay_never_touch_cache(self):
         f=self.fixture()
