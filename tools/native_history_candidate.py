@@ -30,6 +30,7 @@ OLD_UNITS=('zolana-native-060-rehearsal-gateway.service','zolana-native-060-rehe
 PREVIOUS_UNITS=('zolana-native-061-gateway.service','zolana-native-061-rpc.socket',
                 'zolana-native-061-faucet.socket','zolana-native-062-gateway.service',
                 'zolana-native-062-rpc.socket','zolana-native-062-faucet.socket')
+BASE_MODULE='native_linux_service.py'
 HEX=re.compile('[a-f0-9]{64}')
 
 
@@ -65,6 +66,38 @@ def sealed(path,maximum=1024*1024):
         raw=source.read(maximum+1)
         if len(raw)!=meta.st_size:raise ValueError('candidate file changed while reading')
         return raw
+
+
+def described(environment=None):
+    """This overlay is sealed as exactly three modules, so it reads the deployment description itself.
+
+    With ZOLANA_DEPLOYMENT unset the built-in names and pin stand. Otherwise the
+    description must be a sealed file whose SHA-256 is ZOLANA_DEPLOYMENT_SHA256.
+    """
+    global PREFIX,CONFIG,OLD_PREFIX,OLD_CONFIG,OLD_BINDING,BASE_SHA,UNIT,SOCKETS,OLD_UNITS,PREVIOUS_UNITS,BASE_MODULE
+    environment=os.environ if environment is None else environment
+    path,expected=(environment.get(name) for name in ('ZOLANA_DEPLOYMENT','ZOLANA_DEPLOYMENT_SHA256'))
+    if path is None and expected is None:return False
+    if path is None or expected is None or HEX.fullmatch(expected) is None:
+        raise ValueError('a deployment description needs its absolute path and its SHA-256')
+    raw=sealed(Path(path),65536)
+    if digest(raw)!=expected:raise ValueError('deployment description differs from its SHA-256')
+    value=decode(raw);service,candidate=value['service'],value['history_candidate']
+    rehearsal=value['cohort']['rehearsal'];stem=rehearsal['unit_stem']
+    units=[candidate['unit'],candidate['sockets']['rpc'],candidate['sockets']['faucet'],*candidate['previous_units']]
+    texts=[candidate['prefix'],candidate['config'],service['prefix'],service['etc'],rehearsal['directory'],stem,
+        service['module'],*units]
+    if (any(not isinstance(item,str) or not item for item in texts) or len(set(units))!=len(units)
+            or any(not Path(item).is_absolute() for item in texts[:4]) or '/' in rehearsal['directory']
+            or not isinstance(candidate['base_config_sha256'],str) or HEX.fullmatch(candidate['base_config_sha256']) is None
+            or re.fullmatch(r'[a-z][a-z0-9_]{2,63}\.py',service['module']) is None):
+        raise ValueError('deployment description does not name this history candidate and its base')
+    PREFIX=Path(candidate['prefix']);CONFIG=Path(candidate['config']);OLD_PREFIX=Path(service['prefix'])
+    OLD_CONFIG=Path(service['etc'])/'config.json';OLD_BINDING=Path(service['etc'])/rehearsal['directory']/'binding.json'
+    BASE_SHA=candidate['base_config_sha256'];UNIT=units[0];SOCKETS={'rpc':units[1],'faucet':units[2]}
+    OLD_UNITS=(stem+'-gateway.service',stem+'-rpc.socket',stem+'-faucet.socket')
+    PREVIOUS_UNITS=tuple(units[3:]);BASE_MODULE=service['module']
+    return True
 
 
 def validate_config(value):
@@ -121,7 +154,7 @@ def load_runtime(expected):
     inventory=decode(old_manifest)
     if (not isinstance(inventory,dict) or inventory.get('format')!='zolana-native-service-bundle-v1'
             or not isinstance(inventory.get('files'),dict)):raise ValueError('original bundle inventory missing')
-    for name in ('tools/native_cohort_service.py','tools/native_linux_service.py'):
+    for name in ('tools/native_cohort_service.py','tools/'+BASE_MODULE):
         check_entry(inventory['files'].get(name),sealed(OLD_PREFIX/name))
     binding_raw=sealed(OLD_BINDING,65536)
     if digest(binding_raw)!=candidate['rehearsal_binding_sha256']:raise ValueError('original rehearsal binding changed')
@@ -161,11 +194,11 @@ def units(cohort,expected):
         text=text.replace('[Unit]\n','[Unit]\nConflicts='+' '.join(conflicts)+'\nAfter='+' '.join(conflicts)+'\n',1)
         text=text.replace('LOCAL-060','LOCAL-063 candidate')
         if name==OLD_UNITS[0]:
-            old='ExecStart=/usr/bin/python3 -I -B /opt/zolana-native-058/tools/native_cohort_service.py gateway --rehearsal'
+            old='ExecStart=/usr/bin/python3 -I -B '+str(OLD_PREFIX/'tools/native_cohort_service.py')+' gateway --rehearsal'
             if old not in text:raise ValueError('original fixed service entrypoint changed')
             text=text.replace(old,'ExecStart=/usr/bin/python3 -I -B '+str(PREFIX/'tools/native_history_candidate.py')+
                               ' gateway --config-sha256 '+expected)
-            text=text.replace('WorkingDirectory=/opt/zolana-native-058','WorkingDirectory='+str(PREFIX))
+            text=text.replace('WorkingDirectory='+str(OLD_PREFIX)+'\n','WorkingDirectory='+str(PREFIX)+'\n')
         result[names[name]]=text
     return result
 
@@ -175,6 +208,7 @@ def main():
     parser.add_argument('command',choices=('check','gateway','render'))
     parser.add_argument('--config-sha256',required=True);parser.add_argument('--output',type=Path)
     args=parser.parse_args()
+    described()
     cohort,base,config,config_sha,evidence=load_runtime(args.config_sha256)
     if args.command=='render':
         if args.output is None:parser.error('render requires a fresh output directory')

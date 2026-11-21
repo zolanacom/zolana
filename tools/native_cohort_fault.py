@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 
+import deployment
 import native_linux_service as base
 from test_faucet import BoundedServer
 from testnet_gateway import HISTORY_PAGE, READ_METHODS, read_calls
@@ -90,7 +91,7 @@ def checked_response(query,raw):
 
 def root_for(rehearsal):
     if type(rehearsal) is not bool:raise ValueError('only fixed cohort test modes allowed')
-    return Path('/var/lib/zolana-native-058/gateway')/('cohort-060-rehearsal' if rehearsal else 'cohort-060')
+    return deployment.cohort_mode(deployment.active(),rehearsal)['root']
 
 
 def finalized_match(request,response,signature):

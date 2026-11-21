@@ -15,18 +15,21 @@ import re
 import stat
 import subprocess
 
+import deployment
 from explorer_model import public_key
 from pilot_cohort import code_bytes
 from wallet_release import atomic, create, decode, encode, fsync_dir, read
 
-PREFIX=Path('/opt/zolana-native-058')
-BASE_CONFIG=Path('/etc/zolana-native-058/config.json')
-ROOT=Path('/var/lib/zolana-native-058/gateway/cohort-060')
-ETC=Path('/etc/zolana-native-058/cohort-060')
+DEPLOYMENT=deployment.active()
+PREFIX=Path(DEPLOYMENT['service']['prefix'])
+BASE_CONFIG=Path(DEPLOYMENT['service']['etc'])/'config.json'
+ROOT=deployment.cohort_mode(DEPLOYMENT)['root']
+ETC=deployment.cohort_mode(DEPLOYMENT)['etc']
 FAUCET=PREFIX/'bin/native-faucet'
 WALLET=PREFIX/'bin/native-wallet'
 SLOTS=tuple(f'tester-{index:02}' for index in range(1,11))
-MODES={'cohort-060':(39443,39444),'cohort-060-rehearsal':(40443,40444)}
+MODES={DEPLOYMENT['cohort'][name]['directory']:tuple(DEPLOYMENT['cohort'][name]['ports'][role] for role in ('rpc','faucet'))
+    for name in ('pilot','rehearsal')}
 HEX=re.compile('[a-f0-9]{64}')
 PLAN_KEYS={'format','network','pool_format','cohort_size','private_grant','gas_grant','attempts','payment_cap',
     'private_budget','public_budget','source_private_address','source_fee_address','source_wallet_sha256',
@@ -339,8 +342,8 @@ def main():
     parser.add_argument('command',choices=('plan','initialize-issuance','issue','audit'))
     parser.add_argument('--rehearsal',action='store_true');parser.add_argument('--plan-sha256')
     parser.add_argument('--slot',choices=SLOTS);parser.add_argument('--bind-fee');parser.add_argument('--ttl',type=int,default=86400)
-    args=parser.parse_args();suffix='-rehearsal' if args.rehearsal else ''
-    root=ROOT.with_name(ROOT.name+suffix);templates=ETC.with_name(ETC.name+suffix)
+    args=parser.parse_args();chosen=deployment.cohort_mode(DEPLOYMENT,args.rehearsal)
+    root=chosen['root'];templates=chosen['etc']
     if args.command=='plan':value=build_plan(root,templates)
     else:
         if args.plan_sha256 is None:parser.error('explicit reviewed plan-sha256 required')

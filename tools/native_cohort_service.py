@@ -16,31 +16,41 @@ import stat
 import sys
 import threading
 import time
+import types
 
-PREFIX=Path('/opt/zolana-native-058')
-ETC=Path('/etc/zolana-native-058/cohort-060')
-ROOT=Path('/var/lib/zolana-native-058/gateway/cohort-060')
-PORTS={'rpc':39443,'faucet':39444}
-UNIT='zolana-native-060-gateway.service'
-SOCKETS={name:'zolana-native-060-'+name+'.socket' for name in PORTS}
-VALUNIT='zolana-native-058-validator.service'
 HEX=re.compile('[a-f0-9]{64}')
 
 
+def load_description():
+    # Python -I excludes siblings/PYTHONPATH. Execute the deployment description
+    # module from beside this entrypoint, without a bytecode cache; the sealed
+    # bundle check that follows in load_base covers both files.
+    path=Path(__file__).resolve().with_name('deployment.py');module=types.ModuleType('zolana_deployment')
+    module.__file__=str(path);exec(compile(path.read_bytes(),str(path),'exec'),module.__dict__)
+    return module
+
+
+description=load_description()
+
+
 def fixed_mode(rehearsal=False):
-    if type(rehearsal) is not bool:raise ValueError('only the two fixed cohort modes are allowed')
-    suffix='cohort-060-rehearsal' if rehearsal else 'cohort-060'
-    name='zolana-native-060-rehearsal' if rehearsal else 'zolana-native-060'
-    ports={'rpc':40443,'faucet':40444} if rehearsal else {'rpc':39443,'faucet':39444}
-    return dict(root=Path('/var/lib/zolana-native-058/gateway')/suffix,
-        etc=Path('/etc/zolana-native-058')/suffix,ports=ports,unit=name+'-gateway.service',
-        sockets={role:name+'-'+role+'.socket' for role in ports})
+    return description.cohort_mode(DEPLOYMENT,rehearsal)
 
 
 def select_mode(rehearsal=False):
     global ROOT,ETC,PORTS,UNIT,SOCKETS
     mode=fixed_mode(rehearsal)
     ROOT,ETC,PORTS,UNIT,SOCKETS=(mode[k] for k in ('root','etc','ports','unit','sockets'))
+
+
+def configure(value):
+    """Take every installation name, path and port from one deployment description."""
+    global DEPLOYMENT,PREFIX,VALUNIT
+    DEPLOYMENT=description.validate(value);PREFIX=Path(value['service']['prefix'])
+    VALUNIT=value['service']['units']['validator'];select_mode(False)
+
+
+configure(description.active())
 
 
 def audience(name):return 'https://127.0.0.1:'+str(PORTS[name])
@@ -60,7 +70,8 @@ def hash_value(value):
 def load_base():
     # Python -I excludes siblings/PYTHONPATH. Load only the immutable fixed base
     # entrypoint; its complete bundle/config verification precedes other imports.
-    path=PREFIX/'tools/native_linux_service.py'
+    if description.active(sealed=True)!=DEPLOYMENT:raise ValueError('deployment description changed or is not sealed')
+    path=PREFIX/'tools'/DEPLOYMENT['service']['module']
     for ancestor in path.parents:
         meta=ancestor.lstat()
         if not stat.S_ISDIR(meta.st_mode) or meta.st_uid!=0 or meta.st_mode&0o022 or ancestor.resolve()!=ancestor:
@@ -71,6 +82,7 @@ def load_base():
     spec=importlib.util.spec_from_file_location('zolana_sealed_base',path)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     config,config_sha256=module.load_config()
+    description.check_network(DEPLOYMENT,config['network'])
     sys.path.insert(0,str(PREFIX/'tools'))
     return module,config,config_sha256
 
@@ -78,7 +90,7 @@ def load_base():
 def units(rehearsal=False):
     mode=fixed_mode(rehearsal);sockets=' '.join(mode['sockets'].values())
     unit='''[Unit]
-Description=Zolana LOCAL-060 finite native cohort gateway
+Description=Zolana {label} finite native cohort gateway
 Requires={validator}
 Requires={sockets}
 After={validator} {sockets}
@@ -88,10 +100,10 @@ JoinsNamespaceOf={validator}
 [Service]
 Type=notify
 NotifyAccess=main
-User=zolana058g
-Group=zolana058g
-SupplementaryGroups=zolana058link
-WorkingDirectory={prefix}
+User={user}
+Group={user}
+SupplementaryGroups={group}
+{environment}WorkingDirectory={prefix}
 ExecStart=/usr/bin/python3 -I -B {prefix}/tools/native_cohort_service.py gateway{modeflag}
 Sockets={sockets}
 ReadWritePaths={root}
@@ -123,11 +135,13 @@ Restart=on-failure
 RestartSec=10s
 [Install]
 WantedBy=multi-user.target
-'''.format(validator=VALUNIT,sockets=sockets,prefix=PREFIX,root=mode['root'],modeflag=' --rehearsal' if rehearsal else '')
+'''.format(validator=VALUNIT,sockets=sockets,prefix=PREFIX,root=mode['root'],modeflag=' --rehearsal' if rehearsal else '',
+        label=DEPLOYMENT['cohort']['label'],user=DEPLOYMENT['service']['users']['gateway'],
+        group=DEPLOYMENT['service']['link_group'],environment=description.unit_environment())
     output={mode['unit']:unit}
     for name,port in mode['ports'].items():
         output[mode['sockets'][name]]=('''[Unit]
-Description=Zolana LOCAL-060 {name} host TLS socket
+Description=Zolana {label} {name} host TLS socket
 [Socket]
 ListenStream=127.0.0.1:{port}
 FileDescriptorName={name}
@@ -137,7 +151,7 @@ NoDelay=true
 Backlog=8
 [Install]
 WantedBy=sockets.target
-'''.format(name=name,port=port,unit=mode['unit']))
+'''.format(name=name,port=port,unit=mode['unit'],label=DEPLOYMENT['cohort']['label']))
     return output
 
 
@@ -272,7 +286,7 @@ def prepare(base,config,plan,ready):
     try:
         if config['test_mode']:
             from native_cohort_fault import GrantRpcGate
-            gate=GrantRpcGate(upstream,plan['network'],uid,rehearsal=ROOT.name=='cohort-060-rehearsal');rpc='http://'+gate.endpoint
+            gate=GrantRpcGate(upstream,plan['network'],uid,rehearsal=ROOT.name==DEPLOYMENT['cohort']['rehearsal']['directory']);rpc='http://'+gate.endpoint
         for path in (ROOT/'source.json',ROOT/'faucet/profile.json'):
             current=json.loads(base.owned(path,uid));base.atomic(path,base.endpoint_update(current,source,{'rpc.url':rpc}))
         path=ROOT/'relay/config.json';current=json.loads(base.owned(path,uid))
