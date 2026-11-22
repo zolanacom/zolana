@@ -1,0 +1,144 @@
+{
+  "format": "zolana-protocol-vectors/accounts/1",
+  "program_id_hex": "5b2209cb8c4a5c0ba714d249409b03dc1957c2347a1caaf11d832a584c6b0dbe",
+  "program_id": "78kCqctsuUaj7kyV8xNVwXQrqovY3QtSytt4eCYApVUh",
+  "system_program_id": "11111111111111111111111111111111",
+  "pool_seed": "native-payment-pool-v1",
+  "marker_seed": "native-payment-spent-v1",
+  "pool": {
+    "seeds_hex": ["6e61746976652d7061796d656e742d706f6f6c2d7631"],
+    "bump": 255,
+    "address_hex": "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+    "address": "4mJMnxFhRVMQ3aNcyn2LgW8fztTjgckUvaaWrXggdAAL"
+  },
+  "nullifier_markers": [
+    {
+      "payment": "deposit",
+      "action": 0,
+      "nullifier": "c018663de54500de3d5e87e93d924b785bc4e92df23f0335739644801347ee1e",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "c018663de54500de3d5e87e93d924b785bc4e92df23f0335739644801347ee1e"
+        ],
+        "bump": 254,
+        "address_hex": "b0e10ab786ac07828461a7bddc2ed932d4769abdead8acff5658b80654bf3a19",
+        "address": "CuTnQuuhgaR2yX6uk31ktvqvCMW3BY8XxLjvvfgedG8Q"
+      }
+    },
+    {
+      "payment": "deposit",
+      "action": 1,
+      "nullifier": "dc553276d4b3dc277c038a98aa6743758388e0dba4f9c641c4d89c2b2a39d43a",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "dc553276d4b3dc277c038a98aa6743758388e0dba4f9c641c4d89c2b2a39d43a"
+        ],
+        "bump": 255,
+        "address_hex": "b7859e69e0715363718e0e91a9b877e4311ad7a6e045791dbf87e9a9abb8b0a8",
+        "address": "DMPnM6oK6dNkRtwjbU1fTM3xPX8oamj26qT56faDeRPd"
+      }
+    },
+    {
+      "payment": "send",
+      "action": 0,
+      "nullifier": "d296fe78dc3725b875c3e07901cd722c3f4070f38aa493eeaee6fd41c241ef3d",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "d296fe78dc3725b875c3e07901cd722c3f4070f38aa493eeaee6fd41c241ef3d"
+        ],
+        "bump": 255,
+        "address_hex": "13c1e6b381f8396a255f497eec90fcc29e5424890c19f25141ff3022408c3a64",
+        "address": "2L8EYJ8vo2xChVhQZhhYcH4CmD5cFtsWarajo73bNRkX"
+      }
+    },
+    {
+      "payment": "send",
+      "action": 1,
+      "nullifier": "92cf78887784c7515bd2bf020d349ee03eac3d1725c30dedd4a2987c315f093e",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "92cf78887784c7515bd2bf020d349ee03eac3d1725c30dedd4a2987c315f093e"
+        ],
+        "bump": 255,
+        "address_hex": "4da53bcc78468de8f5ba1cf87966ec611d79ca899c299b1f7592dec257d797cb",
+        "address": "6E6XWyPsd8FqqzMxrMkYPWvgvsQ88fHvqK5MAiACxXkn"
+      }
+    },
+    {
+      "payment": "fee-payment",
+      "action": 0,
+      "nullifier": "3c81f130dad15e13fa8b94ca4c281d12f9eb6046393b3d55e51a7b5d66cf0530",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "3c81f130dad15e13fa8b94ca4c281d12f9eb6046393b3d55e51a7b5d66cf0530"
+        ],
+        "bump": 255,
+        "address_hex": "97473a1994de2b312ed26c827de4d79276f8fcb3b798f8ca7c99e4baf46217e4",
+        "address": "BBXZEr5VCpGeEsNRtrodD8aHTevS81e9yd5BcED3peJX"
+      }
+    },
+    {
+      "payment": "fee-payment",
+      "action": 1,
+      "nullifier": "89d8b2de19001e97a882e5e4ec8cabf6dae6980685fc5137a44270d5288c2201",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "89d8b2de19001e97a882e5e4ec8cabf6dae6980685fc5137a44270d5288c2201"
+        ],
+        "bump": 252,
+        "address_hex": "ed66831924b008f52f1dbfb0c3db0eadb6a236cad4ede512f4437d51bc8949c5",
+        "address": "GyiHd6dPkb65HARqV5KhGi6kjjprLJ4DfWdZYSXGiRGg"
+      }
+    },
+    {
+      "payment": "withdrawal",
+      "action": 0,
+      "nullifier": "186df3113ade65231c4eb069917686414abb2eb84d3230520f9c89e1a8899e0f",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "186df3113ade65231c4eb069917686414abb2eb84d3230520f9c89e1a8899e0f"
+        ],
+        "bump": 251,
+        "address_hex": "9715b7c7cac85ff167c79d65a5d2d3492a815c064c88aa21be6645dd54e287c0",
+        "address": "BAmmeXYKrW8JYQ6irAKaf3qMB56gKpz2MrhAhsXYd7K5"
+      }
+    },
+    {
+      "payment": "withdrawal",
+      "action": 1,
+      "nullifier": "6505e4c6b62052449fb2a19b61592f3b49ffed966bda50478dbd5aa3dc5aaa35",
+      "account": {
+        "seeds_hex": [
+          "6e61746976652d7061796d656e742d7370656e742d7631",
+          "37ec3e6202046e026f01f584e1ef8aafe003150b44563c6eea35629d81827fd1",
+          "6505e4c6b62052449fb2a19b61592f3b49ffed966bda50478dbd5aa3dc5aaa35"
+        ],
+        "bump": 253,
+        "address_hex": "e5ceb2f74e933fae5b88a263c18984b6cca3bcd9251de92255f3e8498a057b62",
+        "address": "GU5Amriocho16h5fUCpDNAcnXtjTcECjPoSZChECkGho"
+      }
+    }
+  ],
+  "scenario_keys": {
+    "sponsor": "BDY41Q1wQGzPXJPPLY7y66YYfysgVvC3vHmngYgYW6Ah",
+    "sponsor_hex": "97caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe",
+    "relay": "4c51GKvxi5kPCzjfc3TLMc1yAZktm1Td1x3tHVA6Ma4Y",
+    "relay_hex": "358eeac49d22865cdee44784e63e74ba4cb847aa6205d686139dca1e45a71b81",
+    "recipient": "2sKcqQ2WLfH81nZ1YaTCZykE9GtWQYaVvZma2EAFNDng",
+    "recipient_hex": "1bbfc75482941bc2b70d7ffcd153bbb5666ca498b581d43c4dd1cf5c593b4391"
+  }
+}

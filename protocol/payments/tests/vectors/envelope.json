@@ -1,0 +1,230 @@
+{
+  "format": "zolana-protocol-vectors/envelope/1",
+  "network": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "tag": "ZOLNPAY1",
+  "version": 1,
+  "domain": "ZolanaNativePay!",
+  "header_bytes": 102,
+  "max_envelope_bytes": 16384,
+  "max_inner_payment_bytes": 16282,
+  "frame": {
+    "payment": "fee-payment",
+    "bytes": 9332,
+    "header_hex": "5a4f4c4e5041593101005a6f6c616e614e617469766550617921a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfa00f00000000000047286aec47f47c405d2032e3ac402661f10b902650b300d81c0980c33792225e0e240000",
+    "expires_at": 4000,
+    "payment_id": "47286aec47f47c405d2032e3ac402661f10b902650b300d81c0980c33792225e",
+    "payload_length": 9230,
+    "blake2b_256": "bec641a434ce77c2a5e39e766533881edeabd63c371c015ea7996cdddc5a231b"
+  },
+  "decode_by_slot": [
+    {
+      "current_slot": 2975,
+      "result": "InvalidContext"
+    },
+    {
+      "current_slot": 2976,
+      "result": "ok"
+    },
+    {
+      "current_slot": 4000,
+      "result": "ok"
+    },
+    {
+      "current_slot": 4001,
+      "result": "Expired"
+    }
+  ],
+  "bases": {
+    "frame around the send": {
+      "header_hex": "5a4f4c4e5041593101005a6f6c616e614e617469766550617921a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf1c0c000000000000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed406240000",
+      "payload": "send"
+    },
+    "frame around the withdrawal": {
+      "header_hex": "5a4f4c4e5041593101005a6f6c616e614e617469766550617921a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf800c000000000000da1266164ec7ac253daa7923f149b1f40159566a9be4960ce39b957188811aef26240000",
+      "payload": "withdrawal"
+    },
+    "frame with another inner expiry": {
+      "header_hex": "5a4f4c4e5041593101005a6f6c616e614e617469766550617921a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfa00f0000000000002f556a48bb86c2825dbd4cc69f4e60f835a703af57ae1b09b48855a8491085500e240000",
+      "payload": "fee-payment with expires_at one higher"
+    }
+  },
+  "decode_cases_at_slot": 3000,
+  "decode_cases": [
+    {
+      "name": "unchanged",
+      "base": "frame",
+      "edits": [],
+      "result": "ok"
+    },
+    {
+      "name": "tag changed",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 0,
+          "hex": "5a4f4c4e50415932"
+        }
+      ],
+      "result": "UnsupportedVersion"
+    },
+    {
+      "name": "version 2",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 8,
+          "hex": "0200"
+        }
+      ],
+      "result": "UnsupportedVersion"
+    },
+    {
+      "name": "domain changed",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 10,
+          "hex": "7a"
+        }
+      ],
+      "result": "InvalidContext"
+    },
+    {
+      "name": "another network in the header",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 26,
+          "hex": "a1"
+        }
+      ],
+      "result": "WrongNetwork"
+    },
+    {
+      "name": "header expiry differs from the payment",
+      "base": "frame with another inner expiry",
+      "edits": [],
+      "result": "InvalidContext"
+    },
+    {
+      "name": "identity changed",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 66,
+          "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "result": "DigestMismatch"
+    },
+    {
+      "name": "payment byte changed",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 9331,
+          "hex": "30"
+        }
+      ],
+      "result": "DigestMismatch"
+    },
+    {
+      "name": "length field of zero",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 98,
+          "hex": "00000000"
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "length field one short",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 98,
+          "hex": "0d240000"
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "length field above the frame limit",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 98,
+          "hex": "9b3f0000"
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "trailing byte",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "append",
+          "hex": "00"
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "header only",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "truncate",
+          "to": 102
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "padded to the frame limit",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "zero_extend",
+          "to": 16384
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "padded past the frame limit",
+      "base": "frame",
+      "edits": [
+        {
+          "op": "zero_extend",
+          "to": 16385
+        }
+      ],
+      "result": "InvalidLength"
+    },
+    {
+      "name": "plain payment inside",
+      "base": "frame around the send",
+      "edits": [],
+      "result": "UnsupportedVersion"
+    },
+    {
+      "name": "withdrawal inside",
+      "base": "frame around the withdrawal",
+      "edits": [],
+      "result": "UnsupportedVersion"
+    }
+  ]
+}
