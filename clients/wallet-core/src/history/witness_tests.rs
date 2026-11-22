@@ -42,7 +42,9 @@ fn v4_empty_finish_reuses_authenticated_root_and_still_checks_independent_tree()
     let mut state = WalletState::with_key(&wallet, 1000, key.clone()).unwrap();
     state.pool = PoolState::new_slot_anchored(wallet.network_domain(), 1000).unwrap();
     state.finish_slot(0).unwrap();
-    let commitments = [leaf(1), leaf(2)];
+    // Not leaf(2): the field element 2 is the empty leaf, which the pool
+    // refuses as a note.
+    let commitments = [leaf(1), leaf(5)];
     state.pool = state
         .pool
         .with_payment(&VerifiedPayment {
@@ -185,7 +187,9 @@ fn incremental_cache_matches_native_pool_frontier() {
     let mut pool = PoolState::new([1; 32], 1000).unwrap();
     let mut tree = WitnessTree::default();
     for payment in 0..70 {
-        let commitments = [leaf(payment * 2), leaf(payment * 2 + 1)];
+        // From 3 on: the field element 2 is the empty leaf, which the pool
+        // refuses as a note.
+        let commitments = [leaf(payment * 2 + 3), leaf(payment * 2 + 4)];
         pool = pool
             .with_payment(&VerifiedPayment {
                 nullifiers: [[3; 32], [4; 32]],

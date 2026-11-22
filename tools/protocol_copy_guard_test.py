@@ -15,6 +15,11 @@ import reconstruct_native_candidate as candidate
 # entry, raising a count or raising a class records a new divergence between
 # the code the checks test and the code the validator runs: it needs a new
 # review of that difference, not only an edit here.
+#
+# state.rs was (7, 186, "refactor") in that review. It was raised when the
+# workspace copy gained two pool-state rules that the plan's copy does not
+# have. The proposed patch below carries the same rules for the candidate; with
+# it applied the two files differ in 7 and 186 lines again.
 REVIEWED_DIFFERENCES = {
     "node/adapter/src/lib.rs": (10, 7, "behaviour"),
     "node/adapter/src/nullifiers.rs": (10, 3, "refactor"),
@@ -22,7 +27,7 @@ REVIEWED_DIFFERENCES = {
     "node/adapter/src/staging.rs": (80, 18, "refactor"),
     "protocol/payments/src/envelope.rs": (0, 1, "refactor"),
     "protocol/payments/src/lib.rs": (0, 1, "refactor"),
-    "protocol/payments/src/state.rs": (7, 186, "refactor"),
+    "protocol/payments/src/state.rs": (11, 283, "behaviour"),
     "protocol/payments/src/wire.rs": (5, 11, "refactor"),
 }
 REVIEWED_WORKSPACE_ONLY = {
@@ -30,6 +35,13 @@ REVIEWED_WORKSPACE_ONLY = {
     "protocol/payments/src/native_accounts.rs": "refactor",
 }
 REVIEWED_CANDIDATE_ONLY = {}
+# Patches outside the reconstruction plan that may change a copy, by SHA-256.
+# Removing one passes. Adding one, or changing its bytes, fails until it is
+# reviewed and this entry is edited as well.
+REVIEWED_PROPOSED_PATCHES = {
+    "node/candidate/drafts/pool-state-hardening/agave-4.3.2-pool-state-hardening.patch":
+        "c9e832dddd3ab1d7d816cac3f6a83433180f09b832fb86a41cf7af6a7344029e",
+}
 IDENTICAL_TODAY = [
     "node/adapter/src/instructions.rs",
     "protocol/payments/src/anchors.rs",
@@ -96,6 +108,7 @@ class GuardTests(unittest.TestCase):
                 "class": "refactor", "review": REVIEW}},
             "workspace_only": {},
             "candidate_only": {},
+            "proposed_patches": {},
         }
 
     def workspace(self, name, text):
@@ -237,6 +250,30 @@ class GuardTests(unittest.TestCase):
                       "reconstruction plan changes a protocol copy", problems)
         self.assertNotIn("elsewhere.patch", problems)
 
+    def test_recorded_proposal_passes_until_it_changes_or_stops_being_one(self):
+        name = "node/candidate/drafts/next/proposed.patch"
+        raw = replaced("zolana-native/protocol/src/state.rs", "pub fn root() {}", "pub fn root() { todo!() }").encode()
+        self.artifact("drafts/next/proposed.patch", raw)
+        self.allowlist["proposed_patches"][name] = {"sha256": checksum(raw), "review": REVIEW}
+        result, problems = self.run_check()
+        self.assertEqual(problems, [])
+        self.assertEqual(result["recorded_proposed_patches"], [name])
+        # A proposal is not applied: the plan's copy is still the one compared.
+        self.assertIn("protocol/payments/src/state.rs", result["identical"])
+        # A second, unrecorded patch is not covered by the record of the first.
+        self.artifact("drafts/next/other.patch", replaced(
+            "zolana-native/adapter/src/processor.rs", "pub fn process() {}", "pub fn process() { todo!() }").encode())
+        self.assertIn("other.patch: a patch outside the reconstruction plan changes a protocol copy",
+                      self.problems())
+        (self.artifacts / "drafts/next/other.patch").unlink()
+        self.artifact("drafts/next/proposed.patch", raw + b"\n")
+        self.assertIn("proposed.patch: the proposed patch changed since it was reviewed", self.problems())
+        self.artifact("drafts/next/proposed.patch", replaced("ledger/src/blockstore_db.rs", "old", "new").encode())
+        self.assertIn("proposed.patch: allow-list entry for a proposed patch that is gone, has joined the "
+                      "plan or no longer changes a copy", self.problems())
+        (self.artifacts / "drafts/next/proposed.patch").unlink()
+        self.assertIn("proposed.patch: allow-list entry for a proposed patch that is gone", self.problems())
+
     def test_proof_system_release_must_be_the_same_exact_pin(self):
         self.allowlist["plan_sha256"] = self.write_chain(
             manifest=MANIFEST.replace("=0.16.0", "=0.17.0"))
@@ -264,6 +301,18 @@ class GuardTests(unittest.TestCase):
         with patch.dict(self.allowlist, {"format": "other"}):
             with self.assertRaisesRegex(ValueError, "invalid protocol copy allow-list"):
                 self.run_check()
+        name = "node/candidate/drafts/next/proposed.patch"
+        for proposal, message in (
+                ({"sha256": "abc", "review": REVIEW}, "invalid hash"),
+                ({"sha256": "0" * 64, "review": "ok"}, "needs a written review"),
+                ({"sha256": "0" * 64, "review": REVIEW, "note": "extra"}, "must have exactly"),
+                ({"sha256": "0" * 64}, "must have exactly")):
+            with self.subTest(proposal=proposal), patch.dict(self.allowlist["proposed_patches"], {name: proposal}):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.run_check()
+        with patch.dict(self.allowlist, {"proposed_patches": []}):
+            with self.assertRaisesRegex(ValueError, "proposed_patches must be an object"):
+                self.run_check()
 
     def test_unmatched_lines_ignore_order_and_count_repeats(self):
         self.assertEqual(guard.unmatched_lines(b"a\nb\nc\n", b"c\na\nb\n"),
@@ -282,6 +331,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(result["recorded_differences"], sorted(REVIEWED_DIFFERENCES))
         self.assertEqual(result["recorded_workspace_only"], sorted(REVIEWED_WORKSPACE_ONLY))
         self.assertEqual(result["recorded_candidate_only"], sorted(REVIEWED_CANDIDATE_ONLY))
+        self.assertEqual(result["recorded_proposed_patches"], sorted(REVIEWED_PROPOSED_PATCHES))
 
     def test_allowlist_stays_within_the_reviewed_ceiling(self):
         allowlist = guard.load_allowlist(guard.DEFAULT_ALLOWLIST)
@@ -299,11 +349,14 @@ class RepositoryTests(unittest.TestCase):
             for name, entry in allowlist[section].items():
                 with self.subTest(name=name):
                     self.assertLessEqual(rank(entry["class"]), rank(reviewed[name]))
+        for name, entry in allowlist["proposed_patches"].items():
+            with self.subTest(name=name):
+                self.assertEqual(entry["sha256"], REVIEWED_PROPOSED_PATCHES.get(name))
 
     def test_every_candidate_patch_is_either_planned_or_leaves_the_copies_alone(self):
         allowlist = guard.load_allowlist(guard.DEFAULT_ALLOWLIST)
         plan = candidate.load_plan(candidate.DEFAULT_PLAN, allowlist["plan_sha256"])
-        self.assertEqual(guard.unplanned_patches(plan), [])
+        self.assertLessEqual(guard.unplanned_patches(plan).items(), REVIEWED_PROPOSED_PATCHES.items())
         # Only the base patch creates the copies; no later revision edits them.
         touching = [step.revision for step in plan.transitions
                     if any(guard.candidate_root_of(name) for name in step.files)]

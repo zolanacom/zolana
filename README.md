@@ -192,6 +192,7 @@ development values.
   [module boundaries](docs/refactoring-plan.md),
   [browser storage adapter](clients/browser-wallet/storage.js),
   [Agave 4.3.2 candidate](node/candidate/README.md).
+- **Testing:** [protocol fuzz targets and property tests](docs/protocol-fuzzing.md).
 - **Decisions:** numbered records under [docs/decisions/](docs/decisions/).
 
 Where a document says a test passed, it refers to the project's own runs. The

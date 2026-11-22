@@ -92,6 +92,15 @@ jobs:
       - name: Run the Rust tests
         run: sh tools/dev.sh test --locked $PACKAGES
 
+      # The step above ran the protocol fuzz targets and pool property tests at
+      # their built-in case count. This runs them with four times as many
+      # cases. The seed is fixed, so a failure here repeats on any machine. See
+      # docs/protocol-fuzzing.md.
+      - name: Run the protocol fuzz targets and property tests for longer
+        env:
+          PROTOCOL_FUZZ_SCALE: "4"
+        run: sh tools/dev.sh test --locked -p native-payments --test decoder_fuzz --test pool_properties -- --nocapture
+
       # One browser-wallet suite starts python3 to run the archival adapter in
       # tools/. It needs no Python packages.
       - name: Run the JavaScript tests

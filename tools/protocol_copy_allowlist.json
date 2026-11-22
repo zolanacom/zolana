@@ -64,13 +64,13 @@
     },
     "protocol/payments/src/state.rs": {
       "candidate_sha256": "3897cd6ca3a80e5ed767135f732c4697fde87fbd2bcdb8bf4940527ac659b81e",
-      "workspace_sha256": "e391fa78ec855e61b13e4bd28fa39d099496c5a726b217e3e11bc0f93be428e5",
+      "workspace_sha256": "28d8ee06858d81ac68cf97d79280a685bf542a9ae156d73c8d38b10ca704c4f5",
       "unmatched_lines": {
-        "candidate": 7,
-        "workspace": 186
+        "candidate": 11,
+        "workspace": 283
       },
-      "class": "refactor",
-      "review": "The workspace adds PoolState::complete_slot, which records a slot checkpoint in place and reuses the newest checkpoint's root while the note count is unchanged; the candidate copy recomputes the root from the frontier for every slot. decode refuses a newest checkpoint whose root is not the frontier root at the same count, and only with_payment changes the frontier, so both give the same bytes for every reachable state. The cost differs: the candidate copy hashes 32 tree levels and copies the state for every completed slot. Also: Debug on PoolState, four more tests, import order and one assertion's layout."
+      "class": "behaviour",
+      "review": "The workspace has two rules that the candidate copy lacks: with_payment refuses a payment in which either note is the empty leaf, and decode refuses an NPOOL004 state whose tree the next completed slot could not record (notes under the root of the empty tree, or a root that a stored checkpoint holds for another note count). The candidate copy applies such a payment and decodes such a state. The patch recorded under proposed_patches makes the same change to the candidate copy; with it applied the two files differ in 7 and 186 lines, as they did before the rules were added. The rest is the earlier review, unchanged: The workspace adds PoolState::complete_slot, which records a slot checkpoint in place and reuses the newest checkpoint's root while the note count is unchanged; the candidate copy recomputes the root from the frontier for every slot. decode refuses a newest checkpoint whose root is not the frontier root at the same count, and only with_payment changes the frontier, so both give the same bytes for every reachable state. The cost differs: the candidate copy hashes 32 tree levels and copies the state for every completed slot. Also: Debug on PoolState, four more tests, import order and one assertion's layout; with the two rules, one more test, and one test that pays in ordinary notes where the candidate copy's pays in empty leaves."
     },
     "protocol/payments/src/wire.rs": {
       "candidate_sha256": "c46c58e302153ec016c774847dd3e6b485f24d60c80b3b301fe2a2606919ad23",
@@ -95,5 +95,11 @@
       "review": "Program id, pool and marker address derivation and the staging buffer, moved here from the adapter so that wallets can use them without the validator. The candidate series keeps the same code in adapter/src/lib.rs, nullifiers.rs and staging.rs."
     }
   },
-  "candidate_only": {}
+  "candidate_only": {},
+  "proposed_patches": {
+    "node/candidate/drafts/pool-state-hardening/agave-4.3.2-pool-state-hardening.patch": {
+      "sha256": "c9e832dddd3ab1d7d816cac3f6a83433180f09b832fb86a41cf7af6a7344029e",
+      "review": "A proposal: outside the reconstruction plan and not built with the candidate toolchain. It changes zolana-native/protocol/src/state.rs only and adds the two pool-state rules recorded for protocol/payments/src/state.rs. The README beside it gives the file's identity before and after. When it joins the plan, delete this entry and review the state.rs record again."
+    }
+  }
 }

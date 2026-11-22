@@ -68,14 +68,18 @@ Four files are byte-identical in both places: `anchors.rs`, `staging.rs` and
 `verification.rs` of the protocol, and `instructions.rs` of the program. The
 others differ, and each difference is recorded with a written review in
 [`tools/protocol_copy_allowlist.json`](../../tools/protocol_copy_allowlist.json).
-Three records are marked `behaviour`, all for one rule: the workspace's native
-program has no slot-anchor feature and reads its accepted anchors from
+Four records are marked `behaviour`. Three are for one rule: the workspace's
+native program has no slot-anchor feature and reads its accepted anchors from
 `PoolState::roots()`, which is empty for an `NPOOL004` pool, so by its code it
 refuses every payment against such a pool, while the copy in this directory
-accepts the roots of completed earlier slots. Proof verification is one of the
-identical files. The reviews of `wire.rs`, `envelope.rs` and `state.rs` found
-no difference in any encoding or result; `state.rs` differs in cost, because
-the copy in this directory recomputes the tree root for every completed slot.
+accepts the roots of completed earlier slots. The fourth is `state.rs`: the
+workspace refuses a payment that carries the empty leaf as a note and an
+`NPOOL004` state that no completed slot could record, and the copy in this
+directory does not. A [proposed patch](drafts/pool-state-hardening/README.md)
+carries the same two rules for it. Proof verification is one of the identical
+files. The reviews of `wire.rs` and `envelope.rs` found no difference in any
+encoding or result. `state.rs` also differs in cost, because the copy in this
+directory recomputes the tree root for every completed slot.
 
 ```sh
 python3 -B tools/protocol_copy_guard.py check
@@ -88,8 +92,10 @@ is not recorded. Every record pins both files by SHA-256: a change to either
 side of a recorded difference fails until the same change is made on the other
 side or the difference is reviewed again, and a record must be deleted once its
 files are identical. A patch in this directory that is outside the
-reconstruction plan may not touch either copy. The check also requires the
-same exact `orchard` release on both sides. `describe` prints the present
+reconstruction plan may not touch either copy, unless the record names it as a
+proposal with a review and pins it by SHA-256; a proposal is not applied for
+the comparison. The check also requires the same exact `orchard` release on
+both sides. `describe` prints the present
 hashes and line counts of every pair for a reviewer who updates a record.
 
 The record is meant to shrink. The test holds the reviewed set of differing
