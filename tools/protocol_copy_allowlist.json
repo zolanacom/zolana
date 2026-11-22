@@ -1,0 +1,99 @@
+{
+  "format": "zolana-protocol-copy-allowlist-v1",
+  "plan_sha256": "f7e49b5c08901b0c868b826f8f828215f025cf4b42499a7707b1d3763b8075b0",
+  "differences": {
+    "node/adapter/src/lib.rs": {
+      "candidate_sha256": "ea8e5f094ae30696867b64fa0a0ea439e334f6dc15fce85ebcba330a67b9eb56",
+      "workspace_sha256": "87ef529e49e677541373d2dbe90f2b7207ae4c4f951b1177a62822534bd44235",
+      "unmatched_lines": {
+        "candidate": 10,
+        "workspace": 7
+      },
+      "class": "behaviour",
+      "review": "The candidate copy declares SLOT_ANCHOR_ACTIVATION_ID, the feature that enables NPOOL004 pools; the workspace has no such feature. Without behaviour: the workspace takes the program id and the pool address from native_accounts (same bytes, same seed) and adds prepare_verifying_key, which builds the verifying key before the first payment instead of during it."
+    },
+    "node/adapter/src/nullifiers.rs": {
+      "candidate_sha256": "a98e176f28f60cf2534eb8fce4dd32772d9ebf98c6aef6ac80472a5eddc93584",
+      "workspace_sha256": "7a012385ad449adb3e07f4cae8dd1687fb03ae935928ba5476afd9a50cefa691",
+      "unmatched_lines": {
+        "candidate": 10,
+        "workspace": 3
+      },
+      "class": "refactor",
+      "review": "The workspace derives the marker address through native_accounts::nullifier_address: same seeds, same program id, same result."
+    },
+    "node/adapter/src/processor.rs": {
+      "candidate_sha256": "ca53ad4140b57bb063a0f976ac7206d0a12f1ddc499c4383f83646f31fa4cef9",
+      "workspace_sha256": "6bee37a694c55c492ae4c8381c82e7a0ab745238a1e8ca9d55fcdc59b44a9db8",
+      "unmatched_lines": {
+        "candidate": 287,
+        "workspace": 25
+      },
+      "class": "behaviour",
+      "review": "Finalization lives in processor/finalization.rs in the workspace. The candidate copy refuses an NPOOL004 pool unless the slot-anchor feature is active and takes the accepted anchors from PoolState::accepted_roots(slot); the workspace takes them from PoolState::roots(), which is empty for an NPOOL004 pool, so the workspace program refuses every payment against such a pool. For an NPOOL003 pool both accept the same anchors. Without behaviour: runtime accessor names of the two validator releases, marker accounts signed by seed instead of by address (the same address), prepare_verifying_key and its test."
+    },
+    "node/adapter/src/staging.rs": {
+      "candidate_sha256": "28d739526fc5959f873040df7e4b3e0b427dfd7dc23d1b2dee10d890c17df614",
+      "workspace_sha256": "ba683bbc2a14a1c7ad26e4442ee696e3147e5dccc8b71bebc722d9a9d24d71ba",
+      "unmatched_lines": {
+        "candidate": 80,
+        "workspace": 18
+      },
+      "class": "refactor",
+      "review": "The workspace wraps native_accounts::Buffer, which holds the candidate copy's Buffer line for line, and maps its two errors to the same two instruction errors."
+    },
+    "protocol/payments/src/envelope.rs": {
+      "candidate_sha256": "49b7c161fad70f6fb585c8fd1c29f2dc2960d0a56efc3bbba93e0a7a18d81c8b",
+      "workspace_sha256": "475d65a56586bfab9556dfa521a10e2ca2d2ce9f5f369a301824a3b7167ae412",
+      "unmatched_lines": {
+        "candidate": 0,
+        "workspace": 1
+      },
+      "class": "refactor",
+      "review": "The workspace derives Debug on DecodedEnvelope. No other line differs; encoding and every check are the same text."
+    },
+    "protocol/payments/src/lib.rs": {
+      "candidate_sha256": "cbf043455403fc9166110e54721c9d54a0f030f89af0532441fad9f0bd417bb3",
+      "workspace_sha256": "7699040cc02d4f02178a13b0bca8bff4a7f028e7eb9bc215f5cb8a00c7879b1e",
+      "unmatched_lines": {
+        "candidate": 0,
+        "workspace": 1
+      },
+      "class": "refactor",
+      "review": "The workspace declares the native_accounts module, which the candidate series does not have. The error type and every other line are the same text."
+    },
+    "protocol/payments/src/state.rs": {
+      "candidate_sha256": "3897cd6ca3a80e5ed767135f732c4697fde87fbd2bcdb8bf4940527ac659b81e",
+      "workspace_sha256": "e391fa78ec855e61b13e4bd28fa39d099496c5a726b217e3e11bc0f93be428e5",
+      "unmatched_lines": {
+        "candidate": 7,
+        "workspace": 186
+      },
+      "class": "refactor",
+      "review": "The workspace adds PoolState::complete_slot, which records a slot checkpoint in place and reuses the newest checkpoint's root while the note count is unchanged; the candidate copy recomputes the root from the frontier for every slot. decode refuses a newest checkpoint whose root is not the frontier root at the same count, and only with_payment changes the frontier, so both give the same bytes for every reachable state. The cost differs: the candidate copy hashes 32 tree levels and copies the state for every completed slot. Also: Debug on PoolState, four more tests, import order and one assertion's layout."
+    },
+    "protocol/payments/src/wire.rs": {
+      "candidate_sha256": "c46c58e302153ec016c774847dd3e6b485f24d60c80b3b301fe2a2606919ad23",
+      "workspace_sha256": "06a06b83546c0ea8873bbc0602a457854a738dfdd3febbc29be8f65188c6db02",
+      "unmatched_lines": {
+        "candidate": 5,
+        "workspace": 11
+      },
+      "class": "refactor",
+      "review": "The workspace makes the three tags and two size constants public with doc comments and derives Debug on DecodedPayment. encode and decode are the same text."
+    }
+  },
+  "workspace_only": {
+    "node/adapter/src/processor/finalization.rs": {
+      "workspace_sha256": "3e435d86d0bb99f46ad08fd7d5b8c5c938a9dac6da8e85b71a9e7cef0018a5cb",
+      "class": "behaviour",
+      "review": "The workspace's finalization, split out of processor.rs into four helpers. It carries the anchor-source difference recorded for processor.rs; every other check and effect is the candidate copy's, in the same order."
+    },
+    "protocol/payments/src/native_accounts.rs": {
+      "workspace_sha256": "648dcd56988623e62d70a62e4a1cbe60adbaabf37a72e577a56de41ef18bceec",
+      "class": "refactor",
+      "review": "Program id, pool and marker address derivation and the staging buffer, moved here from the adapter so that wallets can use them without the validator. The candidate series keeps the same code in adapter/src/lib.rs, nullifiers.rs and staging.rs."
+    }
+  },
+  "candidate_only": {}
+}

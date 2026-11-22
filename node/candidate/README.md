@@ -56,6 +56,49 @@ Source preparation is offline. Compiling the resulting candidate requires its
 pinned Rust 1.97.1 toolchain, dependencies and applicable Linux build environment.
 Build, runtime acceptance and installation are separate steps.
 
+## Two copies of the protocol and the native program
+
+The base patch adds its own copy of the protocol library and of the native
+program to the patched tree, under `zolana-native/protocol/src` and
+`zolana-native/adapter/src`. The workspace builds and tests
+`protocol/payments/src` and `node/adapter/src`. The validator built from this
+directory runs the first pair; the repository's Rust checks cover the second.
+
+Four files are byte-identical in both places: `anchors.rs`, `staging.rs` and
+`verification.rs` of the protocol, and `instructions.rs` of the program. The
+others differ, and each difference is recorded with a written review in
+[`tools/protocol_copy_allowlist.json`](../../tools/protocol_copy_allowlist.json).
+Three records are marked `behaviour`, all for one rule: the workspace's native
+program has no slot-anchor feature and reads its accepted anchors from
+`PoolState::roots()`, which is empty for an `NPOOL004` pool, so by its code it
+refuses every payment against such a pool, while the copy in this directory
+accepts the roots of completed earlier slots. Proof verification is one of the
+identical files. The reviews of `wire.rs`, `envelope.rs` and `state.rs` found
+no difference in any encoding or result; `state.rs` differs in cost, because
+the copy in this directory recomputes the tree root for every completed slot.
+
+```sh
+python3 -B tools/protocol_copy_guard.py check
+python3 -B -m unittest discover -s tools -p 'protocol_copy_guard_test.py' -v
+```
+
+`check` takes the candidate's copies from the pinned patch chain with Git patch
+application, compares them with the workspace and fails on any difference that
+is not recorded. Every record pins both files by SHA-256: a change to either
+side of a recorded difference fails until the same change is made on the other
+side or the difference is reviewed again, and a record must be deleted once its
+files are identical. A patch in this directory that is outside the
+reconstruction plan may not touch either copy. The check also requires the
+same exact `orchard` release on both sides. `describe` prints the present
+hashes and line counts of every pair for a reviewer who updates a record.
+
+The record is meant to shrink. The test holds the reviewed set of differing
+files, their line counts and their classes as a ceiling: removing a record or
+lowering a count passes, while a new record, a higher count or a higher class
+fails until the ceiling in the test is edited as well. The check compares
+source text. It does not compile either copy and is not a proof that two
+different texts behave alike.
+
 ## Reconstruct the original base candidate
 
 The earlier entrypoint prepares the base patch from an already local copy of the
