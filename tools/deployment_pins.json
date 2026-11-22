@@ -333,6 +333,12 @@
    ],
    "reason": "local-macos-service"
   },
+  "tools/supply_monitor.py": {
+   "pins": [
+    "SysvarEpochRewards1111111111111111111111111"
+   ],
+   "reason": "protocol-constant"
+  },
   "tools/tester_gateway_recovery.py": {
    "pins": [
     "/Library/NativePayLocal"

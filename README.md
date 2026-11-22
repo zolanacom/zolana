@@ -174,7 +174,8 @@ development values.
   [off-host monitor](docs/offhost-monitor-runbook.md),
   [paging](docs/human-paging-runbook.md),
   [watchdog](docs/watchdog-runbook.md),
-  [vote-admission budget](docs/vat-budget-runbook.md).
+  [vote-admission budget](docs/vat-budget-runbook.md),
+  [supply and pool-backing monitor](docs/supply-monitor-runbook.md).
 - **Pilot preparation:** [cohort](docs/pilot-cohort-runbook.md),
   [host and funding](docs/pilot-host-funding-runbook.md),
   [installation](docs/pilot-installation-runbook.md),
