@@ -69,6 +69,8 @@ async function catalogFixture(initialRecord = null) {
   });
   vm.runInContext(`${source}
     sha = async () => "a".repeat(64);
+    loadNetworkPin = async () => ({ format: "zolana-browser-network-pin-v1", environment: "testnet",
+      network: { network: Array(32).fill(7), genesis_hash: "1".repeat(32) } });
     readRecord = async () => initialRecord;
     core = async () => ({});
     globalThis.inspect = () => ({ catalog: !!catalog, locked: !session.vault,

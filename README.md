@@ -231,7 +231,10 @@ Known limits:
 
 - **Wallets trust their RPC endpoint.** The wallets verify proofs, signatures
   and history continuity against the validator they are configured with. They
-  are not light clients and do not verify consensus independently.
+  are not light clients and do not verify consensus independently. A browser
+  wallet bundle is pinned to one network's genesis hash and refuses a gateway
+  that reports another; that identifies the network and proves nothing about
+  its history ([decision 0040](docs/decisions/0040-wallet-network-pin-and-chain-read-trust.md)).
 - **The gateway operator can link activity.** Admission ties a wallet's
   membership identity to its receiving address. The gateway sees IP addresses
   and request timing and can link submitted payments to a member. Shielding

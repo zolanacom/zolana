@@ -533,7 +533,9 @@ automaticReceive = createAutomaticReceive({
     } catch { if (at !== epoch || document.hidden || wallet?.locked) return; }
     if (at !== epoch || document.hidden || wallet?.locked || busy || $("send-dialog").open) return;
     $("sync-progress").hidden = true; automaticNotice = true;
+    // A site that serves another network than this build's pin is named as such; Sync cannot help.
     message(retrying ? "The network connection is interrupted. Automatic payment checks will retry; your saved state is preserved." :
+      ["genesis", "network_mismatch"].includes(error?.code) && typeof error.message === "string" ? error.message :
       "Automatic payment checks paused. Use Sync to verify history or check the original pending payment. Your saved state was preserved.", retrying ? "info" : "error");
   },
 });
