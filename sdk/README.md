@@ -18,13 +18,16 @@ Read [Limits](#limits) before you plan around it.
 
 | Path | What it is |
 | --- | --- |
-| [`rust-examples/`](rust-examples) | Six runnable, offline Rust examples and a test file, as the workspace package `zolana-sdk-examples` |
+| [`rust-examples/`](rust-examples) | Six runnable, offline Rust examples, the `inspect-payment` command and two test files, as the workspace package `zolana-sdk-examples` |
 | [`EXAMPLES.md`](EXAMPLES.md) | Each example with its command and the output it printed |
 | [`build-browser-core.sh`](build-browser-core.sh) | Builds the browser wallet core to WebAssembly |
 | [`js/zolana-browser-core.d.ts`](js/zolana-browser-core.d.ts) | TypeScript types for the browser core, including the shapes of its JSON results |
 | [`js/rpc.mjs`](js/rpc.mjs), [`js/rpc.d.mts`](js/rpc.d.mts) | A dependency-free JSON-RPC client for the methods the wallets call, with types |
 | [`js/vault-example.mjs`](js/vault-example.mjs) | Loads the built core and creates a disposable wallet |
-| `js/*.test.mjs` | Tests for the client and for the types, run with Node's built-in test runner |
+| [`js/formats.mjs`](js/formats.mjs), [`js/explorer.mjs`](js/explorer.mjs) | Offline readers for a payment, the pool account, a shielded address and the explorer feed, with runnable examples ([JavaScript guide](js/README.md)) |
+| [`fixtures/`](fixtures) | Real payments with real proofs, and the pool account after them, for the tests and the examples |
+| [`../docs/cookbook/`](../docs/cookbook/README.md) | Short recipes built on the parts above, each checked by a test |
+| `js/*.test.mjs` | Tests for the client, the types, the readers, the examples and the cookbook, run with Node's built-in test runner |
 
 ## What you can do with it
 
@@ -307,7 +310,8 @@ devnet gateway.**
   finite cohort. Deploying programs there is not supported.
 - **The JavaScript side is a description and a transport, not a wallet.** There
   is no packaged sync, storage or recovery logic, and no typed access to the
-  admission routes.
+  admission routes. The readers in `js/formats.mjs` decode public bytes; they
+  verify no signature and no proof.
 - **A client trusts its RPC endpoint for consensus.** Replay verifies proofs,
   signatures and the continuity of the history it is given. It is not a light
   client.

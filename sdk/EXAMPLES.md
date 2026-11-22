@@ -235,7 +235,9 @@ test deposit_has_the_documented_header_and_replays_into_a_balance ... ok
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-They pin the values printed above. The order of the lines can differ.
+That is the part for `tests/sdk.rs`. They pin the values printed above. The order of the lines can differ.
+The command also runs `tests/inspect.rs`: eight tests of
+[`inspect-payment`](#inspect-payment), and two ignored ones that rewrite the fixtures.
 
 ## The browser core in Node
 
@@ -269,12 +271,110 @@ node --test sdk/js/*.test.mjs
 The summary at the end of its output:
 
 ```text
-ℹ tests 10
+ℹ tests 30
 ℹ suites 0
-ℹ pass 10
+ℹ pass 30
 ℹ fail 0
 ```
 
 Eight tests cover the JSON-RPC client, most of them against a loopback server
 that applies the invited gateway's request rules. Two compare the TypeScript
-description of the browser core with the Rust source.
+description of the browser core with the Rust source. Eight hold the offline
+readers to the values the Rust decoders report for the fixtures. Four hold the
+explorer feed reader to the repository's Python feed check, which they start
+with `python3`. Five run the JavaScript examples and compare the
+[cookbook](../docs/cookbook/README.md) with them. Three check the package
+manifest and the declaration files.
+
+## inspect-payment
+
+A command, not an example: it takes a payment and says what its bytes prove.
+
+```sh
+sh tools/dev.sh run --offline --locked -p zolana-sdk-examples --bin inspect-payment -- sdk/fixtures/shielded-send.hex
+```
+
+<!-- file: sdk/fixtures/shielded-send.inspect.txt -->
+```text
+input                9230 bytes, tag NPAY0003
+kind                 shielded-fee-payment
+network              0707070707070707070707070707070707070707070707070707070707070707
+payment id           2b8296f7d96e1f6077bdc31d4541859544c849af0bcd5261aedacd50225c8832
+expiry slot          100
+public value         3 units leave the pool to the sponsor as the fee
+shielded fee         3
+sponsor              6cGXszer5keoaWm8Co5G9f4KGBThuGz4NsKTqYij1emg
+anchor               1fbe1c80664a1b478518e05c8029b49418782b2c39b077cf627d4af0b0b5b31d
+action 0
+  nullifier          6154b85afc11f06db91f2f7a1f9a860a0e7504217cb12dbd3422e16abb179604
+  nullifier account  6NB5KEfy2yJmqRC7axs9zBHCFMbz73kKatsHiExsEkVp
+  commitment         593c0de55f92909e654bfc77e9307b582c2ff968fd2760f0c1cb4149b0293b02
+action 1
+  nullifier          f017eb9715131a11a425e3a24d208b3ea7399541f71575ffe7a5303af95b6c27
+  nullifier account  9eY7J7nSSJqqG2hGhZd3dJkRTwmD1dBZGYvakxCgFnAe
+  commitment         5a4f325f4f2ea8d2f6b4f648215dabedc1d138a51a5fe71853eb27a2188ff82b
+verified             the spend authorization signatures, the binding signature and the proof
+not revealed         the shielded addresses, the value of each note and the memos
+                     which actions spend or create a real note, and which are padding
+not checked          that any chain accepts this anchor
+                     that the nullifiers are unspent
+                     the current slot: the verifier accepts this payment from slot 0 through slot 100
+                     that the public accounts exist and can pay or be paid
+                     that the payment was ever submitted or finalized
+```
+
+This output is fixed: the fixture is a stored payment, and
+`tests/inspect.rs` compares the command's output with
+`sdk/fixtures/shielded-send.inspect.txt`.
+
+What it shows:
+
+- The input can be a payment or an inline envelope, as raw bytes, hex or
+  base64, in a file, as the argument, or on standard input (`-`). `--json`
+  prints one JSON object. `--network <64 hex digits>` refuses another network.
+- "verified" covers the spend authorization signatures, the binding signature
+  and the proof, checked by `PaymentVerifier`. The slot, the anchor and the
+  authorized public value are taken from the payment itself, and no nullifier
+  counts as spent, because there is no chain to ask.
+- The last five lines are what the bytes cannot show. A payment that verifies
+  here can still be refused by a chain.
+- The exit status is 0 when the payment verifies, 1 when it decodes but does
+  not verify, and 2 when it cannot be read or decoded.
+
+The logic is `inspect` in
+[`rust-examples/src/inspect.rs`](rust-examples/src/inspect.rs). The fixtures
+are described in [`fixtures/README.md`](fixtures/README.md), and
+[Verify a payment offline](../docs/cookbook/verify-a-payment-offline.md) walks
+through the report.
+
+## The JavaScript examples
+
+Four programs in [`js/examples/`](js/examples) run with Node alone, offline,
+on the same fixtures. Each has a page in the
+[cookbook](../docs/cookbook/README.md) with its output.
+
+```sh
+node sdk/js/examples/decode-payment.mjs
+node sdk/js/examples/check-address.mjs
+node sdk/js/examples/watch-pool.mjs
+node sdk/js/examples/payment-landed.mjs
+```
+
+The first prints:
+
+<!-- output: node sdk/js/examples/decode-payment.mjs -->
+```text
+shielded-fee-payment: 9230 bytes, tag NPAY0003
+network       0707070707070707070707070707070707070707070707070707070707070707
+payment id    2b8296f7d96e1f6077bdc31d4541859544c849af0bcd5261aedacd50225c8832
+expiry slot   100
+public value  3
+shielded fee  3
+sponsor       6cGXszer5keoaWm8Co5G9f4KGBThuGz4NsKTqYij1emg
+anchor        1fbe1c80664a1b478518e05c8029b49418782b2c39b077cf627d4af0b0b5b31d
+nullifier     6154b85afc11f06db91f2f7a1f9a860a0e7504217cb12dbd3422e16abb179604
+commitment    593c0de55f92909e654bfc77e9307b582c2ff968fd2760f0c1cb4149b0293b02
+nullifier     f017eb9715131a11a425e3a24d208b3ea7399541f71575ffe7a5303af95b6c27
+commitment    5a4f325f4f2ea8d2f6b4f648215dabedc1d138a51a5fe71853eb27a2188ff82b
+for another network: WrongNetwork
+```

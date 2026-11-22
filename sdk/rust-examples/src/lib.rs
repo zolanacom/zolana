@@ -4,6 +4,8 @@
 //! public disposable fixtures. Start with `sdk/README.md`.
 #![forbid(unsafe_code)]
 
+pub mod inspect;
+
 use native_wallet_core::{encode_address, Result, WalletKeys};
 use orchard::keys::{Scope, SpendingKey};
 

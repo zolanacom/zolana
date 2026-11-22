@@ -67,6 +67,7 @@ here.
 | `sdk/` | Developer SDK 0.1: runnable Rust examples, the browser-core Wasm build script, TypeScript types and a JSON-RPC client ([README](sdk/README.md)) |
 | `tools/` | Build wrappers, local-network runners, operator services and their tests |
 | `docs/decisions/` | Architecture decisions |
+| `docs/cookbook/` | Short SDK recipes whose code and output are checked by a test ([index](docs/cookbook/README.md)) |
 | `docs/` | Runbooks, design notes and the tester quick-start |
 
 ## Build and run
