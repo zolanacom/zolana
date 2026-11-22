@@ -1,0 +1,170 @@
+{
+  "addresses": {
+    "alice": "npriv1gZWMfgeB9UAafpZyPa5Pf92AdWqYpJKVgDuHNf7Z7JGnpxQSqAYXtCgvrYcFkwfzSUDXFBDx5gtWuSQnRnGCDr6fVn3Ba7NwiuLA386Xd2dV",
+    "bob": "npriv1gZWMfgeB9UAafpZyPa5Pf92AdWqYpJKVgDuHNf7Z7JGokPzEsbMzPasz2AuBbLMTEoubaxsDPoGMYEpFdp93VDk2FPKAE66uqFfvtHe7ySoD"
+  },
+  "envelope": {
+    "header": "5a4f4c4e5041593101005a6f6c616e614e617469766550617921070707070707070707070707070707070707070707070707070707070707070764000000000000002b8296f7d96e1f6077bdc31d4541859544c849af0bcd5261aedacd50225c88320e240000",
+    "inspection": {
+      "actions": [
+        {
+          "commitment": "593c0de55f92909e654bfc77e9307b582c2ff968fd2760f0c1cb4149b0293b02",
+          "nullifier": "6154b85afc11f06db91f2f7a1f9a860a0e7504217cb12dbd3422e16abb179604",
+          "nullifier_account": "6NB5KEfy2yJmqRC7axs9zBHCFMbz73kKatsHiExsEkVp"
+        },
+        {
+          "commitment": "5a4f325f4f2ea8d2f6b4f648215dabedc1d138a51a5fe71853eb27a2188ff82b",
+          "nullifier": "f017eb9715131a11a425e3a24d208b3ea7399541f71575ffe7a5303af95b6c27",
+          "nullifier_account": "9eY7J7nSSJqqG2hGhZd3dJkRTwmD1dBZGYvakxCgFnAe"
+        }
+      ],
+      "anchor": "1fbe1c80664a1b478518e05c8029b49418782b2c39b077cf627d4af0b0b5b31d",
+      "bytes": 9332,
+      "container": "inline-envelope",
+      "expiry_slot": "100",
+      "kind": "shielded-fee-payment",
+      "network": "0707070707070707070707070707070707070707070707070707070707070707",
+      "payment_bytes": 9230,
+      "payment_id": "2b8296f7d96e1f6077bdc31d4541859544c849af0bcd5261aedacd50225c8832",
+      "public_value_balance": "3",
+      "shielded_fee": "3",
+      "sponsor": "6cGXszer5keoaWm8Co5G9f4KGBThuGz4NsKTqYij1emg",
+      "tag": "NPAY0003",
+      "verification": "ok",
+      "withdrawal_recipient": null
+    }
+  },
+  "field_modulus": "40000000000000000000000000000000224698fc094cf91b992d30ed00000001",
+  "genesis_hash": "11111111111111111111111111111111",
+  "network": "0707070707070707070707070707070707070707070707070707070707070707",
+  "payments": {
+    "deposit": {
+      "actions": [
+        {
+          "commitment": "3141ca54f71ccfa0c14067d81da79ebd5248d5756c185748afa2665eaa59ab19",
+          "nullifier": "2a16f7f115088468e0f304c76e549fb7dab24859b56ecca447c5dd4af7512c29",
+          "nullifier_account": "8hmyacsouBiijkKeY6skhqd4bqC8nzPugoPS5SdUGJBy"
+        },
+        {
+          "commitment": "ee0eb9197e804328ecf03a3b805e2198f3e8922aa17bb58200c653e65e559a03",
+          "nullifier": "059bb499cc5135b7b16d4f57beaab7a1fd4c32afb01ee0aa54b63280d9527930",
+          "nullifier_account": "6Mt35cueeRiFtGGqHjK52ZiKMJRTup3KrinFopDo2oFY"
+        }
+      ],
+      "anchor": "ae2935f1dfd8a24aed7c70df7de3a668eb7a49b1319880dde2bbd9031ae5d82f",
+      "bytes": 9222,
+      "container": "payment",
+      "expiry_slot": "100",
+      "kind": "deposit",
+      "network": "0707070707070707070707070707070707070707070707070707070707070707",
+      "payment_bytes": 9222,
+      "payment_id": "77f9c5283ec3b82dc21c0c6ad88f56456fe65b28f4d38a04104f7c8d0bca269d",
+      "public_value_balance": "-100",
+      "shielded_fee": null,
+      "sponsor": "6cGXszer5keoaWm8Co5G9f4KGBThuGz4NsKTqYij1emg",
+      "tag": "NPAY0001",
+      "verification": "ok",
+      "withdrawal_recipient": null
+    },
+    "shielded-send": {
+      "actions": [
+        {
+          "commitment": "593c0de55f92909e654bfc77e9307b582c2ff968fd2760f0c1cb4149b0293b02",
+          "nullifier": "6154b85afc11f06db91f2f7a1f9a860a0e7504217cb12dbd3422e16abb179604",
+          "nullifier_account": "6NB5KEfy2yJmqRC7axs9zBHCFMbz73kKatsHiExsEkVp"
+        },
+        {
+          "commitment": "5a4f325f4f2ea8d2f6b4f648215dabedc1d138a51a5fe71853eb27a2188ff82b",
+          "nullifier": "f017eb9715131a11a425e3a24d208b3ea7399541f71575ffe7a5303af95b6c27",
+          "nullifier_account": "9eY7J7nSSJqqG2hGhZd3dJkRTwmD1dBZGYvakxCgFnAe"
+        }
+      ],
+      "anchor": "1fbe1c80664a1b478518e05c8029b49418782b2c39b077cf627d4af0b0b5b31d",
+      "bytes": 9230,
+      "container": "payment",
+      "expiry_slot": "100",
+      "kind": "shielded-fee-payment",
+      "network": "0707070707070707070707070707070707070707070707070707070707070707",
+      "payment_bytes": 9230,
+      "payment_id": "2b8296f7d96e1f6077bdc31d4541859544c849af0bcd5261aedacd50225c8832",
+      "public_value_balance": "3",
+      "shielded_fee": "3",
+      "sponsor": "6cGXszer5keoaWm8Co5G9f4KGBThuGz4NsKTqYij1emg",
+      "tag": "NPAY0003",
+      "verification": "ok",
+      "withdrawal_recipient": null
+    },
+    "withdrawal": {
+      "actions": [
+        {
+          "commitment": "a5030978b51bacc4f3ef5b45f86b65437c147e888c617e364a0de28254f57d2a",
+          "nullifier": "86c7d0515556c24f9df8b8ed858287abae04258a684c41034db7b4c490da2b00",
+          "nullifier_account": "3DWtqoi5wVFxLVVQgCpXvweRQi1mmVH7qFyhSEf6JWgs"
+        },
+        {
+          "commitment": "94481801571d114932b6755e22270f78e9f22396043686e3b96d5939a1c37c37",
+          "nullifier": "c614e2f9bffcc6735c274576e43b33923585fb846d75ce6bbab598dcd043872e",
+          "nullifier_account": "AvwZ3a8xjhE1vGGP3it1zRuvgwbquA6JnRf6ycQwiCUb"
+        }
+      ],
+      "anchor": "ce9379101d6e4b4f86b8a33e5634f38e14eb2c136a37c29ee59a8ef22371db33",
+      "bytes": 9254,
+      "container": "payment",
+      "expiry_slot": "100",
+      "kind": "recipient-withdrawal",
+      "network": "0707070707070707070707070707070707070707070707070707070707070707",
+      "payment_bytes": 9254,
+      "payment_id": "676befd3a850723859772c76c442edf19f3c7467d1a3ae1a6a49cc3269eb8f1f",
+      "public_value_balance": "20",
+      "shielded_fee": null,
+      "sponsor": "6cGXszer5keoaWm8Co5G9f4KGBThuGz4NsKTqYij1emg",
+      "tag": "NPAY0002",
+      "verification": "ok",
+      "withdrawal_recipient": "6x5SYnLroiN7WYq8NQYU9KHcH4YjpBbwpUfVu3EB7ieH"
+    }
+  },
+  "pool": {
+    "accepted_roots": {
+      "4": [
+        "1fbe1c80664a1b478518e05c8029b49418782b2c39b077cf627d4af0b0b5b31d",
+        "30948a46bf1dae55da625ae554938b4b003dfd3ea6b660bacfecae57155bee1a",
+        "ae2935f1dfd8a24aed7c70df7de3a668eb7a49b1319880dde2bbd9031ae5d82f",
+        "ce9379101d6e4b4f86b8a33e5634f38e14eb2c136a37c29ee59a8ef22371db33"
+      ],
+      "513": [
+        "30948a46bf1dae55da625ae554938b4b003dfd3ea6b660bacfecae57155bee1a",
+        "ce9379101d6e4b4f86b8a33e5634f38e14eb2c136a37c29ee59a8ef22371db33"
+      ],
+      "600": []
+    },
+    "backing": "77",
+    "bytes": 25728,
+    "network": "0707070707070707070707070707070707070707070707070707070707070707",
+    "note_count": "6",
+    "rent_floor": "1",
+    "root": "30948a46bf1dae55da625ae554938b4b003dfd3ea6b660bacfecae57155bee1a",
+    "slot_anchors": [
+      {
+        "note_count": "0",
+        "root": "ae2935f1dfd8a24aed7c70df7de3a668eb7a49b1319880dde2bbd9031ae5d82f",
+        "slot": "0"
+      },
+      {
+        "note_count": "2",
+        "root": "1fbe1c80664a1b478518e05c8029b49418782b2c39b077cf627d4af0b0b5b31d",
+        "slot": "1"
+      },
+      {
+        "note_count": "4",
+        "root": "ce9379101d6e4b4f86b8a33e5634f38e14eb2c136a37c29ee59a8ef22371db33",
+        "slot": "2"
+      },
+      {
+        "note_count": "6",
+        "root": "30948a46bf1dae55da625ae554938b4b003dfd3ea6b660bacfecae57155bee1a",
+        "slot": "3"
+      }
+    ],
+    "tag": "NPOOL004"
+  }
+}

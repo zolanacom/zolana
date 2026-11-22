@@ -1,0 +1,329 @@
+[
+  {
+    "fixture": "deposit",
+    "why": "one byte short",
+    "truncate": 1,
+    "error": "InvalidLength"
+  },
+  {
+    "fixture": "deposit",
+    "why": "an unknown tag on bytes of the plain length",
+    "set": [
+      {
+        "offset": 0,
+        "hex": "4e50415939393939"
+      }
+    ],
+    "error": "UnsupportedVersion"
+  },
+  {
+    "fixture": "shielded-send",
+    "why": "an unknown tag is read with the plain length, which these bytes do not have",
+    "set": [
+      {
+        "offset": 0,
+        "hex": "4e50415939393939"
+      }
+    ],
+    "error": "InvalidLength"
+  },
+  {
+    "fixture": "shielded-send",
+    "why": "the tag NPAY0001 on bytes that carry a fee field",
+    "set": [
+      {
+        "offset": 0,
+        "hex": "4e50415930303031"
+      }
+    ],
+    "error": "InvalidLength"
+  },
+  {
+    "fixture": "deposit",
+    "why": "a network of all zeros",
+    "set": [
+      {
+        "offset": 8,
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "error": "WrongNetwork"
+  },
+  {
+    "fixture": "shielded-send",
+    "why": "a shielded fee that differs from the value balance",
+    "set": [
+      {
+        "offset": 88,
+        "hex": "0400000000000000"
+      }
+    ],
+    "error": "InvalidContext"
+  },
+  {
+    "fixture": "shielded-send",
+    "why": "a shielded fee of zero",
+    "set": [
+      {
+        "offset": 48,
+        "hex": "0000000000000000"
+      },
+      {
+        "offset": 88,
+        "hex": "0000000000000000"
+      }
+    ],
+    "error": "InvalidContext"
+  },
+  {
+    "fixture": "deposit",
+    "why": "a sponsor of all zeros",
+    "set": [
+      {
+        "offset": 56,
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "error": "InvalidContext"
+  },
+  {
+    "fixture": "withdrawal",
+    "why": "a withdrawal recipient of all zeros",
+    "set": [
+      {
+        "offset": 88,
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "error": "InvalidContext"
+  },
+  {
+    "fixture": "withdrawal",
+    "why": "a withdrawal that moves no value",
+    "set": [
+      {
+        "offset": 48,
+        "hex": "0000000000000000"
+      }
+    ],
+    "error": "InvalidContext"
+  },
+  {
+    "fixture": "deposit",
+    "why": "an anchor equal to the field order",
+    "set": [
+      {
+        "offset": 88,
+        "hex": "01000000ed302d991bf94c09fc98462200000000000000000000000000000040"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "deposit",
+    "why": "a nullifier equal to the field order",
+    "set": [
+      {
+        "offset": 122,
+        "hex": "01000000ed302d991bf94c09fc98462200000000000000000000000000000040"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "deposit",
+    "why": "a commitment equal to the field order",
+    "set": [
+      {
+        "offset": 186,
+        "hex": "01000000ed302d991bf94c09fc98462200000000000000000000000000000040"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "deposit",
+    "why": "another flags byte",
+    "set": [
+      {
+        "offset": 120,
+        "hex": "02"
+      }
+    ],
+    "error": "InvalidShape"
+  },
+  {
+    "fixture": "deposit",
+    "why": "another action count",
+    "set": [
+      {
+        "offset": 121,
+        "hex": "03"
+      }
+    ],
+    "error": "InvalidShape"
+  },
+  {
+    "fixture": "deposit",
+    "why": "another proof length",
+    "set": [
+      {
+        "offset": 1890,
+        "hex": "611c0000"
+      }
+    ],
+    "error": "InvalidLength"
+  },
+  {
+    "fixture": "deposit",
+    "why": "a randomized key that is not a curve point",
+    "set": [
+      {
+        "offset": 154,
+        "hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "error": "InvalidEncoding",
+    "javascript_accepts": true
+  },
+  {
+    "fixture": "deposit",
+    "why": "a value commitment that is not a curve point",
+    "set": [
+      {
+        "offset": 910,
+        "hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "error": "InvalidEncoding",
+    "javascript_accepts": true
+  },
+  {
+    "fixture": "pool-account",
+    "why": "one byte short",
+    "truncate": 1,
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "an unknown tag",
+    "set": [
+      {
+        "offset": 0,
+        "hex": "4e504f4f4c303035"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "a network of all zeros",
+    "set": [
+      {
+        "offset": 8,
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "a backing above the largest signed 64-bit integer",
+    "set": [
+      {
+        "offset": 55,
+        "hex": "80"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "an odd note count",
+    "set": [
+      {
+        "offset": 56,
+        "hex": "07"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "a frontier node at a level the note count does not use",
+    "set": [
+      {
+        "offset": 64,
+        "hex": "01"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "a frontier node equal to the field order",
+    "set": [
+      {
+        "offset": 96,
+        "hex": "01000000ed302d991bf94c09fc98462200000000000000000000000000000040"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "another anchor history tag",
+    "set": [
+      {
+        "offset": 1092,
+        "hex": "00"
+      }
+    ],
+    "error": "UnsupportedVersion"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "an anchor history for another network",
+    "set": [
+      {
+        "offset": 1118,
+        "hex": "08"
+      }
+    ],
+    "error": "WrongNetwork"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "an entry count that does not match the history length",
+    "set": [
+      {
+        "offset": 1150,
+        "hex": "0500"
+      }
+    ],
+    "error": "InvalidLength"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "padding that is not zero",
+    "set": [
+      {
+        "offset": 25727,
+        "hex": "01"
+      }
+    ],
+    "error": "InvalidEncoding"
+  },
+  {
+    "fixture": "pool-account",
+    "why": "a frontier node that does not hash to the recorded root",
+    "set": [
+      {
+        "offset": 96,
+        "hex": "0100000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "error": "InvalidEncoding",
+    "javascript_accepts": true
+  }
+]

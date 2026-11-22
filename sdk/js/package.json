@@ -1,0 +1,17 @@
+{
+  "name": "zolana-sdk-js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JavaScript part of the Zolana developer SDK 0.1: a JSON-RPC client, offline readers for the public byte formats and an explorer feed reader. Source only, not published to npm.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./index.d.mts", "default": "./index.mjs" },
+    "./rpc": { "types": "./rpc.d.mts", "default": "./rpc.mjs" },
+    "./formats": { "types": "./formats.d.mts", "default": "./formats.mjs" },
+    "./explorer": { "types": "./explorer.d.mts", "default": "./explorer.mjs" }
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
