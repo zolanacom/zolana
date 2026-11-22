@@ -1,0 +1,33 @@
+# Manifest of the test crate, as a template. assemble.py replaces the two
+# placeholders in the paths below with this checkout's root and its node/agave
+# and writes the result as Cargo.toml in the scratch workspace. Cargo does not
+# read this file in place, and the crate is not a member of the repository's
+# workspace.
+[package]
+name = "program-differential"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+candidate-program = { package = "candidate-native-payment-program", path = "../candidate-program" }
+workspace-program = { package = "workspace-copy-native-payment-program", path = "../workspace-program" }
+registered-program = { package = "native-payment-program", path = "@ROOT@/node/adapter" }
+candidate-payments = { package = "candidate-native-payments", path = "../candidate-protocol" }
+native-payments = { path = "@ROOT@/protocol/payments" }
+payment-lab = { path = "@ROOT@/clients/cli" }
+differential-gate = { path = "../gate" }
+solana-program-runtime = { path = "@AGAVE@/program-runtime", features = ["dev-context-only-utils"] }
+solana-transaction-context = { path = "@AGAVE@/transaction-context", features = ["dev-context-only-utils"] }
+solana-system-program = { path = "@AGAVE@/programs/system" }
+solana-svm-callback = { path = "@AGAVE@/svm-callback" }
+solana-svm-log-collector = { path = "@AGAVE@/svm-log-collector" }
+solana-svm-feature-set = { path = "@AGAVE@/svm-feature-set" }
+solana-svm-timings = { path = "@AGAVE@/svm-timings" }
+solana-account = "=3.0.0"
+solana-rent = "=3.0.0"
+solana-clock = "=3.0.0"
+solana-pubkey = "=3.0.0"
+solana-instruction = "=3.0.0"
+solana-sdk-ids = "=3.0.0"
+orchard = { version = "=0.16.0", default-features = false, features = ["circuit", "std", "zeroize"] }
