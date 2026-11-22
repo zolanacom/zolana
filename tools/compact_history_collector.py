@@ -4,11 +4,13 @@ import os
 from pathlib import Path
 import urllib.request
 
+import deployment
 from history_retention import Retention, atomic, directory, read
 
-ROOT = Path('/var/lib/zolana-native-058/gateway/history-065')
-BINARY = Path('/opt/zolana-native-065/bin/native-wallet')
-OPERATOR = Path('/etc/zolana-native-064/mac-live/operator.json')
+HISTORY = deployment.active()['history']
+ROOT = Path(HISTORY['root'])
+BINARY = Path(HISTORY['binary'])
+OPERATOR = Path(HISTORY['operator_profile'])
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

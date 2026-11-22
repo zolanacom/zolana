@@ -53,6 +53,34 @@ def sealed_source(path, expected, owner=0):
     return raw
 
 
+def described(environment=None):
+    """This file is installed alone, so it reads the deployment description itself.
+
+    With ZOLANA_DEPLOYMENT unset the built-in paths and pin stand. Otherwise the
+    description must be a sealed file whose SHA-256 is ZOLANA_DEPLOYMENT_SHA256.
+    """
+    global INSTALLED_PATH, BASE_PATH, BASE_SHA256
+    environment = os.environ if environment is None else environment
+    path, expected = (environment.get(name) for name in ('ZOLANA_DEPLOYMENT', 'ZOLANA_DEPLOYMENT_SHA256'))
+    if path is None and expected is None:
+        return False
+    if path is None or expected is None or not Path(path).is_absolute():
+        raise ValueError('a deployment description needs its absolute path and its SHA-256')
+    value = json.loads(sealed_source(Path(path), expected))
+    service, startup = value['service'], value['startup']['validator']
+    paths = (startup['installed_path'], service['prefix'])
+    if (any(not isinstance(item, str) or not Path(item).is_absolute() for item in paths)
+            or not isinstance(service['module'], str)
+            or re.fullmatch(r'[a-z][a-z0-9_]{2,63}\.py', service['module']) is None
+            or not isinstance(service['module_sha256'], str)
+            or re.fullmatch('[a-f0-9]{64}', service['module_sha256']) is None):
+        raise ValueError('deployment description does not name this startup wrapper and its base')
+    INSTALLED_PATH = Path(paths[0])
+    BASE_PATH = Path(paths[1])/'tools'/service['module']
+    BASE_SHA256 = service['module_sha256']
+    return True
+
+
 def load_original():
     raw = sealed_source(BASE_PATH, BASE_SHA256)
     module = types.ModuleType('zolana_native_065_verified_base')
@@ -135,6 +163,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sha256', required=True)
     args = parser.parse_args()
+    described()
     if Path(__file__) != INSTALLED_PATH or Path(__file__).resolve() != INSTALLED_PATH:
         raise ValueError('startup wrapper must use its fixed sealed installation path')
     sealed_source(INSTALLED_PATH, args.sha256)

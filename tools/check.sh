@@ -32,6 +32,9 @@ python3 -B -m unittest discover -s tools -p '*_test.py'
 node --test clients/browser-wallet/*.test.mjs clients/network-portal/*.test.mjs sdk/js/*.test.mjs
 node clients/wallet-ui/ui-state.test.cjs
 node tools/wallet_ui_contract_test.cjs
+# No tool may type a deployment stem, hash or address outside tools/deployment.py
+# and the tests, unless tools/deployment_pins.json records it with a reason.
+python3 -B tools/deployment.py lint
 git diff --check
 if [ "$publication_check" = yes ]; then
     python3 -B tools/check_publication.py

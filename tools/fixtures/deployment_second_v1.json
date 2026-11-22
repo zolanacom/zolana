@@ -1,0 +1,77 @@
+{
+  "format": "zolana-deployment-v1",
+  "name": "zolana-second",
+  "network": {
+    "genesis_hash": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+    "domain": [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
+    "upstream_commit": "a203300045b405f86c9c84308b2eae76af69ac3b"
+  },
+  "validators": 2,
+  "service": {
+    "label": "second network",
+    "module": "native_network_service.py",
+    "module_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "prefix": "/opt/zolana-second",
+    "etc": "/etc/zolana-second",
+    "state": "/var/lib/zolana-second",
+    "run": "/run/zolana-second",
+    "users": {"validator": "zsecondv", "gateway": "zsecondg", "tester": "zsecondt"},
+    "link_group": "zsecondlink",
+    "ports": {"rpc": 48443, "faucet": 48444},
+    "units": {
+      "validator": "zolana-second-validator.service",
+      "gateway": "zolana-second-gateway.service"
+    },
+    "sockets": {"rpc": "zolana-second-rpc.socket", "faucet": "zolana-second-faucet.socket"}
+  },
+  "cohort": {
+    "label": "second cohort",
+    "pilot": {
+      "directory": "cohort",
+      "unit_stem": "zolana-second-cohort",
+      "ports": {"rpc": 49443, "faucet": 49444}
+    },
+    "rehearsal": {
+      "directory": "cohort-rehearsal",
+      "unit_stem": "zolana-second-cohort-rehearsal",
+      "ports": {"rpc": 50443, "faucet": 50444}
+    }
+  },
+  "history": {
+    "root": "/var/lib/zolana-second/gateway/history",
+    "binary": "/opt/zolana-second/bin/native-wallet",
+    "operator_profile": "/etc/zolana-second/operator.json"
+  },
+  "history_candidate": {
+    "prefix": "/opt/zolana-second-history",
+    "config": "/etc/zolana-second-history/config.json",
+    "base_config_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "unit": "zolana-second-history-gateway.service",
+    "sockets": {
+      "rpc": "zolana-second-history-rpc.socket",
+      "faucet": "zolana-second-history-faucet.socket"
+    },
+    "previous_units": []
+  },
+  "startup": {
+    "validator": {"installed_path": "/etc/zolana-second-startup/validator-startup.py"},
+    "snapshot": {
+      "installed_path": "/etc/zolana-second-snapshot/validator-startup.py",
+      "runner_path": "/opt/zolana-second-snapshot/bin/zolana-fast-check"
+    }
+  },
+  "public_tls": {
+    "root": "/etc/zolana-second-public/tls",
+    "ingress_config": "/etc/zolana-second-public/public-ingress.json",
+    "certificate_source": "/etc/letsencrypt",
+    "service_uid": 993,
+    "ports": {"rpc": 8443, "faucet": 8445},
+    "minimum_validity_seconds": 7200,
+    "lifetime_days": 365
+  },
+  "pilot": {
+    "prefix": "/opt/zolana-second-pilot",
+    "account": "zsecondpilot",
+    "approval": "/etc/zolana-second-pilot/activation.json"
+  }
+}
