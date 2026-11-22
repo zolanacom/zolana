@@ -146,4 +146,4 @@ What is still recorded, and why:
 | `local-macos-service` | `service_account.py`, `service_runtime.py` and the acceptance tools of the local macOS service: one install root, account and label shared by all of them, not described yet |
 | `macos-pilot` | `pilot_install.py`, `pilot_host.py`: not described yet |
 | `explorer` | `tools/devnet_explorer/`: installed on its own, settings in its unit files, not described yet |
-| `source-pin`, `protocol-constant`, `release-record`, `acceptance-rig` | build inputs, program addresses and records that do not name an installation |
+| `source-pin`, `protocol-constant`, `release-record`, `acceptance-rig`, `copy-record` | build inputs, program addresses and records that do not name an installation |

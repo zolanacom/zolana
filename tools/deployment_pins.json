@@ -243,6 +243,30 @@
    ],
    "reason": "source-pin"
   },
+  "tools/protocol_copy_allowlist.json": {
+   "pins": [
+    "06a06b83546c0ea8873bbc0602a457854a738dfdd3febbc29be8f65188c6db02",
+    "28d739526fc5959f873040df7e4b3e0b427dfd7dc23d1b2dee10d890c17df614",
+    "3897cd6ca3a80e5ed767135f732c4697fde87fbd2bcdb8bf4940527ac659b81e",
+    "3e435d86d0bb99f46ad08fd7d5b8c5c938a9dac6da8e85b71a9e7cef0018a5cb",
+    "475d65a56586bfab9556dfa521a10e2ca2d2ce9f5f369a301824a3b7167ae412",
+    "49b7c161fad70f6fb585c8fd1c29f2dc2960d0a56efc3bbba93e0a7a18d81c8b",
+    "648dcd56988623e62d70a62e4a1cbe60adbaabf37a72e577a56de41ef18bceec",
+    "6bee37a694c55c492ae4c8381c82e7a0ab745238a1e8ca9d55fcdc59b44a9db8",
+    "7699040cc02d4f02178a13b0bca8bff4a7f028e7eb9bc215f5cb8a00c7879b1e",
+    "7a012385ad449adb3e07f4cae8dd1687fb03ae935928ba5476afd9a50cefa691",
+    "87ef529e49e677541373d2dbe90f2b7207ae4c4f951b1177a62822534bd44235",
+    "a98e176f28f60cf2534eb8fce4dd32772d9ebf98c6aef6ac80472a5eddc93584",
+    "ba683bbc2a14a1c7ad26e4442ee696e3147e5dccc8b71bebc722d9a9d24d71ba",
+    "c46c58e302153ec016c774847dd3e6b485f24d60c80b3b301fe2a2606919ad23",
+    "ca53ad4140b57bb063a0f976ac7206d0a12f1ddc499c4383f83646f31fa4cef9",
+    "cbf043455403fc9166110e54721c9d54a0f030f89af0532441fad9f0bd417bb3",
+    "e391fa78ec855e61b13e4bd28fa39d099496c5a726b217e3e11bc0f93be428e5",
+    "ea8e5f094ae30696867b64fa0a0ea439e334f6dc15fce85ebcba330a67b9eb56",
+    "f7e49b5c08901b0c868b826f8f828215f025cf4b42499a7707b1d3763b8075b0"
+   ],
+   "reason": "copy-record"
+  },
   "tools/repair_service_test_tls.py": {
    "pins": [
     "/Library/NativePayLocal"
@@ -391,6 +415,7 @@
  "reasons": {
   "acceptance-rig": "Source directories on the hosts of one acceptance run.",
   "accepted-source": "The accepted service source. Two startup wrappers and their tests bind its exact bytes, so it cannot be edited. native_network_service.py runs it for any description.",
+  "copy-record": "The SHA-256 values in the protocol copy guard's allow-list. They identify reviewed source text and patches, not an installation.",
   "explorer": "The explorer feed and puller are installed on their own and take their settings from their unit files; not in the description yet. The feed also names the vote program, which is the same on every network.",
   "installed-alone": "Installed without its sibling modules (a single sealed file or an exact file list), so the built-in values stay in the file. The tool reads its own fields of a description named by ZOLANA_DEPLOYMENT, and deployment_test.py holds the built-in values equal to the built-in description.",
   "local-macos-service": "The local macOS validator service and its acceptance tools. Its install root, account and label are not in the description yet.",

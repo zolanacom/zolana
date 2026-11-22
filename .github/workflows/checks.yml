@@ -5,6 +5,10 @@
 # The validator, the native program, the command-line wallet and the Python
 # suites are not covered here. Run them locally with
 # `sh tools/check.sh --development-only`.
+#
+# One Python suite does run here: the guard that compares the workspace's
+# protocol library and native program, as text, with the copies inside the
+# candidate patch series in node/candidate. It builds nothing.
 name: Checks
 
 on:
@@ -93,3 +97,12 @@ jobs:
       - name: Run the JavaScript tests
         if: ${{ !cancelled() }}
         run: node --test sdk/js/*.test.mjs clients/browser-wallet/*.test.mjs clients/network-portal/*.test.mjs
+
+      # Needs Python 3.11 or newer and Git, both on the runner image. It reads
+      # the pinned patches and two source directories; nothing is compiled and
+      # no upstream archive is needed.
+      - name: Check the protocol copies against the candidate patch series
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -B -m unittest discover -s tools -p 'protocol_copy_guard_test.py' -v
+          python3 -B tools/protocol_copy_guard.py check
