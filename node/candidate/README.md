@@ -68,14 +68,18 @@ Four files are byte-identical in both places: `anchors.rs`, `staging.rs` and
 `verification.rs` of the protocol, and `instructions.rs` of the program. The
 others differ, and each difference is recorded with a written review in
 [`tools/protocol_copy_allowlist.json`](../../tools/protocol_copy_allowlist.json).
-Four records are marked `behaviour`. Three are for one rule: the workspace's
-native program has no slot-anchor feature and reads its accepted anchors from
-`PoolState::roots()`, which is empty for an `NPOOL004` pool, so by its code it
-refuses every payment against such a pool, while the copy in this directory
-accepts the roots of completed earlier slots. The fourth is `state.rs`: the
-workspace refuses a payment that carries the empty leaf as a note and an
-`NPOOL004` state that no completed slot could record, and the copy in this
-directory does not. A [proposed patch](drafts/pool-state-hardening/README.md)
+Two records are marked `behaviour`. One is `processor/runtime_features.rs`,
+the one file through which the workspace's native program reaches its runtime.
+The slot-anchor rule is the same in both programs: an `NPOOL004` pool is
+refused unless the feature is active, and the accepted anchors are the roots
+of completed earlier slots. But the Agave 3.0.14 runtime the workspace builds
+against has no such feature, so the program built from the workspace refuses
+every `NPOOL004` pool, while the copy in this directory accepts one where the
+feature is active
+([decision 0043](../../docs/decisions/0043-one-protocol-copy.md)). The other
+is `state.rs`: the workspace refuses a payment that carries the empty leaf as
+a note and an `NPOOL004` state that no completed slot could record, and the
+copy in this directory does not. A [proposed patch](drafts/pool-state-hardening/README.md)
 carries the same two rules for it. Proof verification is one of the identical
 files. The reviews of `wire.rs` and `envelope.rs` found no difference in any
 encoding or result. `state.rs` also differs in cost, because the copy in this
