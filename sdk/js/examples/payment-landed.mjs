@@ -5,9 +5,13 @@
 // Without --feed it is offline: it reads the sample feed in
 // clients/devnet-explorer. Without a signature it looks up the newest and the
 // oldest transaction of that feed and one signature the feed does not hold.
+//
+// clients/devnet-explorer/feed.payments.json is the same sample in the shape
+// that marks payment-program transactions; with it the example also prints
+// what each transaction it found did at the payment program.
 // @ts-check
 import { readFileSync } from "node:fs";
-import { findTransaction, validateExplorerFeed } from "../explorer.mjs";
+import { findTransaction, marksPayments, validateExplorerFeed } from "../explorer.mjs";
 
 const flag = process.argv.indexOf("--feed");
 const source = flag < 0 ? undefined : process.argv[flag + 1];
@@ -34,4 +38,15 @@ for (const signature of signatures) {
   const place = atOrBelowFinalized === null ? "the feed reports no finalized slot"
     : atOrBelowFinalized ? "at or below the feed's finalized slot" : "above the feed's finalized slot: look again later";
   console.log(`${signature}\n  slot ${transaction.slot}, ${transaction.ok ? "no error recorded" : "failed"}, fee ${transaction.fee}, ${place}`);
+}
+
+// A feed that marks payment-program transactions names the instructions each one
+// carries. `payment` reads that mark; it says nothing else about a payment.
+if (marksPayments(feed)) {
+  for (const signature of signatures) {
+    const found = findTransaction(feed, signature);
+    if (found === null) continue;
+    const names = found.transaction.payment_instructions ?? [];
+    console.log(`${signature}\n  payment program: ${found.payment}${names.length > 0 ? ` (${names.join(", ")})` : ""}`);
+  }
 }

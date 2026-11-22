@@ -81,6 +81,22 @@ def make_feed(generated_at=NOW, blocks=3, transactions=4, validators=1, status="
     }
 
 
+def make_marked_feed(generated_at=NOW, **sizes):
+    """The same feed in the shape that marks payment-program transactions."""
+    feed = make_feed(generated_at, **sizes)
+    steps = (["finalize", "close"], [], ["initialize", "write"], None, ["inline"], ["unknown"])
+    for row in feed["network"]["validators"]:
+        row["root_slot"] = row["last_vote"] - 31
+    for index, row in enumerate(feed["blocks"]):
+        row["payment_tx_count"] = None if index % 7 == 3 else 1
+        row["executed_payment_count"] = None if index % 7 == 3 else index % 2
+    for index, row in enumerate(feed["transactions"]):
+        row["payment_instructions"] = steps[index % len(steps)]
+    feed["stats"].update(payments_since=generated_at - 600, payment_transactions_seen=31,
+                         executed_payments_seen=4)
+    return feed
+
+
 def encode(feed):
     return json.dumps(feed, separators=(",", ":")).encode("utf-8")
 
@@ -214,6 +230,21 @@ class PublishTest(PullerCase):
         self.assertEqual(stat.S_IMODE(os.stat(self.output).st_mode), 0o644)
         self.assertEqual(os.listdir(self.directory), ["feed.json"])
         self.assertEqual(self.server.hits, ["/feed.json", "/feed.sig"])
+
+    def test_feed_that_marks_payments_is_published_byte_for_byte(self):
+        body = encode(make_marked_feed(NOW, blocks=120, transactions=200, validators=3))
+        self.server.serve(body)
+        self.assertEqual(self.puller.pull_once(), pull.PUBLISHED)
+        self.assertEqual(read_bytes(self.output), body)
+        # The shape may change from one pull to the next, in either direction.
+        base = encode(make_feed(NOW + 5))
+        self.server.serve(base)
+        self.assertEqual(self.puller.pull_once(), pull.PUBLISHED)
+        self.assertEqual(read_bytes(self.output), base)
+        marked = encode(make_marked_feed(NOW + 10))
+        self.server.serve(marked)
+        self.assertEqual(self.puller.pull_once(), pull.PUBLISHED)
+        self.assertEqual(read_bytes(self.output), marked)
 
     def test_published_mode_is_0644_under_a_restrictive_umask(self):
         previous = os.umask(0o077)
@@ -573,6 +604,91 @@ class ContractTest(unittest.TestCase):
     def test_full_feed_is_valid_and_returns_generated_at(self):
         self.assertEqual(self.check(make_feed(NOW, blocks=120, transactions=200)), NOW)
 
+    def test_feed_that_marks_payments_is_valid(self):
+        self.assertEqual(self.check(make_marked_feed(NOW, blocks=120, transactions=200, validators=3)), NOW)
+        document = make_marked_feed(NOW, blocks=2, transactions=7)
+        document["network"]["validators"][0]["root_slot"] = None
+        document["blocks"][0].update(tx_count=5, payment_tx_count=5, executed_payment_count=5)
+        document["blocks"][1].update(payment_tx_count=0, executed_payment_count=0)
+        document["transactions"][0]["payment_instructions"] = list(pull.PAYMENT_INSTRUCTIONS)
+        document["stats"].update(payment_transactions_seen=0, executed_payments_seen=0, payments_since=0)
+        self.assertEqual(self.check(document), NOW)
+        document["blocks"] = []
+        document["transactions"] = []
+        document["network"]["validators"] = []
+        self.assertEqual(self.check(document), NOW)
+
+    def test_a_feed_marks_payments_everywhere_or_nowhere(self):
+        places = {
+            "validator": (lambda d: d["network"]["validators"][0], {"root_slot": 5}),
+            "block": (lambda d: d["blocks"][1], {"payment_tx_count": 0, "executed_payment_count": 0}),
+            "transaction": (lambda d: d["transactions"][2], {"payment_instructions": []}),
+            "stats": (lambda d: d["stats"], {"payments_since": NOW, "payment_transactions_seen": 0,
+                                             "executed_payments_seen": 0}),
+        }
+        for label, (locate, fields) in places.items():
+            for key, value in fields.items():
+                with self.subTest(place=label, base_feed_with=key):
+                    document = make_feed(NOW)
+                    locate(document)[key] = value
+                    self.assert_invalid(document)
+                with self.subTest(place=label, marked_feed_without=key):
+                    document = make_marked_feed(NOW)
+                    del locate(document)[key]
+                    self.assert_invalid(document)
+        # One counter alone in the stats is enough to hold the whole feed to the marked shape.
+        document = make_feed(NOW)
+        document["stats"].update(places["stats"][1])
+        self.assert_invalid(document)
+
+    def test_malformed_payment_fields_are_rejected(self):
+        def at(locate, key, value):
+            return lambda d: locate(d).__setitem__(key, value)
+
+        validator = lambda d: d["network"]["validators"][0]    # noqa: E731
+        block = lambda d: d["blocks"][0]                       # noqa: E731
+        transaction = lambda d: d["transactions"][0]           # noqa: E731
+        stats = lambda d: d["stats"]                           # noqa: E731
+        mutations = {
+            "root_slot negative": at(validator, "root_slot", -1),
+            "root_slot string": at(validator, "root_slot", "12"),
+            "root_slot bool": at(validator, "root_slot", True),
+            "root_slot 2**53": at(validator, "root_slot", 2 ** 53),
+            "payment_tx_count string": at(block, "payment_tx_count", "1"),
+            "payment_tx_count float": at(block, "payment_tx_count", 1.0),
+            "payment_tx_count negative": at(block, "payment_tx_count", -1),
+            "payment_tx_count above tx_count": at(block, "payment_tx_count", 4),
+            "payment_tx_count null alone": at(block, "payment_tx_count", None),
+            "executed_payment_count bool": at(block, "executed_payment_count", False),
+            "executed_payment_count null alone": at(block, "executed_payment_count", None),
+            "executed_payment_count above payment_tx_count": at(block, "executed_payment_count", 2),
+            "payment_instructions string": at(transaction, "payment_instructions", "finalize"),
+            "payment_instructions object": at(transaction, "payment_instructions", {"finalize": True}),
+            "payment_instructions number": at(transaction, "payment_instructions", 3),
+            "payment_instructions false": at(transaction, "payment_instructions", False),
+            "payment_instructions unknown name": at(transaction, "payment_instructions", ["deposit"]),
+            "payment_instructions opcode number": at(transaction, "payment_instructions", [3]),
+            "payment_instructions null entry": at(transaction, "payment_instructions", [None]),
+            "payment_instructions wrong case": at(transaction, "payment_instructions", ["Finalize"]),
+            "payment_instructions repeated": at(transaction, "payment_instructions", ["write", "write"]),
+            "payment_instructions out of order": at(transaction, "payment_instructions", ["close", "finalize"]),
+            "payment_instructions too many": at(transaction, "payment_instructions",
+                                                list(pull.PAYMENT_INSTRUCTIONS) + ["unknown"]),
+            "payment_instructions nested": at(transaction, "payment_instructions", [["finalize"]]),
+            "payments_since null": at(stats, "payments_since", None),
+            "payments_since float": at(stats, "payments_since", 1.5),
+            "payment_transactions_seen negative": at(stats, "payment_transactions_seen", -1),
+            "payment_transactions_seen string": at(stats, "payment_transactions_seen", "3"),
+            "executed_payments_seen bool": at(stats, "executed_payments_seen", True),
+            "executed_payments_seen above payment_transactions_seen": at(stats, "executed_payments_seen", 32),
+        }
+        self.assertEqual(self.check(make_marked_feed(NOW)), NOW)
+        for label, mutate in mutations.items():
+            with self.subTest(case=label):
+                document = make_marked_feed(NOW)
+                mutate(document)
+                self.assert_invalid(document)
+
     def test_empty_and_null_variants_are_valid(self):
         document = make_feed(NOW, blocks=1, transactions=1)
         document["genesis_hash"] = None
@@ -605,16 +721,17 @@ class ContractTest(unittest.TestCase):
             "transaction": lambda d: d["transactions"][0],
             "stats": lambda d: d["stats"],
         }
-        for label, locate in places.items():
-            for key in list(locate(make_feed(NOW))):
-                with self.subTest(place=label, missing=key):
-                    document = make_feed(NOW)
-                    del locate(document)[key]
+        for make in (make_feed, make_marked_feed):
+            for label, locate in places.items():
+                for key in list(locate(make(NOW))):
+                    with self.subTest(shape=make.__name__, place=label, missing=key):
+                        document = make(NOW)
+                        del locate(document)[key]
+                        self.assert_invalid(document)
+                with self.subTest(shape=make.__name__, place=label, extra=True):
+                    document = make(NOW)
+                    locate(document)["extra"] = 1
                     self.assert_invalid(document)
-            with self.subTest(place=label, extra=True):
-                document = make_feed(NOW)
-                locate(document)["extra"] = 1
-                self.assert_invalid(document)
 
     def test_wrong_types_ranges_and_enums_are_rejected(self):
         def top(key, value):
@@ -692,17 +809,21 @@ class ContractTest(unittest.TestCase):
             "transactions_seen string": at(stats, "transactions_seen", "9"),
             "non_vote_transactions_seen bool": at(stats, "non_vote_transactions_seen", True),
         }
-        for label, mutate in mutations.items():
-            with self.subTest(case=label):
-                document = make_feed(NOW)
-                mutate(document)
-                self.assert_invalid(document)
+        for make in (make_feed, make_marked_feed):
+            for label, mutate in mutations.items():
+                with self.subTest(shape=make.__name__, case=label):
+                    document = make(NOW)
+                    mutate(document)
+                    self.assert_invalid(document)
 
     def test_array_caps(self):
         self.assertEqual(self.check(make_feed(NOW, blocks=120, transactions=0)), NOW)
         self.assertEqual(self.check(make_feed(NOW, blocks=0, transactions=200)), NOW)
         self.assert_invalid(make_feed(NOW, blocks=121))
         self.assert_invalid(make_feed(NOW, transactions=201))
+        self.assertEqual(self.check(make_marked_feed(NOW, blocks=120, transactions=200)), NOW)
+        self.assert_invalid(make_marked_feed(NOW, blocks=121))
+        self.assert_invalid(make_marked_feed(NOW, transactions=201))
 
     def test_top_level_must_be_an_object(self):
         for value in ([], "feed", 1, None, True):
@@ -738,10 +859,11 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "invalid")
 
     def test_validation_does_not_modify_the_document(self):
-        document = make_feed(NOW)
-        snapshot = copy.deepcopy(document)
-        pull.validate_feed(document)
-        self.assertEqual(document, snapshot)
+        for make in (make_feed, make_marked_feed):
+            document = make(NOW)
+            snapshot = copy.deepcopy(document)
+            pull.validate_feed(document)
+            self.assertEqual(document, snapshot)
 
 
 class SourceUrlTest(unittest.TestCase):

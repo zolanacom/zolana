@@ -32,17 +32,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import explorer_feed_v0 as feed  # noqa: E402
+import explorer_pull_v0 as pull  # noqa: E402
 
 SCRIPT = os.path.join(HERE, "explorer_feed_v0.py")
 UNIT = os.path.join(HERE, "zolana-explorer-feed-v0.service")
 
 NETWORK_FIELDS = {"status", "tip_slot", "finalized_slot", "block_height", "slot_time_ms",
                   "last_block_at", "validators"}
-VALIDATOR_FIELDS = {"identity", "vote_account", "last_vote", "active"}
+VALIDATOR_FIELDS = {"identity", "vote_account", "last_vote", "root_slot", "active"}
 BLOCK_FIELDS = {"slot", "parent_slot", "blockhash", "block_time", "block_height", "tx_count",
-                "non_vote_tx_count"}
-TRANSACTION_FIELDS = {"signature", "slot", "block_time", "ok", "fee", "kind"}
-STAT_FIELDS = {"since", "blocks_seen", "transactions_seen", "non_vote_transactions_seen"}
+                "non_vote_tx_count", "payment_tx_count", "executed_payment_count"}
+TRANSACTION_FIELDS = {"signature", "slot", "block_time", "ok", "fee", "kind", "payment_instructions"}
+STAT_FIELDS = {"since", "blocks_seen", "transactions_seen", "non_vote_transactions_seen",
+               "payments_since", "payment_transactions_seen", "executed_payments_seen"}
+INSTRUCTION_NAMES = ["initialize", "write", "seal", "finalize", "close", "inline", "unknown"]
+REPOSITORY = os.path.dirname(os.path.dirname(HERE))
 ALLOWED_METHODS = {"getGenesisHash", "getSlot", "getBlockHeight", "getBlocks", "getBlock",
                    "getVoteAccounts", "getHealth"}
 
@@ -55,6 +59,47 @@ def name(kind, number):
 def signature(slot, position):
     digest = hashlib.sha256(("signature:%d:%d" % (slot, position)).encode()).hexdigest()
     return (digest + digest)[:88]
+
+
+def base58(raw):
+    """Base58 text of bytes, written out here so the service's reader is checked against another hand."""
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    number = int.from_bytes(raw, "big")
+    text = ""
+    while number:
+        number, digit = divmod(number, 58)
+        text = alphabet[digit] + text
+    return "1" * (len(raw) - len(raw.lstrip(b"\0"))) + text
+
+
+def payload(label, size):
+    """`size` deterministic bytes standing in for the part of instruction data after the opcode."""
+    data = b""
+    while len(data) < size:
+        data += hashlib.sha512(("%s:%d" % (label, len(data))).encode()).digest()
+    return data[:size]
+
+
+def payment_entry(tx_signature, opcodes, failed=False, parsed=False, sizes=None):
+    """A getBlock transaction entry whose instructions go to the payment program.
+
+    `opcodes` gives the first data byte of each instruction; None stands for an
+    instruction with no data. The fee payer comes first, then a compute-budget
+    stand-in the feed must not count.
+    """
+    keys = [name("S", 1), name("Q", 1), name("C", 1), feed.PAYMENT_PROGRAM]
+    instructions = [{"programIdIndex": 2, "accounts": [], "data": base58(b"\x02" + payload("budget", 4))}]
+    for index, opcode in enumerate(opcodes):
+        size = (sizes or {}).get(opcode, {0: 44, 1: 772, 5: 9332}.get(opcode, 0))
+        data = b"" if opcode is None else bytes([opcode]) + payload("%s:%d" % (tx_signature, index), size)
+        instructions.append({"programIdIndex": 3, "accounts": [1, 0], "data": base58(data), "stackHeight": None})
+    if parsed:
+        instructions = [{"programId": keys[item["programIdIndex"]], "accounts": [keys[i] for i in item["accounts"]],
+                         "data": item["data"]} for item in instructions]
+        keys = [{"pubkey": key, "signer": i == 0, "writable": i < 2} for i, key in enumerate(keys)]
+    return {"transaction": {"signatures": [tx_signature], "message": {"accountKeys": keys, "instructions": instructions}},
+            "meta": {"err": {"InstructionError": [1, "InvalidInstructionData"]} if failed else None, "fee": 5000},
+            "version": "legacy"}
 
 
 class FakeClock:
@@ -91,6 +136,7 @@ class FakeChain:
         self.program_per_block = 0
         self.fail_every = 0
         self.program_counter = 0
+        self.payments = {}              # slot -> [(opcodes, failed)]: payment-program transactions of that block
         self.phantom = {}               # slot -> error code getBlock gives although getBlocks lists it
         self.full_broken = set()        # slots whose block the node fails to return with full details
         self.missing = set()            # methods answered with "Method not found"
@@ -141,6 +187,8 @@ class FakeChain:
                                             "message": {"accountKeys": keys}},
                             "meta": {"err": {"InstructionError": [0, "Custom"]} if failed else None, "fee": 5000},
                             "version": "legacy"})
+        for opcodes, failed in self.payments.get(slot, ()):
+            entries.append(payment_entry(signature(slot, len(entries)), opcodes, failed, parsed=slot % 2 == 0))
         self.height += 1
         self.blocks[slot] = {"blockhash": name("B", slot), "previousBlockhash": name("B", self.parent),
                              "parentSlot": self.parent, "blockTime": self.epoch + slot * 2 // 5,
@@ -213,7 +261,8 @@ class FakeChain:
     def rpc_getVoteAccounts(self, config=None):
         def account(number):
             return {"votePubkey": name("V", number), "nodePubkey": name("N", number), "activatedStake": 1000000,
-                    "epochVoteAccount": True, "commission": 0, "lastVote": self.tip, "rootSlot": self.ceiling(None)}
+                    "epochVoteAccount": True, "commission": 0, "lastVote": self.tip, "rootSlot": self.ceiling(None),
+                    "epochCredits": [[1, 64, 0]]}
         return {"current": [account(i) for i in range(self.validators)],
                 "delinquent": [account(1000 + i) for i in range(self.delinquent)]}
 
@@ -324,8 +373,13 @@ class FeedTestCase(unittest.TestCase):
         self.assertTrue(value is None or (type(value) is int and value >= 0), value)
 
     def check_contract(self, poller):
-        """Assert the published payload follows the shared feed contract; return it parsed."""
+        """Assert the published payload follows the shared feed contract; return it parsed.
+
+        The contract is checked twice: field by field below, and by the check the
+        web host runs before it publishes a feed.
+        """
         payload, sig = poller.store.current()
+        self.assertEqual(pull.validate_feed(pull.parse_feed(payload)), json.loads(payload)["generated_at"])
         self.assertLessEqual(len(payload), 400 * 1000)
         self.assertEqual(sig, hmac.new(self.key, payload, hashlib.sha256).hexdigest().encode() + b"\n")
         self.assertRegex(sig.decode(), r"\A[0-9a-f]{64}\n\Z")
@@ -351,6 +405,7 @@ class FeedTestCase(unittest.TestCase):
             self.assertIsInstance(row["identity"], str)
             self.assertTrue(row["vote_account"] is None or isinstance(row["vote_account"], str))
             self.assert_optional_int(row["last_vote"])
+            self.assert_optional_int(row["root_slot"])
             self.assertIs(type(row["active"]), bool)
 
         self.assertLessEqual(len(doc["blocks"]), 120)
@@ -363,6 +418,12 @@ class FeedTestCase(unittest.TestCase):
             self.assertIs(type(row["tx_count"]), int)
             self.assertIs(type(row["non_vote_tx_count"]), int)
             self.assertLessEqual(row["non_vote_tx_count"], row["tx_count"])
+            self.assertEqual(row["payment_tx_count"] is None, row["executed_payment_count"] is None)
+            if row["payment_tx_count"] is not None:
+                self.assertIs(type(row["payment_tx_count"]), int)
+                self.assertIs(type(row["executed_payment_count"]), int)
+                self.assertLessEqual(row["executed_payment_count"], row["payment_tx_count"])
+                self.assertLessEqual(row["payment_tx_count"], row["tx_count"])
         slots = [row["slot"] for row in doc["blocks"]]
         self.assertEqual(slots, sorted(set(slots), reverse=True), "blocks newest first, no duplicates")
 
@@ -375,6 +436,9 @@ class FeedTestCase(unittest.TestCase):
             self.assertIs(type(row["ok"]), bool)
             self.assertIs(type(row["fee"]), int)
             self.assertIn(row["kind"], ("vote", "program"))
+            steps = row["payment_instructions"]
+            if steps is not None:
+                self.assertEqual(steps, [step for step in INSTRUCTION_NAMES if step in steps])
         tx_slots = [row["slot"] for row in doc["transactions"]]
         self.assertEqual(tx_slots, sorted(tx_slots, reverse=True), "transactions newest first")
         self.assertEqual(len({row["signature"] for row in doc["transactions"]}), len(doc["transactions"]))
@@ -382,6 +446,8 @@ class FeedTestCase(unittest.TestCase):
         self.assertEqual(set(doc["stats"]), STAT_FIELDS)
         for value in doc["stats"].values():
             self.assertIs(type(value), int)
+        self.assertGreaterEqual(doc["stats"]["payments_since"], doc["stats"]["since"])
+        self.assertLessEqual(doc["stats"]["executed_payments_seen"], doc["stats"]["payment_transactions_seen"])
         return doc
 
 
@@ -457,8 +523,10 @@ class PollerTests(FeedTestCase):
         self.assertEqual(network["slot_time_ms"], 400.0)
         self.assertEqual(network["last_block_at"], int(self.clock()))
         self.assertEqual(network["validators"], [
-            {"identity": name("N", 0), "vote_account": name("V", 0), "last_vote": 240, "active": True},
-            {"identity": name("N", 1000), "vote_account": name("V", 1000), "last_vote": 240, "active": False},
+            {"identity": name("N", 0), "vote_account": name("V", 0), "last_vote": 240, "root_slot": 208,
+             "active": True},
+            {"identity": name("N", 1000), "vote_account": name("V", 1000), "last_vote": 240, "root_slot": 208,
+             "active": False},
         ])
 
         # First start began 120 slots behind the tip (slot 85); the window keeps the newest 120 blocks.
@@ -466,9 +534,14 @@ class PollerTests(FeedTestCase):
         newest = doc["blocks"][0]
         self.assertEqual(newest, {"slot": 208, "parent_slot": 207, "blockhash": name("B", 208),
                                   "block_time": self.chain.blocks[208]["blockTime"], "block_height": 208,
-                                  "tx_count": 3, "non_vote_tx_count": 2})
+                                  "tx_count": 3, "non_vote_tx_count": 2,
+                                  "payment_tx_count": 0, "executed_payment_count": 0})
         self.assertEqual(doc["stats"], {"since": doc["stats"]["since"], "blocks_seen": 124,
-                                        "transactions_seen": 372, "non_vote_transactions_seen": 248})
+                                        "transactions_seen": 372, "non_vote_transactions_seen": 248,
+                                        "payments_since": doc["stats"]["since"],
+                                        "payment_transactions_seen": 0, "executed_payments_seen": 0})
+        # No transaction of this chain goes to the payment program, and the feed says so for each.
+        self.assertEqual({tuple(row["payment_instructions"]) for row in doc["transactions"]}, {()})
 
         # 248 non-vote transactions were seen: the list holds the newest 200 and no votes.
         self.assertEqual(len(doc["transactions"]), 200)
@@ -660,7 +733,11 @@ class PollerTests(FeedTestCase):
         self.assertGreater(len(doc["blocks"]), 0)
         for row in doc["blocks"]:
             self.assertEqual((row["tx_count"], row["non_vote_tx_count"]), (3, 3))
+            # Signatures carry no instructions: the payment counts are "not known", not zero.
+            self.assertEqual((row["payment_tx_count"], row["executed_payment_count"]), (None, None))
         self.assertEqual({(row["kind"], row["ok"], row["fee"]) for row in doc["transactions"]}, {("program", True, 0)})
+        self.assertEqual({row["payment_instructions"] for row in doc["transactions"]}, {None})
+        self.assertEqual((doc["stats"]["payment_transactions_seen"], doc["stats"]["executed_payments_seen"]), (0, 0))
         self.assertEqual(doc["transactions"][0]["signature"], signature(doc["blocks"][0]["slot"], 2))
 
     def test_one_block_the_node_cannot_return_in_full_is_listed_from_its_signatures(self):
@@ -674,6 +751,8 @@ class PollerTests(FeedTestCase):
         rows = {row["slot"]: row for row in self.check_contract(poller)["blocks"]}
         self.assertEqual((rows[50]["tx_count"], rows[50]["non_vote_tx_count"]), (2, 2))
         self.assertEqual((rows[51]["tx_count"], rows[51]["non_vote_tx_count"]), (2, 1))
+        self.assertEqual((rows[50]["payment_tx_count"], rows[50]["executed_payment_count"]), (None, None))
+        self.assertEqual((rows[51]["payment_tx_count"], rows[51]["executed_payment_count"]), (0, 0))
         self.assertEqual(poller.block_variant, feed.BlockVariant("full", "finalized"))
 
     def test_passing_genesis_error_does_not_discard_the_window(self):
@@ -923,6 +1002,195 @@ class PollerTests(FeedTestCase):
         self.assertLess(doc["network"]["last_block_at"], doc["generated_at"] - 60)
 
 
+class PaymentMarkingTests(FeedTestCase):
+    """Transactions of the payment program are named by instruction and counted per block."""
+
+    def caught_up(self):
+        self.chain.finality_lag = 0
+        self.chain.advance(150)
+        poller = self.poller()
+        for _ in range(6):
+            self.cycle(poller)
+        return poller
+
+    def schedule(self, plan):
+        """Put payment-program transactions into the next slots; return the first of them."""
+        first = self.chain.tip + 1
+        for offset, transactions in enumerate(plan):
+            self.chain.payments[first + offset] = transactions
+        return first
+
+    def test_payment_program_transactions_are_marked_and_counted(self):
+        poller = self.caught_up()
+        first = self.schedule([
+            [((0, 1), False)],                      # initialize and the first write in one transaction
+            [((1,), False), ((1, 1), False)],       # two more transactions of writes
+            [((2,), False)],                        # seal
+            [((3, 4), False), ((3,), True)],        # finalize and close; a finalize that failed
+            [((5,), False), ((9,), True), ((None,), True)],     # inline; an unknown first byte; no data
+        ])
+        self.cycle(poller)
+        doc = self.check_contract(poller)
+        self.assertEqual(doc["blocks"][0]["slot"], first + 4)
+
+        counts = {row["slot"]: (row["tx_count"], row["non_vote_tx_count"], row["payment_tx_count"],
+                                row["executed_payment_count"]) for row in doc["blocks"]}
+        self.assertEqual([counts[first + offset] for offset in range(5)],
+                         [(2, 1, 1, 0), (3, 2, 2, 0), (2, 1, 1, 0), (3, 2, 2, 1), (4, 3, 3, 1)])
+        self.assertEqual({counts[slot][2:] for slot in counts if slot < first}, {(0, 0)})
+        self.assertEqual((doc["stats"]["payment_transactions_seen"], doc["stats"]["executed_payments_seen"]), (9, 2))
+        self.assertEqual(sum(row["payment_tx_count"] for row in doc["blocks"]), 9)
+
+        listed = {row["signature"]: row for row in doc["transactions"]}
+        expected = {
+            (first, 1): (["initialize", "write"], True),
+            (first + 1, 1): (["write"], True),
+            (first + 1, 2): (["write"], True),
+            (first + 2, 1): (["seal"], True),
+            (first + 3, 1): (["finalize", "close"], True),
+            (first + 3, 2): (["finalize"], False),
+            (first + 4, 1): (["inline"], True),
+            (first + 4, 2): (["unknown"], False),
+            (first + 4, 3): (["unknown"], False),
+        }
+        for (slot, position), (steps, ok) in expected.items():
+            row = listed[signature(slot, position)]
+            self.assertEqual((row["payment_instructions"], row["ok"], row["kind"], row["slot"]),
+                             (steps, ok, "program", slot))
+        # Position 0 of each block is its vote: listed, and not a payment-program transaction.
+        self.assertEqual(listed[signature(first, 0)]["payment_instructions"], [])
+        self.assertEqual(listed[signature(first, 0)]["kind"], "vote")
+
+    def test_nothing_of_a_payment_beyond_the_instruction_names_reaches_the_feed(self):
+        poller = self.caught_up()
+        first = self.schedule([[((0, 1), False)], [((3, 4), False)], [((5,), False)]])
+        self.cycle(poller)
+        self.check_contract(poller)     # every key of every row is one of the contract's
+        published = poller.store.current()[0].decode("ascii")
+        poller.close()                  # writes the window file, which holds what the next start reloads
+        saved = self.state_file("window.json").decode("ascii")
+        self.assertIn('"payment_instructions":["finalize","close"]', published)
+        self.assertIn('"payment_instructions":["finalize","close"]', saved)
+        checked = 0
+        for slot in range(first, first + 3):
+            entry = self.chain.blocks[slot]["transactions"][1]
+            message = entry["transaction"]["message"]
+            for instruction in message["instructions"]:
+                # Not the instruction data, and not any piece of it long enough to recognise.
+                for start in range(0, max(1, len(instruction["data"]) - 16), 16):
+                    piece = instruction["data"][start:start + 16]
+                    if len(piece) == 16:
+                        self.assertNotIn(piece, published)
+                        self.assertNotIn(piece, saved)
+                        checked += 1
+            for key in message["accountKeys"]:
+                key = key["pubkey"] if isinstance(key, dict) else key
+                self.assertNotIn(key, published)
+                self.assertNotIn(key, saved)
+        self.assertGreater(checked, 800)
+        self.assertNotIn(feed.PAYMENT_PROGRAM, published)
+
+    def test_restart_keeps_the_marks_and_the_counters(self):
+        poller = self.caught_up()
+        first = self.schedule([[((0,), False)], [((3,), False)]])
+        self.cycle(poller)
+        before = self.check_contract(poller)
+        poller.close()
+
+        self.clock.advance(30)
+        second = self.poller()
+        reloaded = self.check_contract(second)
+        self.assertEqual(reloaded["blocks"], before["blocks"])
+        self.assertEqual(reloaded["transactions"], before["transactions"])
+        self.assertEqual(reloaded["stats"], before["stats"])
+        self.assertEqual((reloaded["stats"]["payment_transactions_seen"], reloaded["stats"]["executed_payments_seen"]),
+                         (2, 1))
+        rows = {row["slot"]: row for row in reloaded["blocks"]}
+        self.assertEqual((rows[first + 1]["payment_tx_count"], rows[first + 1]["executed_payment_count"]), (1, 1))
+
+    def test_window_saved_before_payments_were_counted_is_kept_and_marked_not_known(self):
+        poller = self.caught_up()
+        self.schedule([[((3,), False)]])
+        self.cycle(poller)
+        before = self.check_contract(poller)
+        poller.close()
+
+        # The window file as the service wrote it before it marked payments.
+        window = json.loads(self.state_file("window.json"))
+        for row in window["blocks"]:
+            del row["payment_tx_count"], row["executed_payment_count"]
+        for row in window["transactions"] + window["votes"]:
+            del row["payment_instructions"]
+        for row in window["network"]["validators"]:
+            del row["root_slot"]
+        for field in ("payments_since", "payment_transactions_seen", "executed_payments_seen"):
+            del window["stats"][field]
+        with open(os.path.join(self.state_dir, "window.json"), "w") as stream:
+            json.dump(window, stream, separators=(",", ":"))
+
+        self.clock.advance(600)
+        second = self.poller()
+        self.assertIn("window-loaded", self.events())
+        self.assertNotIn("window-ignored", self.events())
+        reloaded = self.check_contract(second)
+        self.assertEqual([row["slot"] for row in reloaded["blocks"]], [row["slot"] for row in before["blocks"]])
+        self.assertEqual({(row["payment_tx_count"], row["executed_payment_count"]) for row in reloaded["blocks"]},
+                         {(None, None)})
+        self.assertEqual({row["payment_instructions"] for row in reloaded["transactions"]}, {None})
+        self.assertEqual({row["root_slot"] for row in reloaded["network"]["validators"]}, {None})
+        stats = reloaded["stats"]
+        self.assertEqual(stats["since"], before["stats"]["since"])
+        self.assertEqual(stats["blocks_seen"], before["stats"]["blocks_seen"])
+        # The payment counters start at the restart, and say so.
+        self.assertEqual((stats["payments_since"], stats["payment_transactions_seen"], stats["executed_payments_seen"]),
+                         (int(self.clock()), 0, 0))
+
+        first = self.schedule([[((3, 4), False)]])
+        self.assertEqual(self.cycle(second), "live")
+        after = self.check_contract(second)
+        rows = {row["slot"]: row for row in after["blocks"]}
+        self.assertEqual((rows[first]["payment_tx_count"], rows[first]["executed_payment_count"]), (1, 1))
+        self.assertEqual(rows[first + 1]["payment_tx_count"], 0)
+        self.assertIsNone(rows[first - 1]["payment_tx_count"])
+        self.assertEqual((after["stats"]["payment_transactions_seen"], after["stats"]["executed_payments_seen"]), (1, 1))
+        self.assertEqual({row["root_slot"] for row in after["network"]["validators"]}, {self.chain.tip})
+
+    def test_window_with_impossible_payment_fields_is_ignored(self):
+        poller = self.caught_up()
+        poller.close()
+        good = json.loads(self.state_file("window.json"))
+
+        def spoil_counts(window):
+            window["blocks"][0]["payment_tx_count"] = window["blocks"][0]["tx_count"] + 1
+
+        def spoil_pair(window):
+            window["blocks"][0]["executed_payment_count"] = None
+
+        def spoil_order(window):
+            window["votes"][0]["payment_instructions"] = ["close", "finalize"]
+
+        def spoil_name(window):
+            window["votes"][0]["payment_instructions"] = ["transfer"]
+
+        def spoil_stats(window):
+            window["stats"]["executed_payments_seen"] = 5
+
+        def spoil_partial_stats(window):
+            del window["stats"]["payments_since"]
+
+        for spoil in (spoil_counts, spoil_pair, spoil_order, spoil_name, spoil_stats, spoil_partial_stats):
+            with self.subTest(case=spoil.__name__):
+                window = json.loads(json.dumps(good))
+                spoil(window)
+                with open(os.path.join(self.state_dir, "window.json"), "w") as stream:
+                    json.dump(window, stream)
+                self.log.truncate(0)
+                self.log.seek(0)
+                restarted = self.poller()
+                self.assertIn("window-ignored", self.events())
+                self.assertEqual(self.check_contract(restarted)["blocks"], [])
+
+
 class PureFunctionTests(unittest.TestCase):
     def entry(self, keys, loaded=None):
         meta = {"err": None, "fee": 5000}
@@ -949,8 +1217,123 @@ class PureFunctionTests(unittest.TestCase):
         parsed = feed.parse_block(9, {"blockhash": name("B", 9), "transactions": [
             self.entry([name("A", 1)]), "garbage", {"transaction": {"signatures": ["bad sig!"]}}]})
         self.assertEqual(parsed.row, {"slot": 9, "parent_slot": None, "blockhash": name("B", 9), "block_time": None,
-                                      "block_height": None, "tx_count": 3, "non_vote_tx_count": 3})
+                                      "block_height": None, "tx_count": 3, "non_vote_tx_count": 3,
+                                      "payment_tx_count": 0, "executed_payment_count": 0})
         self.assertEqual([row["signature"] for row in parsed.program], [signature(1, 0)])
+
+    def test_first_data_byte_of_base58_text(self):
+        for first in (0, 1, 2, 3, 4, 5, 6, 57, 58, 127, 128, 255):
+            for size in (0, 1, 4, 44, 772):
+                data = bytes([first]) + payload("first:%d" % first, size)
+                self.assertEqual(feed.first_data_byte(base58(data)), first, (first, size))
+        # Leading zero bytes, a zero byte alone, and the largest inline frame.
+        self.assertEqual(feed.first_data_byte(base58(b"\0\0\x07")), 0)
+        self.assertEqual(feed.first_data_byte("1"), 0)
+        self.assertEqual(feed.first_data_byte(base58(b"\x05" + payload("frame", 16383))), 5)
+        self.assertEqual(feed.first_data_byte(base58(b"\xff" * 16384)), 255)
+        self.assertLessEqual(len(base58(b"\xff" * 16384)), feed.MAX_INSTRUCTION_TEXT)
+        for unreadable in ("", "0", "1O", "3l", "abc def", "z" * (feed.MAX_INSTRUCTION_TEXT + 1), None, 5, b"3", ["3"]):
+            self.assertIsNone(feed.first_data_byte(unreadable), unreadable)
+
+    def test_instruction_names_follow_the_program(self):
+        self.assertEqual(feed.PAYMENT_INSTRUCTION_ORDER, tuple(INSTRUCTION_NAMES))
+        self.assertEqual(tuple(pull.PAYMENT_INSTRUCTIONS), tuple(INSTRUCTION_NAMES))
+        # The address: the bytes in the protocol crate, and the text the JavaScript SDK exports.
+        with open(os.path.join(REPOSITORY, "protocol", "payments", "src", "native_accounts.rs")) as stream:
+            source = stream.read()
+        numbers = re.search(r"pub const PROGRAM_ID: \[u8; 32\] = \[([0-9,\s]+)\];", source).group(1)
+        program = bytes(int(number) for number in numbers.replace(",", " ").split())
+        self.assertEqual(len(program), 32)
+        self.assertEqual(feed.PAYMENT_PROGRAM, base58(program))
+        with open(os.path.join(REPOSITORY, "sdk", "js", "formats.mjs")) as stream:
+            self.assertIn('export const PROGRAM_ID = "%s";' % feed.PAYMENT_PROGRAM, stream.read())
+        # The first byte of each instruction: what the program's own builders write.
+        with open(os.path.join(REPOSITORY, "node", "adapter", "src", "instructions.rs")) as stream:
+            builders = stream.read()
+        opcodes = {}
+        for builder in re.split(r"(?m)^(?:/// .*\n)*pub fn ", builders)[1:]:
+            literal = re.search(r"vec!\[([0-9]+)\]", builder)
+            if literal is not None:
+                opcodes[builder.split("(", 1)[0]] = int(literal.group(1))
+        self.assertEqual(opcodes, {name: opcode for opcode, name in enumerate(feed.PAYMENT_INSTRUCTIONS)})
+        self.assertEqual(feed.EXECUTING_INSTRUCTIONS, {"finalize", "inline"})
+
+    def test_payment_instructions_of_an_entry(self):
+        steps = feed.payment_instructions
+        self.assertEqual(steps(payment_entry(signature(1, 0), (3, 4))), ["finalize", "close"])
+        self.assertEqual(steps(payment_entry(signature(1, 0), (4, 3), parsed=True)), ["finalize", "close"])
+        self.assertEqual(steps(payment_entry(signature(1, 0), (1, 1, 1, 0))), ["initialize", "write"])
+        self.assertEqual(steps(payment_entry(signature(1, 0), (5,))), ["inline"])
+        self.assertEqual(steps(payment_entry(signature(1, 0), (2, 6, None))), ["seal", "unknown"])
+        self.assertEqual(steps(payment_entry(signature(1, 0), ())), [])
+
+        # An instruction is the program's only by the address its program index names.
+        entry = payment_entry(signature(1, 0), (3,))
+        entry["transaction"]["message"]["instructions"][1]["programIdIndex"] = 2
+        self.assertEqual(steps(entry), [])
+        # ... which may be an address loaded from a lookup table, counted after the message's own keys.
+        loaded = payment_entry(signature(1, 0), (2,))
+        message = loaded["transaction"]["message"]
+        message["accountKeys"] = message["accountKeys"][:3]
+        loaded["meta"]["loadedAddresses"] = {"writable": [name("L", 1)], "readonly": [feed.PAYMENT_PROGRAM]}
+        message["instructions"][1]["programIdIndex"] = 4
+        self.assertEqual(steps(loaded), ["seal"])
+        message["instructions"][1]["programIdIndex"] = 3
+        self.assertEqual(steps(loaded), [])
+        # A key that cannot be read keeps its place, so the indexes after it still hold.
+        gap = payment_entry(signature(1, 0), (0,))
+        gap["transaction"]["message"]["accountKeys"][1] = 7
+        self.assertEqual(steps(gap), ["initialize"])
+        # The payment program among the accounts of another program's instruction is not an invocation,
+        # and an instruction another program made is not read at all.
+        named = payment_entry(signature(1, 0), ())
+        named["transaction"]["message"]["instructions"][0]["accounts"] = [3]
+        named["meta"]["innerInstructions"] = [{"index": 0, "instructions": [
+            {"programIdIndex": 3, "accounts": [], "data": base58(b"\x03")}]}]
+        self.assertEqual(steps(named), [])
+
+        for unreadable in ({}, None, "text", 7, {"transaction": ["AQID", "base64"], "meta": None},
+                           {"transaction": {"message": None}}, {"transaction": {"message": {"instructions": "x"}}},
+                           {"transaction": {"message": {"accountKeys": [feed.PAYMENT_PROGRAM],
+                                                        "instructions": [None, 3, {"programIdIndex": True},
+                                                                         {"programIdIndex": -1}, {"programIdIndex": 9},
+                                                                         {"programIdIndex": "0"}]}}}):
+            self.assertEqual(steps(unreadable), [])
+        odd = {"transaction": {"message": {"accountKeys": [feed.PAYMENT_PROGRAM], "instructions": [
+            {"programIdIndex": 0}, {"programIdIndex": 0, "data": 5}, {"programIdIndex": 0, "data": "not base58!"}]}}}
+        self.assertEqual(steps(odd), ["unknown"])
+
+    def test_a_payment_is_executed_only_by_a_successful_finalize_or_inline(self):
+        self.assertTrue(feed.executes_payment(["finalize"], True))
+        self.assertTrue(feed.executes_payment(["finalize", "close"], True))
+        self.assertTrue(feed.executes_payment(["inline"], True))
+        self.assertFalse(feed.executes_payment(["finalize", "close"], False))
+        for steps in ([], None, ["initialize", "write", "seal"], ["close"], ["unknown"]):
+            self.assertFalse(feed.executes_payment(steps, True))
+        block = feed.parse_block(9, {"blockhash": name("B", 9), "transactions": [
+            payment_entry(signature(9, 0), (3, 4)), payment_entry(signature(9, 1), (3,), failed=True),
+            payment_entry(signature(9, 2), (1,)), self.entry([name("A", 1)]), "garbage"]})
+        self.assertEqual((block.row["tx_count"], block.row["payment_tx_count"], block.row["executed_payment_count"]),
+                         (5, 3, 1))
+        self.assertEqual([row["payment_instructions"] for row in block.program],
+                         [["finalize", "close"], ["finalize"], ["write"], []])
+        listed = feed.select_transactions(block.program, block.votes)
+        self.assertEqual([set(row) for row in listed], [TRANSACTION_FIELDS] * 4)
+        signatures_only = feed.parse_block(9, {"blockhash": name("B", 9), "signatures": [signature(9, 0)]})
+        self.assertEqual((signatures_only.row["payment_tx_count"], signatures_only.row["executed_payment_count"]),
+                         (None, None))
+        self.assertEqual([row["payment_instructions"] for row in signatures_only.program], [None])
+
+    def test_validators_carry_the_root_slot_the_node_reports(self):
+        rows = feed.parse_validators({"current": [
+            {"nodePubkey": name("N", 2), "votePubkey": name("V", 2), "lastVote": 90, "rootSlot": 58,
+             "activatedStake": 5, "commission": 100, "epochCredits": [[1, 2, 3]]},
+            {"nodePubkey": name("N", 1), "votePubkey": name("V", 1), "lastVote": 91}],
+            "delinquent": [{"nodePubkey": name("N", 3), "votePubkey": name("V", 3), "lastVote": 4, "rootSlot": -1}]})
+        self.assertEqual([set(row) for row in rows], [VALIDATOR_FIELDS] * 3)
+        self.assertEqual([(row["identity"], row["last_vote"], row["root_slot"], row["active"]) for row in rows],
+                         sorted([(name("N", 1), 91, None, True), (name("N", 2), 90, 58, True)])
+                         + [(name("N", 3), 4, None, False)])
 
     def test_untrusted_values_are_filtered(self):
         self.assertEqual(feed.as_count(12), 12)

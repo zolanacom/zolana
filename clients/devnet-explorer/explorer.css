@@ -102,7 +102,7 @@ body:has(#hero[hidden]) .observation-report{order:2}
 .window-heading{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:6px 28px;margin:0 0 16px}
 .content .window-heading h2.subheading{margin:0}
 .window-summary{margin:0;min-height:21px;font-size:12px;line-height:1.75;color:#8391a4;font-variant-numeric:tabular-nums}
-.window-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));margin:0;padding:22px 0 24px;border-top:1px solid #25303f;border-bottom:1px solid #182536}
+.window-stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));margin:0;padding:22px 0 24px;border-top:1px solid #25303f;border-bottom:1px solid #182536}
 .window-stats>div{min-width:0;padding:2px 18px 2px 24px;border-left:1px solid #25303f}
 .window-stats>div:first-child{padding-left:0;border-left:0}
 .window-stats dt{margin:0 0 8px;font-size:11px;line-height:1.5;color:#7d97b7}
@@ -126,6 +126,47 @@ body:has(#hero[hidden]) .observation-report{order:2}
 .explorer-window[data-state=paused] .chart{opacity:.6}
 .window-readout{margin:12px 0 0;min-height:21px;font-size:12px;line-height:1.75;color:#b3c5dd;font-variant-numeric:tabular-nums}
 .window-footnote{margin:10px 0 0;max-width:118ch;font-size:11px;line-height:1.7;color:#6f829a}
+
+/* Payment marks. The "Shielded payments" figure is the last one, so the others keep their
+   places when a feed that does not mark payments hides it. */
+[data-payments=unmarked] .payment-figure{display:none}
+@media(min-width:1180px){[data-payments=unmarked] .window-stats{grid-template-columns:repeat(5,minmax(0,1fr))}}
+/* A mark above the column of a block with payment-program transactions: bright when one
+   of them executed a payment. */
+.bar-mark{fill:#6f829a}
+.bar-mark.executed{fill:#f2f5fa}
+/* The same mark before the kind of a transaction: filled when it executed a payment,
+   hollow for a staging step or a payment that failed. */
+.explorer-table td.kind-payment{color:#f2f5fa}
+.explorer-table td.kind-payment:before{content:"";display:inline-block;box-sizing:border-box;width:7px;height:7px;margin:0 8px 1px 0;border:1px solid #f2f5fa;border-radius:1px;vertical-align:middle}
+.explorer-table tr[data-payment=executed] td.kind-payment:before{background:#f2f5fa}
+/* All transactions, or those of the payment program only: one choice for the list and the chart. */
+.payment-filter{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:14px 0 0}
+.payment-filter[hidden]{display:none}
+.payment-filter-label{margin-right:4px;font-size:11px;line-height:1.5;color:#7d97b7}
+.filter-button{min-height:28px;padding:3px 12px;border:1px solid #394c66;border-radius:2px;background:none;color:#8ea7c8;font-size:11px;line-height:1.5}
+.filter-button:hover{border-color:#9cc8ff;color:#9cc8ff}
+.filter-button[aria-pressed=true]{border-color:#3f638b;background:rgba(156,200,255,.08);color:#9cc8ff}
+.filter-button:focus-visible{outline:2px solid #9cc8ff;outline-offset:2px}
+.list-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 18px;margin:0 0 14px}
+.content .list-heading h2.subheading{margin:0}
+.list-heading .payment-filter{margin:0}
+#payments-note:empty{display:none}
+
+/* Validators the feed lists: one row each. Below 900 pixels a row becomes a block with
+   the column name before each value, so nothing scrolls sideways. */
+.validator-list{order:3;margin:0 0 50px}
+.validator-list .table-wrap{border-top:1px solid #25303f}
+.validator-list .validator-table{min-width:880px}
+.validator-table .identifier{font-size:12px;color:#d2e2f6}
+.validator-table .badge{white-space:nowrap}
+.validator-list[data-root=absent] .validator-root{display:none}
+.validator-list .explorer-empty{border-top:1px solid #25303f;border-bottom:1px solid #182536}
+.validator-list .explorer-empty[hidden]{display:none}
+.validator-notice{order:3;margin:0 0 26px}
+.validator-notice:empty{display:none}
+/* The page of the list states two things in two paragraphs. */
+.observation-primary p+p:not(.pause-notice){margin-top:14px}
 
 /* Rows that arrive with a newer feed. */
 @keyframes row-arrive{from{opacity:0;background-color:rgba(156,200,255,.1)}to{opacity:1;background-color:rgba(156,200,255,0)}}
@@ -167,6 +208,15 @@ body:has(#hero[hidden]) .observation-report{order:2}
  .explorer-table tr.row-new,.tick.tick-new{animation:none}
  .copy-icon{transition:none}
 }
+@media(max-width:899px){
+ .validator-list .table-wrap{overflow:visible;border-bottom:0}
+ .validator-list .table-wrap:before{display:none}
+ .validator-list .validator-table,.validator-table tbody{display:block;min-width:0}
+ .validator-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+ .validator-table tr{display:block;padding:12px 0;border-bottom:1px solid #182536}
+ .validator-list .validator-table tbody th,.validator-list .validator-table td{display:flex;align-items:baseline;justify-content:space-between;gap:18px;padding:6px 0;border:0;white-space:normal;text-align:right}
+ .validator-table tbody th:before,.validator-table td:before{content:attr(data-label);flex:0 0 auto;font-size:11px;line-height:1.7;color:#7d97b7;text-align:left}
+}
 @media(max-width:1179px){
  .window-stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:24px}
  .window-stats>div:nth-child(3n+1){padding-left:0;border-left:0}
@@ -187,4 +237,6 @@ body:has(#hero[hidden]) .observation-report{order:2}
  .pulse-strip{grid-template-columns:repeat(60,minmax(0,1fr));gap:4px 1px;padding:18px 0}
  .tick{height:22px}
  .explorer-detail .detail-actions{margin-left:0;flex-basis:100%}
+ .filter-button{min-height:40px;padding:6px 14px;font-size:12px}
+ .validator-list{margin-bottom:40px}
 }
