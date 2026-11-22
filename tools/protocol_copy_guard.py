@@ -13,7 +13,10 @@ exactly the differences recorded in tools/protocol_copy_allowlist.json. Each
 record pins both files by SHA-256, so any later edit to either side of a
 recorded difference fails until the difference is reviewed again. A file that
 is identical today must stay identical. A record whose files have become
-identical must be deleted. The check builds nothing and reads no archive.
+identical must be deleted. A patch outside the plan may change a copy only as
+a proposal that the allow-list names, pins by SHA-256 and reviews; it is not
+applied, so the comparison stays the plan against the workspace. The check
+builds nothing and reads no archive.
 """
 from __future__ import annotations
 
@@ -152,18 +155,33 @@ def workspace_name(candidate_name):
 
 
 def unplanned_patches(plan):
-    """Patch files in node/candidate, outside the plan, that touch a copy."""
+    """{path: SHA-256} of patch files in node/candidate, outside the plan, that touch a copy."""
     planned = {digest(plan.base_patch), *(digest(step.patch) for step in plan.transitions)}
-    found = []
+    found = {}
     directory = ROOT / "node/candidate"
     for path in sorted(directory.rglob("*.patch")):
         if path.is_symlink() or not path.is_file():
             continue
-        if digest(path.read_bytes()) in planned:
+        checksum = digest(path.read_bytes())
+        if checksum in planned:
             continue
         if any(candidate_root_of(name) for name in source_tools.patch_paths(path)):
-            found.append(path.relative_to(ROOT).as_posix())
+            found[path.relative_to(ROOT).as_posix()] = checksum
     return found
+
+
+def proposal_problems(recorded, unplanned):
+    """Problems of the patches outside the plan against the recorded proposals."""
+    problems = []
+    for name, checksum in unplanned.items():
+        if name not in recorded:
+            problems.append(f"{name}: a patch outside the reconstruction plan changes a protocol copy.")
+        elif recorded[name]["sha256"] != checksum:
+            problems.append(f"{name}: the proposed patch changed since it was reviewed.")
+    for name in sorted(set(recorded) - set(unplanned)):
+        problems.append(f"{name}: allow-list entry for a proposed patch that is gone, has joined the "
+                        "plan or no longer changes a copy. Delete it.")
+    return problems
 
 
 def pinned_requirement(dependencies):
@@ -196,7 +214,7 @@ def load_allowlist(path):
     raw = candidate.bounded_file(path, 1024 * 1024)
     value = candidate.decode(raw)
     require(isinstance(value, dict) and set(value) == {
-        "format", "plan_sha256", "differences", "workspace_only", "candidate_only"
+        "format", "plan_sha256", "differences", "workspace_only", "candidate_only", "proposed_patches"
     } and value["format"] == FORMAT, "invalid protocol copy allow-list")
     require(isinstance(value["plan_sha256"], str) and HEX.fullmatch(value["plan_sha256"]),
             "allow-list must pin the reconstruction plan")
@@ -223,6 +241,16 @@ def load_allowlist(path):
                 require(isinstance(counts, dict) and set(counts) == {"candidate", "workspace"}
                         and all(type(count) is int and count >= 0 for count in counts.values()),
                         f"allow-list entry {name} has invalid line counts")
+    proposals = value["proposed_patches"]
+    require(isinstance(proposals, dict), "allow-list section proposed_patches must be an object")
+    for name, entry in proposals.items():
+        candidate.relative_name(name)
+        require(isinstance(entry, dict) and set(entry) == {"sha256", "review"},
+                f"allow-list entry {name} must have exactly: review, sha256")
+        require(isinstance(entry["sha256"], str) and HEX.fullmatch(entry["sha256"]),
+                f"allow-list entry {name} has an invalid hash")
+        require(isinstance(entry["review"], str) and len(entry["review"].strip()) >= 20,
+                f"allow-list entry {name} needs a written review")
     return value
 
 
@@ -299,8 +327,9 @@ def check(allowlist_path=None, plan_path=None):
     allowlist = load_allowlist(allowlist_path or DEFAULT_ALLOWLIST)
     plan = candidate.load_plan(plan_path or candidate.DEFAULT_PLAN, allowlist["plan_sha256"])
     result, problems = compare(allowlist, candidate_copies(plan), workspace_copies())
-    for name in unplanned_patches(plan):
-        problems.append(f"{name}: a patch outside the reconstruction plan changes a protocol copy.")
+    unplanned = unplanned_patches(plan)
+    problems.extend(proposal_problems(allowlist["proposed_patches"], unplanned))
+    result["recorded_proposed_patches"] = sorted(set(allowlist["proposed_patches"]) & set(unplanned))
     problems.extend(dependency_problems(plan))
     result["plan_sha256"] = plan.sha256
     result["revisions"] = [step.revision for step in plan.transitions]

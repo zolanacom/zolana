@@ -24,6 +24,10 @@ sh tools/dev.sh fmt \
     -p zolana-sdk-examples -- --check
 CARGO_BUILD_JOBS=2 sh tools/dev.sh clippy --offline --locked --workspace --all-targets --no-deps -- -D warnings
 CARGO_BUILD_JOBS=2 sh tools/dev.sh test --offline --locked --workspace -- --nocapture
+# The workspace tests ran the protocol fuzz targets and pool property tests at
+# their built-in case count. Run them again with four times as many cases.
+PROTOCOL_FUZZ_SCALE=4 CARGO_BUILD_JOBS=2 sh tools/dev.sh test --offline --locked \
+    -p native-payments --test decoder_fuzz --test pool_properties -- --nocapture
 # Python integration fixtures execute these binaries through their normal CLI.
 CARGO_BUILD_JOBS=2 sh tools/dev.sh build --offline --locked --workspace --bins
 # Lifecycle fixtures also pin the upstream validator CLI through this builder.

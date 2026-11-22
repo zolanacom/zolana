@@ -147,6 +147,12 @@ impl PoolState {
             return Err(Error::CapacityExceeded);
         }
         for bytes in payment.commitments {
+            // Every unused position of the tree holds the empty leaf. A note
+            // equal to it would raise the note count without changing the
+            // tree, and one root must not stand for two note counts.
+            if bytes == MerkleHashOrchard::empty_leaf().to_bytes() {
+                return Err(Error::InvalidEncoding);
+            }
             let mut node = Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(&bytes))
                 .ok_or(Error::InvalidEncoding)?;
             for level in 0..32 {
@@ -312,12 +318,24 @@ impl PoolState {
             roots: Vec::new(),
             slot_anchors: Some(history),
         };
-        if let Some(checkpoint) = state.slot_anchors.as_ref().unwrap().entries().last() {
+        let root = state.root();
+        let checkpoints = state.slot_anchors.as_ref().unwrap().entries();
+        if let Some(checkpoint) = checkpoints.last() {
             if checkpoint.note_count > count
-                || (checkpoint.note_count == count && checkpoint.root != state.root())
+                || (checkpoint.note_count == count && checkpoint.root != root)
             {
                 return Err(Error::InvalidEncoding);
             }
+        }
+        // The next completed slot records this tree. Refuse a tree that it
+        // could not record: notes under the root of the empty tree, or a root
+        // that a checkpoint already holds for another note count.
+        if (count != 0 && root == Anchor::empty_tree().to_bytes())
+            || checkpoints
+                .iter()
+                .any(|checkpoint| checkpoint.root == root && checkpoint.note_count != count)
+        {
+            return Err(Error::InvalidEncoding);
         }
         Ok(state)
     }
@@ -598,7 +616,7 @@ mod tests {
         let mut pool = PoolState::new([1; 32], 1000).unwrap();
         let effects = VerifiedPayment {
             nullifiers: [[3; 32], [4; 32]],
-            commitments: [MerkleHashOrchard::empty_leaf().to_bytes(); 2],
+            commitments: [[1; 32], [2; 32]],
             public_value_balance: -10,
         };
         for index in 0..300u64 {
@@ -627,7 +645,8 @@ mod tests {
         ));
 
         // Construct a valid frontier just below the protocol tree bound without
-        // appending four billion leaves. Every occupied subtree is an empty root.
+        // appending four billion leaves. Every occupied subtree is an empty root,
+        // which only the legacy format still decodes.
         let mut almost_full = empty;
         almost_full.count = MAX_COMMITMENTS - 2;
         for (level, node) in almost_full.frontier.iter_mut().enumerate() {
@@ -646,5 +665,79 @@ mod tests {
             full.with_payment(&effects),
             Err(Error::CapacityExceeded)
         ));
+    }
+
+    #[test]
+    fn refuses_empty_leaf_notes_and_trees_no_completed_slot_could_record() {
+        let empty_leaf = MerkleHashOrchard::empty_leaf().to_bytes();
+        let effects = |commitments| VerifiedPayment {
+            nullifiers: [[3; 32], [4; 32]],
+            commitments,
+            public_value_balance: -1,
+        };
+        let pool = PoolState::new_slot_anchored([42; 32], 1000)
+            .unwrap()
+            .with_payment(&effects([[1; 32], [2; 32]]))
+            .unwrap()
+            .with_completed_slot(1)
+            .unwrap();
+        let legacy = PoolState::new([42; 32], 1000).unwrap();
+
+        // An empty leaf in either position is refused by both formats, and a
+        // refused payment leaves the state as it was.
+        let before = [pool.encode(), legacy.encode()];
+        for commitments in [
+            [empty_leaf; 2],
+            [empty_leaf, [5; 32]],
+            [[5; 32], empty_leaf],
+        ] {
+            for state in [&pool, &legacy] {
+                let refused = state.with_payment(&effects(commitments));
+                assert!(matches!(refused, Err(Error::InvalidEncoding)));
+            }
+        }
+        assert_eq!([pool.encode(), legacy.encode()], before);
+
+        // What a payment of two empty leaves used to leave: four notes under
+        // the root that slot 1 recorded for two.
+        let mut stale = pool.clone();
+        let two_notes = stale.frontier[1].take().unwrap();
+        let no_notes = MerkleHashOrchard::empty_root(Level::from(1));
+        stale.frontier[2] = Some(MerkleHashOrchard::combine(
+            Level::from(1),
+            &two_notes,
+            &no_notes,
+        ));
+        stale.count = 4;
+        assert_eq!(stale.root(), pool.root());
+        let decoded = PoolState::decode(&stale.encode());
+        assert!(matches!(decoded, Err(Error::InvalidEncoding)));
+
+        // The same root under six notes, when the checkpoint that holds it is
+        // no longer the newest one.
+        let mut older = pool
+            .with_payment(&effects([[5; 32], [6; 32]]))
+            .unwrap()
+            .with_completed_slot(2)
+            .unwrap();
+        older.frontier = stale.frontier;
+        older.frontier[1] = Some(no_notes);
+        older.count = 6;
+        assert_eq!(older.root(), pool.root());
+        let decoded = PoolState::decode(&older.encode());
+        assert!(matches!(decoded, Err(Error::InvalidEncoding)));
+
+        // Notes under the root of the empty tree, before any completed slot.
+        let mut hollow = PoolState::new_slot_anchored([42; 32], 1000).unwrap();
+        hollow.frontier[1] = Some(no_notes);
+        hollow.count = 2;
+        assert_eq!(hollow.root(), Anchor::empty_tree().to_bytes());
+        let decoded = PoolState::decode(&hollow.encode());
+        assert!(matches!(decoded, Err(Error::InvalidEncoding)));
+
+        // An accepted payment leaves a tree that the next slot records.
+        let paid = pool.with_payment(&effects([[5; 32], [6; 32]])).unwrap();
+        let paid = PoolState::decode(&paid.encode()).unwrap();
+        assert!(paid.with_completed_slot(2).is_ok());
     }
 }
