@@ -1,0 +1,71 @@
+pinned-candidate-seed1.log
+    run: seed 1, 1000 walks of 40 steps
+    instructions: 259126
+    registered: 26343
+    finalizations: 21404
+    altered: 5990
+    accepted_unaltered: 1793
+    accepted_unaltered_npool004_on: 911
+    refused_npool004_off: 1010
+    seals: 13469
+    hardening_only: 0
+    tally_lines: 177
+    tally_sha256: 4b819d1915bd065c
+    both_tests_passed: yes
+pinned-candidate-seed2.log
+    run: seed 2, 250 walks of 40 steps
+    instructions: 65746
+    registered: 6126
+    finalizations: 5466
+    altered: 1554
+    accepted_unaltered: 437
+    accepted_unaltered_npool004_on: 240
+    refused_npool004_off: 294
+    seals: 3405
+    hardening_only: 0
+    tally_lines: 151
+    tally_sha256: d7863c0603e7226a
+    both_tests_passed: yes
+hardened-candidate-seed3.log
+    run: seed 3, 250 walks of 40 steps
+    instructions: 65818
+    registered: 7868
+    finalizations: 5476
+    altered: 1557
+    accepted_unaltered: 440
+    accepted_unaltered_npool004_on: 234
+    refused_npool004_off: 313
+    seals: 3433
+    hardening_only: 0
+    tally_lines: 160
+    tally_sha256: 186b74c8e184a804
+    both_tests_passed: yes
+candidate-program-on-workspace-protocol-seed4.log
+    run: seed 4, 250 walks of 40 steps
+    instructions: 66114
+    registered: 6554
+    finalizations: 5502
+    altered: 1567
+    accepted_unaltered: 502
+    accepted_unaltered_npool004_on: 252
+    refused_npool004_off: 225
+    seals: 3447
+    hardening_only: 0
+    tally_lines: 157
+    tally_sha256: 625632082379be4f
+    both_tests_passed: yes
+first two logs together:
+    instructions: 324872
+    registered: 32469
+    finalizations: 26870
+    altered: 7544
+    accepted_unaltered: 2230
+    accepted_unaltered_npool004_on: 1151
+    refused_npool004_off: 1304
+    seals: 16874
+    hardening_only: 0
+all logs together:
+    instructions: 456804
+    registered: 46891
+    seals: 23754
+    hardening_only: 0

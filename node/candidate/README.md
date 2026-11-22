@@ -109,6 +109,14 @@ fails until the ceiling in the test is edited as well. The check compares
 source text. It does not compile either copy and is not a proof that two
 different texts behave alike.
 
+The two programs can also be run side by side.
+[`differential/`](differential/README.md) compiles the candidate's program
+text against the workspace's runtime beside the workspace program and compares
+results, account bytes and compute units instruction by instruction. Decision
+0043 reports its figures, and that directory's README says what the comparison
+cannot show. It compiles `node/agave`, so it is run by hand and is not part of
+the published checks.
+
 ## Reconstruct the original base candidate
 
 The earlier entrypoint prepares the base patch from an already local copy of the

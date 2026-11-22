@@ -108,8 +108,9 @@ differently from the candidate copy, and no others.
 
 ## What has and has not been verified
 
-Done, outside this repository, with Rust 1.92 and the dependency versions of
-this repository's lock file:
+Done with Rust 1.92 and the dependency versions of this repository's lock
+file, first outside this repository and repeatable from it since the harness
+was added in [`../../differential/`](../../differential/README.md):
 
 - the candidate's twelve files were taken from the pinned patch chain with Git
   patch application; no revision of the plan after the base patch changes
