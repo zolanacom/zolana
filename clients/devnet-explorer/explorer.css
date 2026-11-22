@@ -10,7 +10,7 @@
 
 /* Status row: one measured value per cell, read from the feed. */
 .explorer-rail{order:1;border-top:1px solid #25303f;border-bottom:1px solid #25303f}
-.explorer-rail dl{display:grid;grid-template-columns:repeat(6,minmax(0,1fr)) minmax(0,1.35fr);margin:0;padding:24px 0 26px}
+.explorer-rail dl{display:grid;grid-template-columns:repeat(5,minmax(0,1fr)) minmax(0,1.35fr);margin:0;padding:24px 0 26px}
 .explorer-rail dl>div{min-width:0;padding:2px 18px 2px 24px;border-left:1px solid #25303f}
 .explorer-rail dl>div:first-child{padding-left:0;border-left:0}
 .explorer-rail dt{margin:0 0 9px;font-size:11px;line-height:1.5;color:#7d97b7}
@@ -36,7 +36,12 @@
 /* Detail panel for one block or transaction. */
 .explorer-detail{margin:0 0 42px;border-top:1px solid #294475;scroll-margin-top:118px}
 .explorer-detail .detail-heading{margin:22px 0 22px}
-.explorer-detail .back-button{margin-left:auto}
+.explorer-detail .detail-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-left:auto}
+.detail-actions .back-button,.detail-actions .copy-button{min-height:38px;padding:7px 14px;font-size:12px;line-height:1.5}
+.detail-actions .copy-button{align-self:center;border-color:#43536a;border-radius:3px;color:#a9bfdc}
+.detail-actions .step-button:disabled{opacity:.38;cursor:default}
+.detail-note{margin:0 0 18px;padding:3px 0 3px 18px;border-left:2px solid #9cc8ff;max-width:90ch;font-size:13px;line-height:1.7;color:#d2e2f6}
+.detail-note[hidden]{display:none}
 .explorer-detail .detail-grid{margin-bottom:0}
 .explorer-detail .detail-grid dt{display:flex;align-items:center}
 .explorer-detail .detail-grid dd{align-items:center;justify-content:flex-start;gap:18px;min-height:64px}
@@ -85,4 +90,101 @@
  .explorer-detail .detail-grid dd{min-height:0}
  .explorer-empty{font-size:13px}
  .explorer-table tbody th{font-size:12px}
+}
+
+/* The page heading comes first on the inner pages, then the report below it. */
+body:has(#hero[hidden]) .observation-report{order:2}
+
+/* Recent window: figures and two small charts drawn from the blocks in the feed. Every
+   part keeps its size whether or not data has arrived, so nothing below it moves. */
+.explorer-window,.pulse{margin:0 0 50px}
+.pulse{order:3}
+.window-heading{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:6px 28px;margin:0 0 16px}
+.content .window-heading h2.subheading{margin:0}
+.window-summary{margin:0;min-height:21px;font-size:12px;line-height:1.75;color:#8391a4;font-variant-numeric:tabular-nums}
+.window-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));margin:0;padding:22px 0 24px;border-top:1px solid #25303f;border-bottom:1px solid #182536}
+.window-stats>div{min-width:0;padding:2px 18px 2px 24px;border-left:1px solid #25303f}
+.window-stats>div:first-child{padding-left:0;border-left:0}
+.window-stats dt{margin:0 0 8px;font-size:11px;line-height:1.5;color:#7d97b7}
+.window-stats dd{margin:0;min-height:38px;font-size:25px;font-weight:400;line-height:1.5;letter-spacing:-.03em;color:#f2f5fa;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.window-stats dd.basis{min-height:0;margin-top:5px;font-size:11px;line-height:1.55;letter-spacing:0;color:#6f829a}
+.window-charts{display:grid;gap:18px;padding:22px 0 0;cursor:crosshair;touch-action:pan-y}
+.window-charts:focus-visible{outline:2px solid #9cc8ff;outline-offset:6px}
+.window-chart{min-width:0}
+.chart-label{display:flex;justify-content:space-between;gap:4px 18px;margin:0 0 8px;min-height:17px;font-size:11px;line-height:1.5;color:#7d97b7}
+.chart-note{color:#8391a4;text-align:right;font-variant-numeric:tabular-nums}
+.chart{display:block;width:100%;height:56px}
+#chart-transactions{height:46px}
+.chart-line{fill:none;stroke:#9cc8ff;stroke-width:1.5px;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.chart-area{fill:#9cc8ff;fill-opacity:.07}
+.chart-rule{stroke:#25303f;stroke-width:1px;vector-effect:non-scaling-stroke}
+.bar-base{fill:#2b4160}
+.bar-total{fill:#4d6f9c}
+.bar-part{fill:#9cc8ff}
+.chart-cursor{fill:#9cc8ff;fill-opacity:0}
+.chart-cursor.shown{fill-opacity:.17}
+.explorer-window[data-state=paused] .chart{opacity:.6}
+.window-readout{margin:12px 0 0;min-height:21px;font-size:12px;line-height:1.75;color:#b3c5dd;font-variant-numeric:tabular-nums}
+.window-footnote{margin:10px 0 0;max-width:118ch;font-size:11px;line-height:1.7;color:#6f829a}
+
+/* Rows that arrive with a newer feed. */
+@keyframes row-arrive{from{opacity:0;background-color:rgba(156,200,255,.1)}to{opacity:1;background-color:rgba(156,200,255,0)}}
+.explorer-table tr.row-new{animation:row-arrive .7s ease-out both}
+
+/* Copy control beside a shortened hash in a row. */
+.explorer-table .with-copy{white-space:nowrap}
+.copy-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin:-7px 0 -7px 6px;padding:0;border:0;border-radius:2px;background:none;color:#5f7694;vertical-align:middle;cursor:pointer;opacity:0;transition:opacity .15s,color .15s}
+.copy-icon svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round}
+.copy-icon .icon-done,.copy-icon.copied .icon-copy{display:none}
+.copy-icon.copied .icon-done{display:inline}
+.explorer-table tr:hover .copy-icon,.copy-icon:focus-visible,.copy-icon.copied{opacity:1}
+.copy-icon:hover,.copy-icon.copied{color:#9cc8ff}
+@media(hover:none){.copy-icon{opacity:1}}
+
+/* Strip of recent slots on the status page: one mark per slot, oldest on the left. */
+.pulse-strip{display:grid;grid-template-columns:repeat(120,minmax(0,1fr));gap:2px;padding:20px 0;border-top:1px solid #25303f;border-bottom:1px solid #182536}
+.tick{display:block;height:30px;border-radius:1px;background:#0f1722}
+.tick.block{background:#9cc8ff}
+.tick.skipped{background:none;box-shadow:inset 0 0 0 1px #8a5f6d}
+.tick.unknown{background:#1e2a3b}
+.pulse[data-state=paused] .pulse-strip .tick.block{background:#4d6f9c}
+@keyframes tick-arrive{from{opacity:0;transform:scaleY(.35)}to{opacity:1;transform:none}}
+.tick.tick-new{animation:tick-arrive .45s ease-out both}
+.pulse-legend{display:flex;flex-wrap:wrap;gap:8px 26px;margin:14px 0 0;padding:0;list-style:none;font-size:11px;line-height:1.5;color:#8391a4}
+.pulse-legend li{display:inline-flex;align-items:center;gap:9px}
+.pulse-legend .tick{width:7px;height:13px;flex:0 0 7px}
+
+/* Home page: one line with the block height from the feed. It keeps its place and
+   shows nothing until a feed with a height has been read. */
+.network-live{display:flex;align-items:center;gap:9px;margin:0;min-height:24px;font-size:12px;line-height:2;color:#a4afbf;font-variant-numeric:tabular-nums;white-space:nowrap}
+.network-live:not([data-state=live]):not([data-state=paused]){visibility:hidden}
+.network-live [data-zolana-status-text]{color:#d2e2f6}
+.network-live [data-zolana-status-text]:after{content:"\00b7";margin-left:9px;color:#536174}
+.network-live .live-value{font-size:15px;line-height:1.6;color:#f2f5fa}
+.network-live[data-state=live] [data-when=paused],.network-live:not([data-state=live]) [data-when=live]{display:none}
+
+@media(prefers-reduced-motion:reduce){
+ .explorer-table tr.row-new,.tick.tick-new{animation:none}
+ .copy-icon{transition:none}
+}
+@media(max-width:1179px){
+ .window-stats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:24px}
+ .window-stats>div:nth-child(3n+1){padding-left:0;border-left:0}
+}
+@media(max-width:800px){
+ .network-live{margin-top:14px}
+}
+@media(max-width:699px){
+ .explorer-window,.pulse{margin-bottom:40px}
+ .window-stats{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:20px;padding:20px 0 22px}
+ .window-stats>div{padding:1px 10px 1px 18px;border-left:1px solid #25303f}
+ .window-stats>div:nth-child(3n+1){padding-left:18px;border-left:1px solid #25303f}
+ .window-stats>div:nth-child(2n+1){padding-left:0;border-left:0}
+ .window-stats dd{min-height:33px;font-size:22px}
+ .chart-label{flex-wrap:wrap;min-height:34px;align-content:flex-start}
+ .chart-note{text-align:left}
+ .window-readout{min-height:63px}
+ .pulse-strip{grid-template-columns:repeat(60,minmax(0,1fr));gap:4px 1px;padding:18px 0}
+ .tick{height:22px}
+ .explorer-detail .detail-actions{margin-left:0;flex-basis:100%}
 }
