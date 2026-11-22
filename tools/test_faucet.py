@@ -103,10 +103,14 @@ class Faucet:
 
 
 class BoundedServer(ThreadingHTTPServer):
-    request_queue_size = 8
+    # Listen backlog of a listener this class binds itself; socket-activated
+    # listeners keep the backlog of their unit.
+    request_queue_size = 32
 
     def __init__(self, *args, **kwargs):
-        self.slots = threading.BoundedSemaphore(4)
+        # Requests above this bound are closed, not queued. Durable admission
+        # quotas, not this thread bound, remain the request limit.
+        self.slots = threading.BoundedSemaphore(32)
         super().__init__(*args, **kwargs)
 
     def get_request(self):

@@ -108,8 +108,12 @@ def finalized_match(request,response,signature):
 
 
 class GrantRpcGate:
-    def __init__(self,upstream,network,uid,rehearsal=False):
+    cohort_size=10
+
+    def __init__(self,upstream,network,uid,rehearsal=False,cohort_size=10):
         base.endpoint(upstream)
+        if type(cohort_size) is not int or not 1<=cohort_size<=500:raise ValueError('test fault requires the planned finite cohort size')
+        self.cohort_size=cohort_size
         if os.geteuid()!=uid:raise PermissionError('grant test proxy requires the dedicated gateway UID')
         self.root=root_for(rehearsal);self.directory=self.root/'grant-ack-gate'
         if not os.path.lexists(self.directory):self.directory.mkdir(mode=0o700)
@@ -185,7 +189,7 @@ class GrantRpcGate:
             if staging.get('network')!=self.network or staging.get('staging_account')!=pending.get('staging_account'):
                 raise ValueError('original grant pending/staging identity mismatch')
             claims=json.loads(base.owned(self.root/'faucet/claims.json',self.uid,1024*1024))
-            if claims.get('policy',{}).get('format')!='native-test-faucet-native-v1' or not isinstance(claims.get('claims'),list) or len(claims['claims'])>10:
+            if claims.get('policy',{}).get('format')!='native-test-faucet-native-v1' or not isinstance(claims.get('claims'),list) or len(claims['claims'])>self.cohort_size:
                 raise ValueError('test fault requires the separate finite native grant ledger')
             matches=[]
             for claim in claims['claims']:

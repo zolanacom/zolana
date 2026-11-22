@@ -71,7 +71,7 @@ The invited-cohort tooling does not take the example values: it pins `fee`
 3,000,000 and `gross_cap` 100,000 and refuses any other relay configuration
 (`tools/native_pilot_cohort.py`, `tools/native_cohort_service.py`).
 
-At most 64 lifetime jobs and 8 jobs per member are allowed by the current schema;
+At most 3000 lifetime jobs and 8 jobs per member are allowed by the current schema;
 configuration can lower these limits. Completed/aborted jobs keep their slots
 across restarts. Quota reset or job deletion is not a recovery mechanism. The
 relay holds a single process lock and uses one bounded worker. Before spending

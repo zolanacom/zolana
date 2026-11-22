@@ -27,7 +27,22 @@ mod proof;
 pub use client::{request_join, request_status};
 
 const STATE: &str = "admission.json";
-const MEMBERSHIP_SECONDS: u64 = 7 * 86400;
+/// Lifetime granted to every new admission.
+const MEMBERSHIP_SECONDS: u64 = 30 * 86400;
+/// Lifetime recorded by admissions made before the cohort was enlarged. Such a
+/// record stays valid and keeps the expiry it was written with.
+const LEGACY_MEMBERSHIP_SECONDS: u64 = 7 * 86400;
+// Network-wide budgets per minute, sized for 200 concurrent wallets: twenty
+// times the values that served ten. Per-member budgets are unchanged.
+/// Join and status requests accepted from all members together.
+const NETWORK_FAUCET_PER_MINUTE: u64 = 2400;
+/// RPC authorization units debited from all members together.
+const NETWORK_RPC_UNITS_PER_MINUTE: u64 = 120_000;
+/// Ingress requests per channel from one peer; all peers together get twice
+/// this. Browser wallets reach the gateway through one proxy and so share one
+/// peer; for them the per-peer value is a network-wide budget.
+const EDGE_RPC_PER_MINUTE: u64 = 60_000;
+const EDGE_FAUCET_PER_MINUTE: u64 = 4800;
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
@@ -180,10 +195,7 @@ fn load(root: &Path) -> Result<State> {
         if let Some(m) = &invitation.member {
             m.claim.validate(&network)?;
             if !members.insert(&m.claim.fee_address)
-                || m.access_until
-                    != m.admitted_at
-                        .checked_add(MEMBERSHIP_SECONDS)
-                        .ok_or("membership overflow")?
+                || !membership_expiries(m.admitted_at)?.contains(&m.access_until)
                 || m.admitted_at > state.last_time
                 || invitation
                     .bound_fee
@@ -195,6 +207,17 @@ fn load(root: &Path) -> Result<State> {
         }
     }
     Ok(state)
+}
+/// The only expiries a stored membership may carry for its admission time.
+fn membership_expiries(admitted_at: u64) -> Result<[u64; 2]> {
+    Ok([
+        admitted_at
+            .checked_add(MEMBERSHIP_SECONDS)
+            .ok_or("membership overflow")?,
+        admitted_at
+            .checked_add(LEGACY_MEMBERSHIP_SECONDS)
+            .ok_or("membership overflow")?,
+    ])
 }
 fn save(root: &Path, state: &State) -> Result<()> {
     replace(&root.join(STATE), &serde_json::to_vec_pretty(state)?)
@@ -397,7 +420,9 @@ fn join_at(root: &Path, request: Join, time: u64) -> Result<Value> {
         });
         index
     };
-    state.global_faucet.take(time / 60, 120)?;
+    state
+        .global_faucet
+        .take(time / 60, NETWORK_FAUCET_PER_MINUTE)?;
     state.invitations[index]
         .member
         .as_mut()
@@ -430,7 +455,9 @@ pub fn status(root: &Path, proof: Proof) -> Result<Value> {
     let mut state = load(root)?;
     let time = clock(&mut state, now()?)?;
     proof.verify(&state.policy, "status", b"", time)?;
-    state.global_faucet.take(time / 60, 120)?;
+    state
+        .global_faucet
+        .take(time / 60, NETWORK_FAUCET_PER_MINUTE)?;
     let mut name = "not_invited";
     let mut until = None;
     if let Some(i) = member_index(&state, &proof.fee_address) {
@@ -473,7 +500,9 @@ fn authorize_units_at(root: &Path, proof: Proof, units: u64, time: u64) -> Resul
     proof.verify(&state.policy, "rpc", b"", time)?;
     let i = member_index(&state, &proof.fee_address).ok_or("invitation required")?;
     active(&state.invitations[i], time)?;
-    state.global_rpc.take_units(time / 60, 6000, units)?;
+    state
+        .global_rpc
+        .take_units(time / 60, NETWORK_RPC_UNITS_PER_MINUTE, units)?;
     let limit = state.policy.rpc_per_minute;
     state.invitations[i]
         .member
@@ -496,7 +525,11 @@ pub fn edge(root: &Path, channel: &str, peer: &str) -> Result<Value> {
     }
     state.edge.retain(|e| e.bucket.period == time / 60);
     let hash = digest(peer.as_bytes());
-    let limit = if channel == "rpc" { 3000 } else { 240 };
+    let limit = if channel == "rpc" {
+        EDGE_RPC_PER_MINUTE
+    } else {
+        EDGE_FAUCET_PER_MINUTE
+    };
     for name in ["global", &hash] {
         let index = if let Some(i) = state
             .edge
@@ -888,6 +921,12 @@ mod tests {
         let invitation = token(&root, "wide", 3600, None);
         join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
         let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+        let mut state = load(&root).unwrap();
+        state.global_rpc = Bucket {
+            period: state.last_time.max(time) / 60,
+            count: NETWORK_RPC_UNITS_PER_MINUTE - 6000,
+        };
+        save(&root, &state).unwrap();
         for _ in 0..2 {
             authorize_units_at(&root, proof.clone(), 2048, time).unwrap();
         }
@@ -895,7 +934,10 @@ mod tests {
         assert!(authorize_units_at(&root, proof.clone(), 2048, time).is_err());
         assert_eq!(fs::read(root.join(STATE)).unwrap(), before);
         authorize_units_at(&root, proof, 1904, time).unwrap();
-        assert_eq!(load(&root).unwrap().global_rpc.count, 6000);
+        assert_eq!(
+            load(&root).unwrap().global_rpc.count,
+            NETWORK_RPC_UNITS_PER_MINUTE
+        );
     }
 
     #[test]
@@ -907,12 +949,14 @@ mod tests {
         join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
         let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
         let mut state = load(&root).unwrap();
+        // The ledger clock may already be one second, and so one minute, past `time`.
+        let minute = state.last_time.max(time) / 60;
         state.global_rpc = Bucket {
-            period: time / 60,
-            count: 5999,
+            period: minute,
+            count: NETWORK_RPC_UNITS_PER_MINUTE - 1,
         };
         state.invitations[0].member.as_mut().unwrap().rpc = Bucket {
-            period: time / 60,
+            period: minute,
             count: 5999,
         };
         save(&root, &state).unwrap();
@@ -936,7 +980,8 @@ mod tests {
         join(&root, joined(&wallet, &profile, Some(invitation), time)).unwrap();
         let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
         authorize_units_at(&root, proof.clone(), 5, time).unwrap();
-        let later = time + 60;
+        // A full minute after the ledger clock, which may already be past `time`.
+        let later = load(&root).unwrap().last_time + 60;
         let fresh = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", later).unwrap();
         authorize_units_at(&root, fresh, 4, later).unwrap();
         let current = fs::read(root.join(STATE)).unwrap();
@@ -983,5 +1028,300 @@ mod tests {
         let state = load(&root).unwrap();
         assert_eq!(state.global_rpc.count, 2);
         assert_eq!(state.invitations[0].member.as_ref().unwrap().rpc.count, 2);
+    }
+
+    const LEGACY_PROOFS: &[u8] = include_bytes!("faucet/legacy_ten_wallet/proofs.json");
+    const LEGACY_ADMISSION: &[u8] = include_bytes!("faucet/legacy_ten_wallet/admission.json");
+    const LEGACY_FILES: [(&str, &[u8]); 3] = [
+        (
+            "profile.json",
+            include_bytes!("faucet/legacy_ten_wallet/profile.json"),
+        ),
+        (
+            "claims.json",
+            include_bytes!("faucet/legacy_ten_wallet/claims.json"),
+        ),
+        (STATE, LEGACY_ADMISSION),
+    ];
+    /// A full ten-wallet native cohort exactly as the ledger code wrote it before
+    /// the cohort limit, membership lifetime and network budgets were changed.
+    fn legacy_root() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("native-cohort");
+        for (name, bytes) in LEGACY_FILES {
+            write_private_new(&root.join(name), bytes).unwrap();
+        }
+        (dir, root)
+    }
+    fn admitted(wallet: &WalletKey, profile: &TesterProfile, root: &Path, name: &str) -> Value {
+        let code = token(root, name, 3600, None);
+        let time = now().unwrap();
+        join(root, joined(wallet, profile, Some(code), time)).unwrap()
+    }
+
+    #[test]
+    fn ten_wallet_state_written_before_the_enlargement_loads_and_is_left_byte_identical() {
+        let (_dir, root) = legacy_root();
+        let (_, capacity, required) = faucet::access_context(&root).unwrap();
+        assert_eq!((capacity, required), (10, true));
+        let state = load(&root).unwrap();
+        assert_eq!(state.policy.max_invites, 10);
+        assert_eq!(state.policy.daily_admissions, 10);
+        assert_eq!(state.invitations.len(), 10);
+        for invitation in &state.invitations {
+            let m = invitation.member.as_ref().unwrap();
+            assert_eq!(m.access_until, m.admitted_at + LEGACY_MEMBERSHIP_SECONDS);
+        }
+        // An unchanged state is also written back byte for byte.
+        assert_eq!(serde_json::to_vec_pretty(&state).unwrap(), LEGACY_ADMISSION);
+        assert_eq!(info(&root).unwrap()["issued"], 10);
+        for (name, bytes) in LEGACY_FILES {
+            assert_eq!(fs::read(root.join(name)).unwrap(), bytes, "{name}");
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), LEGACY_FILES.len());
+    }
+
+    #[test]
+    fn legacy_seven_day_member_keeps_its_recorded_expiry_and_is_refused_from_it() {
+        let (_dir, root) = legacy_root();
+        let proofs: Value = serde_json::from_slice(LEGACY_PROOFS).unwrap();
+        let proof = |name: &str| serde_json::from_value::<Proof>(proofs[name].clone()).unwrap();
+        let until = load(&root).unwrap().invitations[0]
+            .member
+            .as_ref()
+            .unwrap()
+            .access_until;
+        authorize_at(&root, proof("before_expiry"), until - 1).unwrap();
+        let saved = fs::read(root.join(STATE)).unwrap();
+        assert!(authorize_at(&root, proof("at_expiry"), until)
+            .unwrap_err()
+            .to_string()
+            .contains("membership expired"));
+        assert_eq!(fs::read(root.join(STATE)).unwrap(), saved);
+        let state = load(&root).unwrap();
+        let m = state.invitations[0].member.as_ref().unwrap();
+        assert_eq!(m.access_until, until);
+        assert_eq!(until, m.admitted_at + LEGACY_MEMBERSHIP_SECONDS);
+        assert_eq!(m.rpc.count, 1);
+    }
+
+    #[test]
+    fn enlarged_ten_wallet_cohort_keeps_legacy_members_and_admits_new_ones_for_thirty_days() {
+        let (_dir, root) = legacy_root();
+        // The in-place enlargement changes only the stored capacity policies.
+        let mut claims: Value = serde_json::from_slice(LEGACY_FILES[1].1).unwrap();
+        claims["policy"]["max_claims"] = 200.into();
+        replace(
+            &root.join("claims.json"),
+            &serde_json::to_vec_pretty(&claims).unwrap(),
+        )
+        .unwrap();
+        let mut state = load(&root).unwrap();
+        state.policy.max_invites = 200;
+        state.policy.daily_admissions = 200;
+        save(&root, &state).unwrap();
+        let wallet = WalletKey::generate(state.policy.network.clone()).unwrap();
+        let invitation = Some(token(&root, "eleventh", 3600, None));
+        let claim = Claim::signed(&wallet).unwrap();
+        let proof = Proof::signed(
+            &wallet,
+            &state.policy.faucet_audience,
+            "join",
+            &join_body(&claim, invitation.as_deref()).unwrap(),
+        )
+        .unwrap();
+        let receipt = join(
+            &root,
+            Join {
+                claim,
+                invitation,
+                proof,
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt["state"], "queued");
+        let state = load(&root).unwrap();
+        assert_eq!(state.invitations.len(), 11);
+        for (index, invitation) in state.invitations.iter().enumerate() {
+            let m = invitation.member.as_ref().unwrap();
+            let lifetime = if index < 10 {
+                LEGACY_MEMBERSHIP_SECONDS
+            } else {
+                MEMBERSHIP_SECONDS
+            };
+            assert_eq!(m.access_until, m.admitted_at + lifetime, "member {index}");
+        }
+        assert_eq!(
+            receipt["access_until"],
+            state.invitations[10].member.as_ref().unwrap().access_until
+        );
+        assert_eq!(faucet::access_context(&root).unwrap().1, 200);
+        let claims: Value =
+            serde_json::from_slice(&read_private(&root.join("claims.json"), 1024 * 1024).unwrap())
+                .unwrap();
+        assert_eq!(claims["claims"].as_array().unwrap().len(), 11);
+    }
+
+    #[test]
+    fn new_admission_lasts_thirty_days_and_is_refused_from_its_expiry() {
+        assert_eq!(MEMBERSHIP_SECONDS, 2_592_000);
+        let (_dir, root, profile) = fixture(1, 1, 5);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        let receipt = admitted(&wallet, &profile, &root, "thirty");
+        let state = load(&root).unwrap();
+        let m = state.invitations[0].member.as_ref().unwrap();
+        let until = m.access_until;
+        assert_eq!(until, m.admitted_at + 2_592_000);
+        assert_eq!(receipt["access_until"], until);
+        let rpc = |at: u64| Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", at).unwrap();
+        authorize_units_at(&root, rpc(until - 1), 1, until - 1).unwrap();
+        let saved = fs::read(root.join(STATE)).unwrap();
+        for expired in [until, until + 1] {
+            assert!(authorize_units_at(&root, rpc(expired), 1, expired)
+                .unwrap_err()
+                .to_string()
+                .contains("membership expired"));
+            assert!(
+                join_at(&root, joined(&wallet, &profile, None, expired), expired)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("membership expired")
+            );
+            assert_eq!(fs::read(root.join(STATE)).unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn stored_membership_must_carry_exactly_the_current_or_the_legacy_lifetime() {
+        assert_eq!(LEGACY_MEMBERSHIP_SECONDS, 604_800);
+        let (_dir, root, profile) = fixture(1, 1, 5);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        admitted(&wallet, &profile, &root, "lifetime");
+        let original: Value = serde_json::from_slice(&fs::read(root.join(STATE)).unwrap()).unwrap();
+        let admitted_at = original["invitations"][0]["member"]["admitted_at"]
+            .as_u64()
+            .unwrap();
+        for (seconds, valid) in [
+            (MEMBERSHIP_SECONDS, true),
+            (LEGACY_MEMBERSHIP_SECONDS, true),
+            (0, false),
+            (LEGACY_MEMBERSHIP_SECONDS - 1, false),
+            (LEGACY_MEMBERSHIP_SECONDS + 1, false),
+            (MEMBERSHIP_SECONDS - 1, false),
+            (MEMBERSHIP_SECONDS + 1, false),
+            (365 * 86400, false),
+        ] {
+            let mut altered = original.clone();
+            altered["invitations"][0]["member"]["access_until"] = (admitted_at + seconds).into();
+            replace(
+                &root.join(STATE),
+                &serde_json::to_vec_pretty(&altered).unwrap(),
+            )
+            .unwrap();
+            let stored = fs::read(root.join(STATE)).unwrap();
+            assert_eq!(load(&root).is_ok(), valid, "lifetime {seconds}");
+            assert_eq!(info(&root).is_ok(), valid, "lifetime {seconds}");
+            let time = admitted_at + 1;
+            let proof = Proof::signed_at(&wallet, &profile.rpc.url, "rpc", b"", time).unwrap();
+            // Any other lifetime disables the whole ledger instead of being repaired.
+            assert_eq!(authorize_at(&root, proof, time).is_ok(), valid);
+            if !valid {
+                assert_eq!(fs::read(root.join(STATE)).unwrap(), stored);
+            }
+        }
+    }
+
+    #[test]
+    fn network_faucet_budget_is_sized_for_two_hundred_wallets_and_member_budget_is_unchanged() {
+        assert_eq!(NETWORK_FAUCET_PER_MINUTE, 2400);
+        assert_eq!(NETWORK_RPC_UNITS_PER_MINUTE, 120_000);
+        let (_dir, root, profile) = fixture(1, 1, 5);
+        let wallet = WalletKey::generate(profile.network()).unwrap();
+        admitted(&wallet, &profile, &root, "budget");
+        let used = |minute: u64, network: u64, member: u64| {
+            let mut state = load(&root).unwrap();
+            state.global_faucet = Bucket {
+                period: minute,
+                count: network,
+            };
+            state.invitations[0].member.as_mut().unwrap().faucet = Bucket {
+                period: minute,
+                count: member,
+            };
+            save(&root, &state).unwrap();
+        };
+        // The last request inside a budget passes; the next changes nothing.
+        let last_then_refused = || {
+            let resume = || join(&root, joined(&wallet, &profile, None, now().unwrap()));
+            let last = resume().is_ok();
+            let saved = fs::read(root.join(STATE)).unwrap();
+            let refused = resume().is_err_and(|e| e.to_string().contains("quota"));
+            last && refused && fs::read(root.join(STATE)).unwrap() == saved
+        };
+        // Repeat if the wall-clock minute rolls over while the buckets are set.
+        for _ in 0..5 {
+            let minute = now().unwrap() / 60;
+            used(minute, NETWORK_FAUCET_PER_MINUTE - 1, 0);
+            let network = last_then_refused();
+            // One member still gets thirty join or status requests a minute.
+            used(minute, 0, 29);
+            let member = last_then_refused();
+            let state = load(&root).unwrap();
+            if now().unwrap() / 60 == minute {
+                assert!(network && member);
+                assert_eq!(state.global_faucet.count, 1);
+                assert_eq!(
+                    state.invitations[0].member.as_ref().unwrap().faucet.count,
+                    30
+                );
+                return;
+            }
+        }
+        panic!("wall-clock minute changed during every attempt");
+    }
+
+    #[test]
+    fn edge_budgets_are_sized_for_two_hundred_wallets_behind_one_peer_and_still_enforced() {
+        assert_eq!(EDGE_RPC_PER_MINUTE, 60_000);
+        assert_eq!(EDGE_FAUCET_PER_MINUTE, 4800);
+        let (_dir, root, _) = fixture(1, 1, 5);
+        let attempt = |channel: &str, limit: u64| {
+            let minute = now().unwrap() / 60;
+            let used = |peer: &str, count: u64| Edge {
+                channel: channel.into(),
+                peer: peer.into(),
+                bucket: Bucket {
+                    period: minute,
+                    count,
+                },
+            };
+            let mut state = load(&root).unwrap();
+            state.edge = vec![
+                used("global", limit - 1),
+                used(&digest(b"127.0.0.1"), limit - 1),
+            ];
+            save(&root, &state).unwrap();
+            let last_for_peer = edge(&root, channel, "127.0.0.1").is_ok();
+            let saved = fs::read(root.join(STATE)).unwrap();
+            let peer_refused = edge(&root, channel, "127.0.0.1").is_err();
+            let unchanged = fs::read(root.join(STATE)).unwrap() == saved;
+            let other_peer = edge(&root, channel, "127.0.0.2").is_ok();
+            let mut state = load(&root).unwrap();
+            state.edge[0].bucket.count = limit * 2 - 1;
+            save(&root, &state).unwrap();
+            let last_for_all = edge(&root, channel, "127.0.0.3").is_ok();
+            let all_refused = edge(&root, channel, "127.0.0.4").is_err();
+            let held = last_for_peer && peer_refused && unchanged;
+            (now().unwrap() / 60 == minute)
+                .then_some(held && other_peer && last_for_all && all_refused)
+        };
+        for (channel, limit) in [
+            ("rpc", EDGE_RPC_PER_MINUTE),
+            ("faucet", EDGE_FAUCET_PER_MINUTE),
+        ] {
+            // Repeat if the wall-clock minute rolls over while the buckets are set.
+            let enforced = (0..5).find_map(|_| attempt(channel, limit));
+            assert_eq!(enforced, Some(true), "{channel}");
+        }
     }
 }

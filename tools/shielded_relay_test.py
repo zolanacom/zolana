@@ -230,6 +230,32 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(len(list(self.relay.jobs.iterdir())), 4)
         self.assertEqual(self.relay.dispatch('submitShieldedPayment', [self.value()], 'alice'), first)
 
+    def test_lifetime_job_bound_admits_six_jobs_for_each_wallet_of_a_larger_cohort(self):
+        from shielded_relay import MAX_JOBS
+        self.assertEqual(MAX_JOBS, 3000)
+        for jobs, per_member, accepted in ((60, 6, True), (1200, 6, True), (3000, 6, True), (3001, 6, False),
+                                           (0, 6, False), (True, 6, False), (1200, 9, False)):
+            with self.subTest(jobs=jobs, per_member=per_member), tempfile.TemporaryDirectory() as directory:
+                save(Path(directory) / 'config.json', dict(self.config, max_jobs=jobs, per_member=per_member))
+                if not accepted:
+                    with self.assertRaises(ValueError): Relay(Path(directory))
+                    continue
+                relay = Relay(Path(directory))
+                try: self.assertEqual((relay.config['max_jobs'], relay.config['per_member']), (jobs, per_member))
+                finally: relay.close()
+        # Eleven wallets at six lifetime jobs each exceed the former 64-job schema bound.
+        with tempfile.TemporaryDirectory() as directory:
+            save(Path(directory) / 'config.json', dict(self.config, max_jobs=66, per_member=6))
+            relay = Relay(Path(directory))
+            try:
+                for index in range(66):
+                    relay.dispatch('submitShieldedPayment', [self.value(index)], 'member-%d' % (index // 6))
+                with self.assertRaises(RelayCapacityError) as refusal:
+                    relay.dispatch('submitShieldedPayment', [self.value(66)], 'member-11')
+                self.assertEqual(refusal.exception.scope, 'network')
+                self.assertEqual(len(list(relay.jobs.iterdir())), 66)
+            finally: relay.close()
+
     def test_quote_does_not_reserve_capacity_and_submit_rechecks_after_a_race(self):
         self.relay.dispatch('submitShieldedPayment', [self.value()], 'alice')
         self.relay.dispatch('getShieldedFeeQuote', [], 'alice')

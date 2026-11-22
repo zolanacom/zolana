@@ -3,7 +3,7 @@
 
 No provisioning, key generation, funding, invitation issuance or automatic refill
 is performed by this entrypoint. The original LOCAL-058 faucet is never started
-as a funding worker or reinterpreted as this separate ten-person cohort.
+as a funding worker or reinterpreted as this separate finite cohort.
 """
 import argparse
 import hashlib
@@ -148,14 +148,20 @@ PLAN_KEYS={'format','network','pool_format','cohort_size','private_grant','gas_g
 FUNDING_KEYS={'format','plan_sha256','network','source_private_address','source_fee_address','private_observed',
     'public_observed','finalized_slot','checked_at','canonical_funding'}
 BINDING_KEYS={'format','base_config_sha256','plan_sha256','funding_ready_sha256'}
+# This entrypoint imports no sibling before the sealed base; both values repeat
+# the offline planner's native_pilot_cohort constants.
+MAX_COHORT_SIZE=500
+RELAY_MEMBER_JOBS=6
 
 
 def validate_plan(value,config,base):
+    size=value.get('cohort_size') if isinstance(value,dict) else None
+    if type(size) is not int or not 1<=size<=MAX_COHORT_SIZE:raise ValueError('finite native cohort size must be an integer from 1 to 500')
     fixed=dict(format='zolana-native-cohort-plan-v1',network=config['network'],pool_format='NPOOL004',
-        cohort_size=10,private_grant=20_000_000,gas_grant=0,attempts=3,payment_cap=150_000_000,
-        private_budget=200_000_000,public_budget=4_500_000_000)
-    if not isinstance(value,dict) or set(value)!=PLAN_KEYS or any(value.get(k)!=v or type(value[k]) is not type(v) for k,v in fixed.items()):
-        raise ValueError('exact finite native ten-person plan required')
+        cohort_size=size,private_grant=20_000_000,gas_grant=0,attempts=3,payment_cap=150_000_000,
+        private_budget=size*20_000_000,public_budget=size*3*150_000_000)
+    if set(value)!=PLAN_KEYS or any(value.get(k)!=v or type(value[k]) is not type(v) for k,v in fixed.items()):
+        raise ValueError('exact finite native cohort plan required')
     for name in PLAN_KEYS:
         if name.endswith('_sha256') and (not isinstance(value[name],str) or HEX.fullmatch(value[name]) is None):
             raise ValueError('plan requires every immutable authority/profile/policy digest')
@@ -194,7 +200,7 @@ def load_binding(base,config,config_sha256):
 
 
 def authority(base,config,plan):
-    uid=config['gateway_uid'];base.real_directory(ROOT,uid,0o700)
+    uid=config['gateway_uid'];size=plan['cohort_size'];base.real_directory(ROOT,uid,0o700)
     for folder in ('faucet','relay'):base.real_directory(ROOT/folder,uid,0o700)
     wallet=base.owned(ROOT/'faucet/wallet.enc.json',uid,4096)
     password=base.owned(ROOT/'password',uid,1024)
@@ -205,18 +211,19 @@ def authority(base,config,plan):
     policy=claims.get('policy');access=admission.get('policy')
     if not isinstance(policy,dict) or not isinstance(access,dict):raise ValueError('cohort native policies missing')
     expected=dict(format='native-test-faucet-native-v1',network=plan['network'],source_fee_address=plan['source_fee_address'],
-        source_private_address=plan['source_private_address'],max_claims=10,invite_required=True,
+        source_private_address=plan['source_private_address'],max_claims=size,invite_required=True,
         private_amount=20_000_000,gas_amount=0,max_attempts=3,payment_cap=150_000_000)
     if (any(policy.get(k)!=v or type(policy.get(k)) is not type(v) for k,v in expected.items()) or policy.get('operator_rpc',False) is not False or
             policy.get('operator_unix',False) is not False or hash_value(policy)!=plan['faucet_policy_sha256']):
         raise ValueError('native grant policy differs from root-approved finite authority')
-    expected=dict(format='native-invited-testnet-v1',network=plan['network'],max_invites=10,
+    expected=dict(format='native-invited-testnet-v1',network=plan['network'],max_invites=size,
         rpc_audience=audience('rpc'),faucet_audience=audience('faucet'))
     if (any(access.get(k)!=v for k,v in expected.items()) or hash_value(access)!=plan['admission_policy_sha256'] or
-            type(access.get('daily_admissions')) is not int or not 1<=access['daily_admissions']<=10 or
+            type(access['max_invites']) is not int or
+            type(access.get('daily_admissions')) is not int or not 1<=access['daily_admissions']<=size or
             type(access.get('rpc_per_minute')) is not int or not 1<=access['rpc_per_minute']<=10000 or
-            not isinstance(claims.get('claims'),list) or len(claims['claims'])>10 or
-            not isinstance(admission.get('invitations'),list) or len(admission['invitations'])>10):
+            not isinstance(claims.get('claims'),list) or len(claims['claims'])>size or
+            not isinstance(admission.get('invitations'),list) or len(admission['invitations'])>size):
         raise ValueError('native cohort admission authority or lifetime capacity changed')
     return claims
 
@@ -267,12 +274,14 @@ def prepare(base,config,plan,ready):
         network_file=str(ROOT/'operator.json'),native_profile=str(ROOT/'public-profile.json'))
     if (relay.get('network')!=plan['network'] or relay.get('pool_format')!='NPOOL004' or
             any(relay.get(k)!=v for k,v in paths.items()) or relay.get('fee')!=3_000_000 or
-            relay.get('gross_cap')!=100_000 or relay.get('max_jobs')!=60 or relay.get('per_member')!=6):
+            relay.get('gross_cap')!=100_000 or relay.get('max_jobs')!=RELAY_MEMBER_JOBS*plan['cohort_size'] or
+            relay.get('per_member')!=RELAY_MEMBER_JOBS):
         raise ValueError('cohort relay paths, native transport or finite budget changed')
     try:
         if config['test_mode']:
             from native_cohort_fault import GrantRpcGate
-            gate=GrantRpcGate(upstream,plan['network'],uid,rehearsal=ROOT.name=='cohort-060-rehearsal');rpc='http://'+gate.endpoint
+            gate=GrantRpcGate(upstream,plan['network'],uid,rehearsal=ROOT.name=='cohort-060-rehearsal',
+                cohort_size=plan['cohort_size']);rpc='http://'+gate.endpoint
         for path in (ROOT/'source.json',ROOT/'faucet/profile.json'):
             current=json.loads(base.owned(path,uid));base.atomic(path,base.endpoint_update(current,source,{'rpc.url':rpc}))
         path=ROOT/'relay/config.json';current=json.loads(base.owned(path,uid))
@@ -283,10 +292,57 @@ def prepare(base,config,plan,ready):
         raise
 
 
+# A tick that has a grant to pay replays every finalized block since the source
+# wallet's cached scan before it can build the proof, inside its time limit; the
+# cache is written only when a scan completes, so a tick killed there keeps no
+# progress. Idle ticks read no blocks, so the same worker keeps that cache
+# current between grants; otherwise the first grant after a long quiet period
+# could overrun the limit, which stops the gateway.
+GRANT_TICK_LIMIT=180
+SOURCE_REFRESH_SECONDS=300
+SOURCE_REFRESH_LIMIT=3600
+
+
+def idle_tick(output):
+    try:value=json.loads(output)
+    except (TypeError,ValueError):return False
+    return isinstance(value,dict) and value.get('idle') is True
+
+
 def supervised_faucet(parent):
     class CohortFaucet(parent):
         def __init__(self,*args,**kwargs):
-            super().__init__(*args,**kwargs);self.failed=threading.Event()
+            super().__init__(*args,**kwargs);self.failed=threading.Event();self.refreshed=None;self.refresh_failed=None
+        def refresh(self):
+            """Bring the source wallet's scan cache to the finalized tip; pays nothing.
+
+            Called only by the grant worker after an idle tick, so it never runs
+            beside a tick and never while a grant is unfinished. It counts no
+            attempt and touches no claim. A failure or overrun is reported and
+            retried after the interval; it never stops the gateway.
+            """
+            import subprocess
+            if self.refreshed is not None and time.monotonic()-self.refreshed<SOURCE_REFRESH_SECONDS:return
+            started=time.monotonic();child=None
+            try:
+                with self.child_lock:
+                    if self.stop.is_set():return
+                    self.child=child=subprocess.Popen([str(self.binary.with_name('native-wallet')),'balance',
+                        '--network',str(self.root.parent/'source.json'),'--wallet',str(self.root/'wallet.enc.json'),
+                        '--password-file','-'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,text=True)
+                child.communicate(input=self.password,timeout=SOURCE_REFRESH_LIMIT);failed=child.returncode!=0
+            except subprocess.TimeoutExpired:
+                child.kill();child.communicate(timeout=10);failed=True
+            except OSError:
+                failed=True
+            finally:
+                with self.child_lock:self.child=None
+            self.refreshed=time.monotonic()
+            if self.stop.is_set():return
+            if failed is not self.refresh_failed:
+                print(json.dumps(dict(event='cohort_source_refresh_failed' if failed else 'cohort_source_refreshed',
+                    seconds=int(self.refreshed-started))),flush=True)
+            self.refresh_failed=failed
         def work(self):
             import subprocess
             while not self.stop.is_set():
@@ -296,12 +352,13 @@ def supervised_faucet(parent):
                         stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
                     child=self.child
                 try:
-                    child.communicate(input=self.password,timeout=180)
+                    output=child.communicate(input=self.password,timeout=GRANT_TICK_LIMIT)[0]
                     if child.returncode and not self.stop.is_set():self.failed.set();return
                 except subprocess.TimeoutExpired:
                     child.kill();child.communicate(timeout=10);self.failed.set();return
                 finally:
                     with self.child_lock:self.child=None
+                if idle_tick(output):self.refresh()
                 self.stop.wait(2)
     return CohortFaucet
 
@@ -333,7 +390,9 @@ def gateway(base,config,config_sha256,ingress=None):
         from testnet_gateway import Gateway, Handler as GatewayHandler
         from service_tls import listener
         faucet=supervised_faucet(Faucet)(ROOT/'faucet',ROOT/'password',binary=PREFIX/'bin/native-faucet')
-        app=Gateway(faucet,relay_root=ROOT/'relay');relay=app.relay
+        # The sealed native faucet debits every unit of one request in a single
+        # locked ledger write (authorize-many); budgets and admission are unchanged.
+        app=Gateway(faucet,relay_root=ROOT/'relay',authorize_many=True);relay=app.relay
         if relay is None or relay.native_ingress is None:raise ValueError('cohort native relay required')
         if stop.is_set():return
         activation=activate(base,config,binding,plan,funding,claims,int(time.time()))
@@ -357,7 +416,7 @@ def gateway(base,config,config_sha256,ingress=None):
             activation_sha256=hash_value(activation),ready_at=int(time.time()))
         if ingress is not None:ready_state['public_ingress']=ingress.evidence()
         base.atomic(ROOT/'service-ready.json',ready_state)
-        published=True;base.notify('READY=1\nSTATUS=Separate finite ten-person native cohort ready')
+        published=True;base.notify('READY=1\nSTATUS=Separate finite native cohort ready')
         while not stop.wait(.25):
             if base.read_ready(config,config_sha256,inode)['generation']!=generation:raise RuntimeError('original validator generation changed')
             if (not worker.is_alive() or faucet.failed.is_set() or any(not t.is_alive() for t in threads) or

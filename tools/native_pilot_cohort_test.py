@@ -210,5 +210,102 @@ class Guards(unittest.TestCase):
         with self.assertRaises(ValueError):cohort.progress_counts(self.root,claims)
         self.assertEqual(path.read_bytes(),original)
 
+    def sized(self,size):
+        # A second unused fixture whose reviewed policies name another lifetime size.
+        root,templates,config=self.fixture('cohort-060-rehearsal')
+        for path in (templates/'relay.json',root/'relay/config.json'):
+            value=json.loads(path.read_bytes());value['max_jobs']=6*size;path.chmod(0o600);atomic(path,value)
+        claims=cohort.private_json(root/'faucet/claims.json');claims['policy']['max_claims']=size
+        atomic(root/'faucet/claims.json',claims)
+        admission=cohort.private_json(root/'faucet/admission.json')
+        admission['policy'].update(max_invites=size,daily_admissions=size);atomic(root/'faucet/admission.json',admission)
+        return root,templates,config
+    def seal(self,root,templates,config,size):
+        plan=cohort.build_plan(root,templates,base_config=config,size=size)
+        self.template(templates/'plan.json',plan);digest=cohort.hash_value(plan)
+        cohort.initialize_issuance(root,digest,templates,base_config=config)
+        return plan,digest
+    def test_ten_wallet_plan_sealed_before_configurable_size_keeps_its_hash_and_limits(self):
+        # Literal document and digest as produced before the size became a plan parameter.
+        sealed=dict(format='zolana-native-cohort-plan-v1',network=dict(network=[67]*32,genesis_hash=b58(bytes([9])*32)),
+            pool_format='NPOOL004',cohort_size=10,private_grant=20_000_000,gas_grant=0,attempts=3,payment_cap=150_000_000,
+            private_budget=200_000_000,public_budget=4_500_000_000,source_private_address='npriv1'+'A'*100,
+            source_fee_address=b58(bytes([6])*32),**{name+'_sha256':'a'*64 for name in
+            ('source_wallet','password','source_profile','public_profile','relay_policy','faucet_policy','admission_policy')})
+        self.assertEqual(cohort.validate_plan(copy.deepcopy(sealed)),sealed)
+        self.assertEqual(cohort.hash_value(sealed),'39918ab191949f62e28ef9cb6ec63a442660c564e3fb801d345a2fb1361dfe6d')
+        self.assertEqual(cohort.limits(10),{key:sealed[key] for key in
+            ('cohort_size','private_grant','gas_grant','attempts','payment_cap','private_budget','public_budget')})
+        self.assertEqual(cohort.SLOTS,tuple('tester-%02d'%index for index in range(1,11)))
+        self.assertEqual(cohort.slots(10),cohort.SLOTS)
+        # The untouched fixture plans with no size argument and stays a ten-wallet cohort.
+        plan=self.prepare();self.assertEqual(plan,dict(sealed,**{key:plan[key] for key in plan if key.endswith('_sha256')}))
+        self.assertEqual(self.issue('tester-10')['slot'],'tester-10');self.assertEqual(self.audit()['cohort_size'],10)
+        with self.assertRaises(ValueError):cohort.build_plan(self.root,self.templates,base_config=self.config,size=11)
+    def test_two_hundred_wallet_cohort_plans_issues_and_audits_with_scaled_limits(self):
+        root,templates,config=self.sized(200)
+        for size in (10,199,201):
+            with self.assertRaises(ValueError):cohort.build_plan(root,templates,base_config=config,size=size)
+        original=cohort.private_json(root/'faucet/admission.json')
+        for daily in (10,199,201):
+            atomic(root/'faucet/admission.json',dict(original,policy=dict(original['policy'],daily_admissions=daily)))
+            with self.subTest(daily=daily),self.assertRaises(ValueError):cohort.build_plan(root,templates,base_config=config,size=200)
+        atomic(root/'faucet/admission.json',original)
+        plan,digest=self.seal(root,templates,config,200)
+        self.assertEqual((plan['cohort_size'],plan['private_grant'],plan['attempts'],plan['payment_cap']),(200,20_000_000,3,150_000_000))
+        self.assertEqual((plan['private_budget'],plan['public_budget']),(4_000_000_000,90_000_000_000))
+        self.assertEqual(json.loads((templates/'relay.json').read_bytes())['max_jobs'],1200)
+        for slot in ('tester-01','tester-11','tester-100','tester-200'):
+            self.assertEqual(cohort.issue(root,digest,slot,templates=templates,base_config=config)['slot'],slot)
+        for slot in ('tester-201','tester-0','tester-001','tester-500','tester-501'):
+            with self.assertRaises(ValueError):cohort.issue(root,digest,slot,templates=templates,base_config=config)
+        report=cohort.audit(root,digest,templates,base_config=config)
+        self.assertEqual((report['cohort_size'],report['reserved_slots'],report['issued']),(200,4,4))
+        self.assertEqual((report['private_budget'],report['public_budget']),(4_000_000_000,90_000_000_000))
+        self.assertEqual(self.native.calls.count('invite-issue'),4)
+        # A reviewed size cannot be reinterpreted: resealing other totals or widening policy fails closed.
+        for change in (dict(cohort_size=10),dict(cohort_size=201),dict(public_budget=4_500_000_000),dict(private_budget=200_000_000)):
+            with self.assertRaises(ValueError):cohort.validate_plan(dict(plan,**change))
+        state=cohort.private_json(root/'faucet/admission.json');state['policy']['max_invites']=201
+        atomic(root/'faucet/admission.json',state)
+        with self.assertRaises(ValueError):cohort.audit(root,digest,templates,base_config=config)
+    def test_smaller_cohort_capacity_is_exactly_its_planned_size(self):
+        root,templates,config=self.sized(3);plan,digest=self.seal(root,templates,config,3)
+        self.assertEqual((plan['private_budget'],plan['public_budget']),(60_000_000,1_350_000_000))
+        # Before any export exists, only the planned names bound the journal and claims ledger.
+        empty=cohort.private_json(root/'issuance.json')
+        atomic(root/'issuance.json',dict(empty,slots={'tester-04':dict(bind_fee=None)}))
+        with self.assertRaises(ValueError):cohort.audit(root,digest,templates,base_config=config)
+        atomic(root/'issuance.json',empty);claims=cohort.private_json(root/'faucet/claims.json')
+        atomic(root/'faucet/claims.json',dict(claims,claims=[{}]*4))
+        with self.assertRaises(ValueError):cohort.audit(root,digest,templates,base_config=config)
+        atomic(root/'faucet/claims.json',claims)
+        for slot in cohort.slots(3):cohort.issue(root,digest,slot,templates=templates,base_config=config)
+        before=self.native.calls.count('invite-issue')
+        with self.assertRaises(ValueError):cohort.issue(root,digest,'tester-04',templates=templates,base_config=config)
+        self.assertEqual((before,self.native.calls.count('invite-issue')),(3,3))
+        self.assertEqual(cohort.audit(root,digest,templates,base_config=config)['reserved_slots'],3)
+        journal=cohort.private_json(root/'issuance.json');journal['slots']['tester-04']=dict(bind_fee=None)
+        atomic(root/'issuance.json',journal)
+        with self.assertRaises(ValueError):cohort.audit(root,digest,templates,base_config=config)
+    def test_cohort_size_range_and_type_fail_closed_before_any_native_call(self):
+        plan=self.build();calls=len(self.native.calls)
+        for bad in (0,-1,501,1000,True,False,'10',10.0,None,[10]):
+            with self.subTest(size=bad):
+                for check in (cohort.cohort_size,cohort.slots,cohort.limits):
+                    with self.assertRaises(ValueError):check(bad)
+                with self.assertRaises(ValueError):cohort.validate_plan(dict(plan,cohort_size=bad))
+                with self.assertRaises(ValueError):cohort.build_plan(self.root,self.templates,base_config=self.config,size=bad)
+        self.assertEqual(len(self.native.calls),calls)
+        self.assertEqual((cohort.COHORT_SIZE,cohort.MAX_COHORT_SIZE,cohort.RELAY_MEMBER_JOBS),(10,500,6))
+        for size,private,public in ((1,20_000_000,450_000_000),(500,10_000_000_000,225_000_000_000)):
+            edge=dict(plan,**cohort.limits(size))
+            self.assertEqual((edge['private_budget'],edge['public_budget']),(private,public))
+            self.assertEqual(cohort.validate_plan(edge)['cohort_size'],size)
+        with self.assertRaises(ValueError):cohort.validate_plan(dict(dict(plan,**cohort.limits(1)),cohort_size=True))
+        names=cohort.slots(500)
+        self.assertEqual((len(names),len(set(names)),names[0],names[98],names[99],names[-1]),
+            (500,500,'tester-01','tester-99','tester-100','tester-500'))
+
 
 if __name__=='__main__':unittest.main()

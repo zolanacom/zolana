@@ -25,6 +25,9 @@ use std::{fs, path::Path};
 pub const PRIVATE_GRANT: u64 = 1_000_000;
 pub const GAS_GRANT: u64 = 150_000_000;
 pub const NATIVE_PRIVATE_GRANT: u64 = 20_000_000;
+/// Largest native cohort. Its fully redeemed admission state still fits the
+/// 1 MiB state-file bound; equals MAX_COHORT_SIZE in tools/native_pilot_cohort.py.
+pub const NATIVE_MAX_CLAIMS: usize = 500;
 const NATIVE_FAUCET_FORMAT: &str = "native-test-faucet-native-v1";
 const PAYMENT_CAP: u64 = 150_000_000;
 const ATTEMPTS: u8 = 3;
@@ -202,7 +205,7 @@ fn load(root: &Path) -> Result<(TesterProfile, Ledger)> {
                 && p.gas_amount == GAS_GRANT
         }
         NATIVE_FAUCET_FORMAT => {
-            (1..=10).contains(&p.max_claims)
+            (1..=NATIVE_MAX_CLAIMS).contains(&p.max_claims)
                 && p.private_amount == NATIVE_PRIVATE_GRANT
                 && p.gas_amount == 0
                 && profile.pool_format == "NPOOL004"
@@ -273,9 +276,12 @@ fn initialize_mode(
     let token = credential
         .map(native_rpc_access::read_material)
         .transpose()?;
-    if root.exists() || !(1..=if native { 10 } else { 100 }).contains(&max_claims) {
+    if root.exists() || !(1..=if native { NATIVE_MAX_CLAIMS } else { 100 }).contains(&max_claims) {
         if native {
-            return Err("use a new native faucet directory and 1..10 lifetime claims".into());
+            return Err(format!(
+                "use a new native faucet directory and 1..{NATIVE_MAX_CLAIMS} lifetime claims"
+            )
+            .into());
         }
         return Err("use a new faucet directory and 1..100 lifetime claims".into());
     }

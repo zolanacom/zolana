@@ -1,0 +1,706 @@
+{
+  "policy": {
+    "format": "native-invited-testnet-v1",
+    "network": {
+      "network": [
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67,
+        67
+      ],
+      "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+    },
+    "rpc_audience": "http://127.0.0.1:18898",
+    "faucet_audience": "http://127.0.0.1:8780",
+    "max_invites": 10,
+    "daily_admissions": 10,
+    "rpc_per_minute": 10000
+  },
+  "last_time": 1795159702,
+  "admissions": {
+    "period": 20777,
+    "count": 10
+  },
+  "global_rpc": {
+    "period": 29919328,
+    "count": 22
+  },
+  "global_faucet": {
+    "period": 29919328,
+    "count": 11
+  },
+  "edge": [
+    {
+      "channel": "rpc",
+      "peer": "global",
+      "bucket": {
+        "period": 29919328,
+        "count": 1
+      }
+    },
+    {
+      "channel": "rpc",
+      "peer": "f1ef169262638cbeabd36e60b021936c5a925beda67b52bd1b52847aa10352e1",
+      "bucket": {
+        "period": 29919328,
+        "count": 1
+      }
+    },
+    {
+      "channel": "faucet",
+      "peer": "global",
+      "bucket": {
+        "period": 29919328,
+        "count": 1
+      }
+    },
+    {
+      "channel": "faucet",
+      "peer": "f1ef169262638cbeabd36e60b021936c5a925beda67b52bd1b52847aa10352e1",
+      "bucket": {
+        "period": 29919328,
+        "count": 1
+      }
+    }
+  ],
+  "invitations": [
+    {
+      "id": "693be9213a6bcd61729dac899c4c9894eacc361962860613ce582b98e0ea60d0",
+      "redeem_by": 1795163301,
+      "bound_fee": "GFupXrcXUC2CXWWafA7bFDFZ3Z43GC2tpj2bVzvAS4ar",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPCpiMmFm4SS2D4DyjpgRWvMr3sPgWrutczr4CEmTosrHfRC32fo66h8xoJNjSHqVBU",
+          "fee_address": "GFupXrcXUC2CXWWafA7bFDFZ3Z43GC2tpj2bVzvAS4ar",
+          "signature": "5t4e35YXtn7cr4xSbFTeRKLeKCtKaBRFrYzCWRBKd7x7HtwCSwYtHVgSubQNRTfAvjsdfHVwJt4XojvHSS2Vo3G9"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 29919328,
+          "count": 22
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 2
+        }
+      }
+    },
+    {
+      "id": "369da147c5251b0f0659a4b92cfb99c1f80bfa49bf2aa5a324e0d1e0992e0efc",
+      "redeem_by": 1795163301,
+      "bound_fee": "GW3Rag22ewQa8YqB112oUMB8XWstVPcBMkC78ZvbCXcK",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPCvb2LecBfCeGxvzo5KXRA2AghPNoLwaytBhzc9haWyECHyDaCKKqGX8q85XjosZmx",
+          "fee_address": "GW3Rag22ewQa8YqB112oUMB8XWstVPcBMkC78ZvbCXcK",
+          "signature": "2izz3HAUHBeFk25BxXnjJzRJxXTXMi1kFmbokjp6KjyVL4rcyKasBdnhundYwZSSh4Dh84kRMjBXZ1ZuH8s5zw6i"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "460e87e41403c81ef37160a284238ce96c629b27ed9f34156509679b35eda966",
+      "redeem_by": 1795163301,
+      "bound_fee": "3qwndZpXgLJ6iB7zpNQ7T9Eu4RBrJvpGcfkktkLXKzGF",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPDXxLgUszGpMw7FM7Cx5LCHfE5DRfXdWYEkFxSjFnEtj4o2vtbMT4LD3ggecX63CXW",
+          "fee_address": "3qwndZpXgLJ6iB7zpNQ7T9Eu4RBrJvpGcfkktkLXKzGF",
+          "signature": "39yNwkoxU6doJqfuzWQWBQU43EicDiGAgiXLtE47tREEHfRmTifk3aNVaRFAxPD8eskAffCEvXxLmaZkNF1HcoAM"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "88cf81f1d6d4620c0b5eafdbc7ffb5ccf40e87528974f553f2761e260706f554",
+      "redeem_by": 1795163301,
+      "bound_fee": "9nmSfvHswQ1dLzi7n38HifwHLPD3dWqrYxuEe4LC8XES",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPE1weQbysvkaanw1uQk6CHBqujfm6nfnQDwAJcf3T5BZWYcMHEBe4uyjXGhTwRPQNZ",
+          "fee_address": "9nmSfvHswQ1dLzi7n38HifwHLPD3dWqrYxuEe4LC8XES",
+          "signature": "2tA17rmeSa8XNnnvrqdG5udm1GKFmwU7VQuSTrhnbLZsDeLydFaXkBhXxcj3jJjzFHCSv1EJNkWW1cPJ14aJkgs9"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "0b11ef2716ddc77456ce151bdcc05994adbdca6d077b116d1d070bf5c5107838",
+      "redeem_by": 1795163301,
+      "bound_fee": "BUdTBon5aZcVFbNswNGvFfZmJiRHmiX95gDrTT8e6dEr",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPDQutbmg2mJ6nXbefPLiWjz3Hmc2VCT2KtzJ6qUFviwppQFtR2KNzQNw9mespjCn41",
+          "fee_address": "BUdTBon5aZcVFbNswNGvFfZmJiRHmiX95gDrTT8e6dEr",
+          "signature": "3BDZeRqfiFrFwTpMLf9ez8miJqzd6M2XtZvcY7Wxo8eWYpmTJT4BkmbSD3h7j5CpUL8vFYogzxuGeNCyoQNPBSCr"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "436838fd799e913f85bf9063ce7a61c75fa1b5c29c165393cc22ce4cf6e0cd62",
+      "redeem_by": 1795163301,
+      "bound_fee": "HxPhvUsqXMqBVwoKLaNDrrxDhp8Myvz2AX4mMuRt1j66",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPC5EiySv43sdCcmxzsBcXc52zyy4gW6WZrhrzv41sUcDzghmR76AkMBj22iuzRQZ5J",
+          "fee_address": "HxPhvUsqXMqBVwoKLaNDrrxDhp8Myvz2AX4mMuRt1j66",
+          "signature": "zEiyG1rX3SLD261TUtmyJYkSgqSfCGewPxkC2TtXEqiqZMg3mkB3MVNEbb57Q8z1Lcj2ZLo9yBFWQaEAFr2hmJE"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "7b89198c6d535850c2472c642230d9fc02099041deb39ca0481ce01bc8b7f078",
+      "redeem_by": 1795163301,
+      "bound_fee": "GhrT9Krr48WqoaHB6tejQPmasWNjSLyyXmampvP63jXU",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPDJHysvGtHCAtY79DPm4c71CqjkCNDxB9Zt2twZBKBLQubTiMG451aBegkzpRmJTfw",
+          "fee_address": "GhrT9Krr48WqoaHB6tejQPmasWNjSLyyXmampvP63jXU",
+          "signature": "3FyrHNbSnvK2nYhrpL3hgR5Srksw1j56hbMxSYJ37pk2HgWCu4iHZF6kKgwsGQEjdzW1R3pPWgJUxNLPX4WL4DNL"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "4a35b65fd878bbd46fc9b1127a114a5cb205e31068c0aa6ccfd0b57fb9b2863d",
+      "redeem_by": 1795163301,
+      "bound_fee": "D3WEyPaUpcVAASPxtF2ZpC4R7pQCTaiBhJtm89aikPWm",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPDuQfHrcvcWkH2KDvAuudKEtJVwEt22QS8F2UuCf4YmBeZjKkq1YqZ7kVUKJX4XPTA",
+          "fee_address": "D3WEyPaUpcVAASPxtF2ZpC4R7pQCTaiBhJtm89aikPWm",
+          "signature": "4CQyia7uoEbgzn2PUK8D5EC3r5k96HBG51GmH1CaMnRNm2RCDVdwV89WTG4s1MBVUfJhZTxF5GvWBuV5SrNQqW1Z"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "2107bae481862fbe1bfe1b38f8af0230337aec60ff85c787fa0711b274711092",
+      "redeem_by": 1795163301,
+      "bound_fee": "HKpCKdJrB78ucmCEwooX1qx7hTqniNbZUoBtULLw9WgZ",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPCSPvyNoW9o1SMYBeyWmA1yeLKvajpeu8H1ujzgPdf4rtD3kZatVYvq2gPR2EA9nav",
+          "fee_address": "HKpCKdJrB78ucmCEwooX1qx7hTqniNbZUoBtULLw9WgZ",
+          "signature": "UjruDyuDVjiCUqBRVixneFhY2g6vqoEisb9trYE7SV9PYNxc5LsoHdBDvifBZxJYmcCAm3hXsU7qXtdJd1DGMos"
+        },
+        "admitted_at": 1795159701,
+        "access_until": 1795764501,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "e27996cdf383d556976f72c30aa1a2935f124ac62bc4d74c792db15e96d82c85",
+      "redeem_by": 1795163302,
+      "bound_fee": "BQPRcqJwd3Br2zMnD5LevgzsBEwACXqQrJqFGF197NMN",
+      "revoked": false,
+      "member": {
+        "claim": {
+          "format": "native-test-grant-v1",
+          "network": {
+            "network": [
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67,
+              67
+            ],
+            "genesis_hash": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+          },
+          "private_address": "npriv12DoNnKLNQxrXkrf1CTXZp5jqNu57o6m6XpnN7ZFvrVFPD3p1utziKwP6zAJsJm8DsQMXX13fYCg1fEA3aT8fYw4qfDv5LxTj8HxgipDkebURJ",
+          "fee_address": "BQPRcqJwd3Br2zMnD5LevgzsBEwACXqQrJqFGF197NMN",
+          "signature": "2K5pF5nGwpTD4MvE4VbWu7dZFgrWDcSRQhhYpj7PexHaxqeGy4c1neD28R4iuqMm6HHbV87xmoq566nttECVah4w"
+        },
+        "admitted_at": 1795159702,
+        "access_until": 1795764502,
+        "rpc": {
+          "period": 0,
+          "count": 0
+        },
+        "faucet": {
+          "period": 29919328,
+          "count": 1
+        }
+      }
+    }
+  ]
+}
