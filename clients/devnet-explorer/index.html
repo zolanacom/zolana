@@ -9,8 +9,7 @@
     <div><dt>Tip slot</dt><dd data-zolana-field="tip_slot">—</dd></div>
     <div><dt>Finalized slot</dt><dd data-zolana-field="finalized_slot">—</dd></div>
     <div><dt>Block height</dt><dd data-zolana-field="block_height">—</dd></div>
-    <div><dt>Average slot time</dt><dd data-zolana-field="slot_time">—</dd></div>
-    <div><dt>Active validators</dt><dd data-zolana-field="validators">—</dd></div>
+    <div><dt>Validators voting</dt><dd data-zolana-field="validators_voting">—</dd></div>
     <div><dt>Feed</dt><dd data-zolana-field="updated">Waiting for data</dd></div>
   </dl></div>
   <p class="notice explorer-notice" id="explorer-notice" role="status"></p>
@@ -19,6 +18,22 @@
     <p class="explorer-search-note" id="explorer-search-note" role="status"></p>
     <p class="sr-only" id="explorer-announcer" role="status"></p>
     <section class="explorer-detail" id="explorer-detail" aria-labelledby="explorer-detail-title" hidden></section>
+    <section class="explorer-window" aria-labelledby="window-title" data-zolana-status>
+      <div class="window-heading"><h2 class="subheading" id="window-title">Recent window</h2><p class="window-summary" data-zolana-field="window_summary">Waiting for data</p></div>
+      <dl class="window-stats">
+        <div><dt>Block time</dt><dd data-zolana-field="block_time">—</dd><dd class="basis">Average slot time × slots per block in this window</dd></div>
+        <div><dt>Blocks per minute</dt><dd data-zolana-field="blocks_per_minute">—</dd><dd class="basis">At that block time</dd></div>
+        <div><dt>Transactions</dt><dd data-zolana-field="window_transactions">—</dd><dd class="basis">In this window’s blocks</dd></div>
+        <div><dt>Non-vote transactions</dt><dd data-zolana-field="window_non_vote">—</dd><dd class="basis">In this window’s blocks</dd></div>
+        <div><dt>Skipped slots</dt><dd data-zolana-field="window_skipped">—</dd><dd class="basis">Slots in this window without a block</dd></div>
+      </dl>
+      <div class="window-charts" id="window-charts" role="group" tabindex="0" aria-label="Charts of the recent window, one column per block. Use the left and right arrow keys to read one block and Enter to open it.">
+        <div class="window-chart"><p class="chart-label"><span>Block interval</span><span class="chart-note" id="chart-interval-note"></span></p><svg class="chart" id="chart-interval" viewBox="0 0 120 40" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg></div>
+        <div class="window-chart"><p class="chart-label"><span>Transactions per block</span><span class="chart-note" id="chart-transactions-note"></span></p><svg class="chart" id="chart-transactions" viewBox="0 0 120 40" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg></div>
+      </div>
+      <p class="window-readout" id="window-readout" role="status"></p>
+      <p class="window-footnote">Block interval is the number of slots since a block’s parent, multiplied by the average slot time in the feed; it is not measured block by block. The measured figures are shown only while the network is live. The feed does not mark which transactions are shielded payments.</p>
+    </section>
     <div class="explorer-columns" id="explorer-data" hidden>
       <div class="explorer-list">
         <h2 class="subheading" id="blocks-title">Latest blocks</h2>
@@ -29,7 +44,7 @@
       </div>
       <div class="explorer-list">
         <h2 class="subheading" id="transactions-title">Latest transactions</h2>
-        <div class="table-wrap" id="transactions-wrap" role="region" aria-labelledby="transactions-title" tabindex="0"><table class="explorer-table explorer-table-wide"><caption class="sr-only">Latest transactions, newest first</caption><thead><tr><th scope="col">Signature</th><th scope="col">Slot</th><th scope="col">Age</th><th scope="col">Result</th><th scope="col">Fee (ZOL)</th><th scope="col">Kind</th></tr></thead><tbody id="transactions-body"></tbody></table></div>
+        <div class="table-wrap" id="transactions-wrap" role="region" aria-labelledby="transactions-title" tabindex="0"><table class="explorer-table explorer-table-wide"><caption class="sr-only">Latest transactions, newest first</caption><thead><tr><th scope="col">Signature</th><th scope="col">Slot</th><th scope="col">Age</th><th scope="col">Result</th><th scope="col">Fee (test coins)</th><th scope="col">Kind</th></tr></thead><tbody id="transactions-body"></tbody></table></div>
         <p class="explorer-empty" id="transactions-empty" hidden>No transactions have been recorded yet.</p>
         <p class="explorer-count" id="transactions-count"></p>
         <button type="button" class="load-more" id="transactions-more" hidden>Show more<span class="sr-only"> transactions</span></button>

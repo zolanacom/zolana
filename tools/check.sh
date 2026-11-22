@@ -33,7 +33,7 @@ CARGO_BUILD_JOBS=2 sh tools/dev.sh build --offline --locked --workspace --bins
 # Lifecycle fixtures also pin the upstream validator CLI through this builder.
 sh tools/build_localnet.sh
 python3 -B -m unittest discover -s tools -p '*_test.py'
-node --test clients/browser-wallet/*.test.mjs clients/network-portal/*.test.mjs sdk/js/*.test.mjs
+node --test clients/browser-wallet/*.test.mjs clients/network-portal/*.test.mjs clients/devnet-explorer/*.test.mjs sdk/js/*.test.mjs
 node clients/wallet-ui/ui-state.test.cjs
 node tools/wallet_ui_contract_test.cjs
 # No tool may type a deployment stem, hash or address outside tools/deployment.py
