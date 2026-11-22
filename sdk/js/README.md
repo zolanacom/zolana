@@ -119,6 +119,13 @@ before it publishes a feed (`validate_feed` in
 `tools/devnet_explorer/explorer_pull_v0.py`). The tests give both checks the
 same documents and require the same verdicts.
 
+A feed has one of two shapes under one format name, and both checks accept
+both. The second marks the transactions that invoke the native payment program:
+`marksPayments(feed)` tells the shapes apart, `paymentStep(transaction)` reads a
+mark, and `findTransaction` returns it as `payment`. The fields are described in
+[`tools/devnet_explorer/README.md`](../../tools/devnet_explorer/README.md#payment-program-transactions)
+and used in [Check that a payment landed](../../docs/cookbook/check-that-a-payment-landed.md#when-the-feed-marks-payments).
+
 ## Limits
 
 - **Not a wallet.** No keys, no signing, no proof construction, no sync. That

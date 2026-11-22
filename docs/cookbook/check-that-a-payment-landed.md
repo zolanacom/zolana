@@ -70,3 +70,61 @@ Read the answer for what it is:
 The page loads the feed from `/explorer/feed.json` on its own origin. The
 example was tested with the sample file and with a loopback server, not
 against a deployed explorer.
+
+## When the feed marks payments
+
+A feed may also mark the transactions that invoke the native payment program.
+Each transaction of such a feed carries `payment_instructions`, the names of
+the payment-program instructions at its top level, and `findTransaction`
+returns `payment`, what that mark says. `marksPayments(feed)` tells the two
+shapes of the feed apart; `validateExplorerFeed` accepts both.
+
+<!-- snippet: sdk/js/examples/payment-landed.mjs -->
+```js
+if (marksPayments(feed)) {
+  for (const signature of signatures) {
+    const found = findTransaction(feed, signature);
+    if (found === null) continue;
+    const names = found.transaction.payment_instructions ?? [];
+    console.log(`${signature}\n  payment program: ${found.payment}${names.length > 0 ? ` (${names.join(", ")})` : ""}`);
+  }
+}
+```
+
+<!-- output: node sdk/js/examples/payment-landed.mjs --feed clients/devnet-explorer/feed.payments.json -->
+```text
+feed zolana-explorer-feed-v0: status live, finalized slot 254839, 37 transactions in the window
+4m8QYMPsQaqE45rVXdXLPQp1EnRjGGpKdwgoNg8ZuWbkQfgffdGmFVHG3YiEMDzVJvgeNhEMb8iHicTGquV9Zf6U
+  slot 254867, no error recorded, fee 5000, above the feed's finalized slot: look again later
+4x12uCZs95HQKtXoDhpom9Gry6Go7Fta7hzb3osKZHBSpPSx8NYtj2XKUAwocY9dGsUL5DGHg5PZw17Uzoiuv8zZ
+  slot 250981, no error recorded, fee 5000, at or below the feed's finalized slot
+1111111111111111111111111111111111111111111111111111111111111111
+  not in the feed's window
+4m8QYMPsQaqE45rVXdXLPQp1EnRjGGpKdwgoNg8ZuWbkQfgffdGmFVHG3YiEMDzVJvgeNhEMb8iHicTGquV9Zf6U
+  payment program: executed (finalize, close)
+4x12uCZs95HQKtXoDhpom9Gry6Go7Fta7hzb3osKZHBSpPSx8NYtj2XKUAwocY9dGsUL5DGHg5PZw17Uzoiuv8zZ
+  payment program: none
+```
+
+`clients/devnet-explorer/feed.payments.json` is the sample feed with marks;
+its values are synthetic.
+
+- **`executed`**: the transaction succeeded and carries `finalize` or
+  `inline`, the two instructions that execute a payment. This is what the
+  explorer page counts as a shielded payment.
+- **`failed`**: it carries one of those two and failed, so no payment was
+  executed.
+- **`staging`**: it carries neither, only instructions that initialize,
+  write, seal or close a staging account.
+- **`other`**: it carries only an instruction the feed could not name.
+- **`none`**: it carries no instruction of the payment program.
+- **`not-marked`**: the feed does not say. Every transaction of a feed that
+  carries no marks reads this way, and so does a transaction of a block the
+  feed service read without its instructions.
+
+The mark is what the ledger shows to anyone who reads the block: the program
+an instruction is addressed to, and the first byte of its data, which names
+the instruction. It does not say whether a payment is a deposit, a private
+send or a withdrawal, and it carries no amount, account, nullifier,
+commitment or ciphertext. An `executed` mark is the feed's reading of a block,
+with the limits listed above: it is not a receipt.

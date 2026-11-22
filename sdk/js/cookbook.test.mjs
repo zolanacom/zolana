@@ -86,9 +86,10 @@ test("every code block is a passage of the file it names, and every output block
         assert.ok(read(target).includes(`\n${block.text}\n`), `${where}: not a passage of ${target}`);
         snippets++;
       } else if (kind === "output") {
-        const command = target.match(/^node (sdk\/js\/examples\/[a-z-]+\.mjs)$/);
+        // The example alone, or with a feed of this repository to read.
+        const command = target.match(/^node (sdk\/js\/examples\/[a-z-]+\.mjs)(?: --feed (clients\/devnet-explorer\/feed\.[a-z]+\.json))?$/);
         assert.ok(command && block.language === "text", where);
-        assert.equal(await node(command[1]), `${block.text}\n`, where);
+        assert.equal(await node(command[1], ...(command[2] ? ["--feed", command[2]] : [])), `${block.text}\n`, where);
         outputs++;
       } else {
         // The Rust tests compare this file with what the command prints.
@@ -98,7 +99,7 @@ test("every code block is a passage of the file it names, and every output block
       }
     }
   }
-  assert.deepEqual([snippets, outputs], [6, 5]);
+  assert.deepEqual([snippets, outputs], [7, 6]);
   // The SDK's own pages quote the same outputs. Their marked blocks are held to the same rule.
   let quoted = 0;
   for (const page of ["sdk/EXAMPLES.md", "sdk/js/README.md"]) {
@@ -174,4 +175,25 @@ test("payment-landed reads a feed from a file or a URL and looks up the signatur
   });
   // The paused sample is a valid feed too.
   assert.match(await node("sdk/js/examples/payment-landed.mjs", "--feed", "clients/devnet-explorer/feed.paused.json"), /^feed zolana-explorer-feed-v0: status /);
+  // Neither sample marks payment-program transactions, so nothing is said about them.
+  assert.doesNotMatch(fromFile, /payment program/);
+});
+
+test("payment-landed says what a marked feed shows of a transaction at the payment program", async () => {
+  const marked = JSON.parse(read("clients/devnet-explorer/feed.payments.json"));
+  const pick = wanted => marked.transactions.find(item => JSON.stringify(item.payment_instructions) === JSON.stringify(wanted) && item.ok).signature;
+  const failed = marked.transactions.find(item => !item.ok && item.payment_instructions.includes("finalize")).signature;
+  const printed = await node("sdk/js/examples/payment-landed.mjs", "--feed", "clients/devnet-explorer/feed.payments.json",
+    pick(["finalize", "close"]), failed, pick(["initialize", "write"]), pick(["inline"]), pick([]), "3".repeat(64));
+  const lines = printed.trimEnd().split("\n");
+  // One line of the feed, two per signature, then two more per signature that was found.
+  assert.equal(lines.length, 1 + 6 * 2 + 5 * 2);
+  assert.deepEqual(lines.slice(13).filter((_, index) => index % 2 === 1), [
+    "  payment program: executed (finalize, close)", "  payment program: failed (finalize)",
+    "  payment program: staging (initialize, write)", "  payment program: executed (inline)", "  payment program: none"]);
+  assert.equal(lines[12], "  not in the feed's window");
+  // The marks are the feed's own: the same feed without them is refused, not read as unmarked.
+  await serving(() => JSON.stringify({ ...marked, transactions: marked.transactions.map(({ payment_instructions, ...rest }) => rest) }), async url => {
+    await assert.rejects(() => node("sdk/js/examples/payment-landed.mjs", "--feed", url), /transactions\[0\] is missing key payment_instructions/);
+  });
 });

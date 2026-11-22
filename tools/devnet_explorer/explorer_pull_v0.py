@@ -6,6 +6,11 @@ HTTP, checks the HMAC-SHA256 signature with the shared key, validates the
 document against the feed contract and only then publishes the exact verified
 bytes with an atomic rename. Any failure leaves the published file untouched.
 
+The contract has two shapes under the one format name: the base shape, and the
+shape that also marks payment-program transactions (see validate_feed). Both
+are accepted, so this puller can be installed before or after the feed service
+that writes the second shape.
+
 Standard library only. Exit codes with --once: 0 published, 3 no change,
 1 error. Exit code 2 means the arguments or the key file were rejected.
 """
@@ -71,6 +76,16 @@ _BLOCK_KEYS = ("slot", "parent_slot", "blockhash", "block_time", "block_height",
 _TRANSACTION_KEYS = ("signature", "slot", "block_time", "ok", "fee", "kind")
 _STATS_KEYS = ("since", "blocks_seen", "transactions_seen",
                "non_vote_transactions_seen")
+# The fields a feed that marks payment-program transactions adds. A feed
+# carries all of them, in every row, or none of them.
+_VALIDATOR_PAYMENT_KEYS = ("root_slot",)
+_BLOCK_PAYMENT_KEYS = ("payment_tx_count", "executed_payment_count")
+_TRANSACTION_PAYMENT_KEYS = ("payment_instructions",)
+_STATS_PAYMENT_KEYS = ("payments_since", "payment_transactions_seen",
+                       "executed_payments_seen")
+# Names of the payment program's instructions, in the order a feed lists them.
+PAYMENT_INSTRUCTIONS = ("initialize", "write", "seal", "finalize", "close",
+                        "inline", "unknown")
 
 _REQUEST_HEADERS = {
     "User-Agent": "zolana-explorer-pull/0",
@@ -276,9 +291,33 @@ def _enum(value, path, allowed):
         _invalid(path, "must be one of %s" % ", ".join(allowed))
 
 
+def _payment_instructions(value, path):
+    """null (not known), or instruction names, each once, in the listed order."""
+    if value is None:
+        return
+    position = -1
+    for index, name in enumerate(_array(value, path, len(PAYMENT_INSTRUCTIONS))):
+        _enum(name, "%s[%d]" % (path, index), PAYMENT_INSTRUCTIONS)
+        if PAYMENT_INSTRUCTIONS.index(name) <= position:
+            _invalid(path, "must name each instruction once, in the order %s"
+                     % ", ".join(PAYMENT_INSTRUCTIONS))
+        position = PAYMENT_INSTRUCTIONS.index(name)
+
+
 def validate_feed(document):
-    """Check a parsed feed against the shared contract; return generated_at."""
+    """Check a parsed feed against the shared contract; return generated_at.
+
+    A feed whose stats carry a payment counter is held to the shape that
+    marks payment-program transactions: every validator, block, transaction
+    and the stats must then carry their payment fields. A feed whose stats
+    carry none must carry none anywhere.
+    """
     feed = _object(document, "feed", _TOP_KEYS)
+    marked = type(feed["stats"]) is dict and any(key in feed["stats"] for key in _STATS_PAYMENT_KEYS)
+    validator_keys = _VALIDATOR_KEYS + (_VALIDATOR_PAYMENT_KEYS if marked else ())
+    block_keys = _BLOCK_KEYS + (_BLOCK_PAYMENT_KEYS if marked else ())
+    transaction_keys = _TRANSACTION_KEYS + (_TRANSACTION_PAYMENT_KEYS if marked else ())
+    stats_keys = _STATS_KEYS + (_STATS_PAYMENT_KEYS if marked else ())
     if type(feed["format"]) is not str or feed["format"] != FEED_FORMAT:
         _invalid("format", "must be exactly %s" % FEED_FORMAT)
     generated_at = _integer(feed["generated_at"], "generated_at")
@@ -293,15 +332,17 @@ def validate_feed(document):
     _integer(network["last_block_at"], "network.last_block_at", nullable=True)
     for index, item in enumerate(_array(network["validators"], "network.validators")):
         path = "network.validators[%d]" % index
-        _object(item, path, _VALIDATOR_KEYS)
+        _object(item, path, validator_keys)
         _string(item["identity"], path + ".identity")
         _string(item["vote_account"], path + ".vote_account", nullable=True)
         _integer(item["last_vote"], path + ".last_vote", nullable=True)
         _boolean(item["active"], path + ".active")
+        if marked:
+            _integer(item["root_slot"], path + ".root_slot", nullable=True)
 
     for index, item in enumerate(_array(feed["blocks"], "blocks", MAX_BLOCKS)):
         path = "blocks[%d]" % index
-        _object(item, path, _BLOCK_KEYS)
+        _object(item, path, block_keys)
         _integer(item["slot"], path + ".slot")
         _integer(item["parent_slot"], path + ".parent_slot", nullable=True)
         _string(item["blockhash"], path + ".blockhash")
@@ -309,21 +350,34 @@ def validate_feed(document):
         _integer(item["block_height"], path + ".block_height", nullable=True)
         _integer(item["tx_count"], path + ".tx_count")
         _integer(item["non_vote_tx_count"], path + ".non_vote_tx_count")
+        if marked:
+            # Both counts, or null for both: the block was read without its instructions.
+            payment = _integer(item["payment_tx_count"], path + ".payment_tx_count", nullable=True)
+            executed = _integer(item["executed_payment_count"],
+                                path + ".executed_payment_count", nullable=True)
+            if (payment is None) != (executed is None):
+                _invalid(path, "must give both payment counts or null for both")
+            if payment is not None and not executed <= payment <= item["tx_count"]:
+                _invalid(path, "must have executed_payment_count <= payment_tx_count <= tx_count")
 
     for index, item in enumerate(_array(feed["transactions"], "transactions",
                                         MAX_TRANSACTIONS)):
         path = "transactions[%d]" % index
-        _object(item, path, _TRANSACTION_KEYS)
+        _object(item, path, transaction_keys)
         _string(item["signature"], path + ".signature")
         _integer(item["slot"], path + ".slot")
         _integer(item["block_time"], path + ".block_time", nullable=True)
         _boolean(item["ok"], path + ".ok")
         _integer(item["fee"], path + ".fee")
         _enum(item["kind"], path + ".kind", ("vote", "program"))
+        if marked:
+            _payment_instructions(item["payment_instructions"], path + ".payment_instructions")
 
-    stats = _object(feed["stats"], "stats", _STATS_KEYS)
-    for key in _STATS_KEYS:
+    stats = _object(feed["stats"], "stats", stats_keys)
+    for key in stats_keys:
         _integer(stats[key], "stats." + key)
+    if marked and stats["executed_payments_seen"] > stats["payment_transactions_seen"]:
+        _invalid("stats", "must have executed_payments_seen <= payment_transactions_seen")
     return generated_at
 
 

@@ -45,8 +45,26 @@
     chartHint: 'Oldest block on the left, newest on the right. Select a column to read one block.',
     chartEmpty: 'No blocks to draw yet.',
     searchEmpty: 'There is nothing to search until explorer data is available.',
-    searchHint: 'Enter a slot number, or at least 4 characters from the start of a blockhash or signature. Blockhashes and signatures are case-sensitive.'
+    searchHint: 'Enter a slot number, or at least 4 characters from the start of a blockhash or signature. Blockhashes and signatures are case-sensitive.',
+    paymentsUnmarked: 'The feed does not mark which transactions are shielded payments.',
+    paymentExecuted: 'This transaction executed a shielded payment. The feed does not say whether it was a deposit, a private send or a withdrawal, and it carries no amount.',
+    paymentFailed: 'This transaction carried the instruction that executes a shielded payment and failed. No payment was executed.',
+    paymentStaging: 'A staging step: this transaction initialized, wrote, sealed or closed an account that holds the bytes of a payment before it is executed. It executed no payment.',
+    paymentOther: 'This transaction carried an instruction of the payment program that the feed could not name. It executed no payment.',
+    paymentNone: 'No instruction of the payment program',
+    paymentNotMarked: 'Not marked for this transaction',
+    validatorsPaused: 'The network is paused. Showing the validators as last recorded.',
+    validatorsRefreshFailed: 'Explorer data could not be refreshed. Showing the validators as last recorded.',
+    validatorsWaiting: 'Validator data is not available yet.',
+    validatorsNone: 'The feed lists no validators.'
   };
+
+  /* A feed may mark the transactions that invoke the payment program: it names the
+     instructions each one carries, in this order, and counts them per block. A feed
+     without those fields is read as before, and the page says that it does not mark
+     them. The same file also fills a list of validators on a page that carries one
+     (data-zolana-validators). */
+  const PAYMENT_INSTRUCTIONS = ['initialize', 'write', 'seal', 'finalize', 'close', 'inline', 'unknown'];
 
   /* ---------- validation ---------- */
 
@@ -71,14 +89,35 @@
     return check(value) ? value : INVALID;
   }
 
+  /* The mark of a transaction: the names of the payment-program instructions it carries,
+     each once, in the feed's order. null when the feed does not say. */
+  function readInstructions(raw) {
+    if (raw === null || raw === undefined) return null;
+    if (!Array.isArray(raw) || raw.length > PAYMENT_INSTRUCTIONS.length) return INVALID;
+    let position = -1;
+    for (let i = 0; i < raw.length; i += 1) {
+      const found = typeof raw[i] === 'string' ? PAYMENT_INSTRUCTIONS.indexOf(raw[i]) : -1;
+      if (found <= position) return INVALID;
+      position = found;
+    }
+    return raw.slice();
+  }
+
+  /* The two payment counts of a block are null together when the feed does not mark the
+     block. A row whose counts cannot be true (one without the other, or more than the
+     block holds) is skipped like any other malformed row. */
   function readBlock(raw) {
     if (!isObject(raw)) return null;
     const parentSlot = optional(raw.parent_slot, isNatural);
     const blockTime = optional(raw.block_time, isTime);
     const blockHeight = optional(raw.block_height, isNatural);
+    const paymentCount = optional(raw.payment_tx_count, isNatural);
+    const executedCount = optional(raw.executed_payment_count, isNatural);
     if (!isNatural(raw.slot) || !isId(raw.blockhash) || !isNatural(raw.tx_count) ||
         !isNatural(raw.non_vote_tx_count) || parentSlot === INVALID || blockTime === INVALID ||
-        blockHeight === INVALID) {
+        blockHeight === INVALID || paymentCount === INVALID || executedCount === INVALID ||
+        (paymentCount === null) !== (executedCount === null) ||
+        (paymentCount !== null && (executedCount > paymentCount || paymentCount > raw.tx_count))) {
       return null;
     }
     return {
@@ -88,16 +127,19 @@
       block_time: blockTime,
       block_height: blockHeight,
       tx_count: raw.tx_count,
-      non_vote_tx_count: raw.non_vote_tx_count
+      non_vote_tx_count: raw.non_vote_tx_count,
+      payment_tx_count: paymentCount,
+      executed_payment_count: executedCount
     };
   }
 
   function readTransaction(raw) {
     if (!isObject(raw)) return null;
     const blockTime = optional(raw.block_time, isTime);
+    const instructions = readInstructions(raw.payment_instructions);
     if (!isId(raw.signature) || !isNatural(raw.slot) || blockTime === INVALID ||
         typeof raw.ok !== 'boolean' || !isNatural(raw.fee) ||
-        (raw.kind !== 'vote' && raw.kind !== 'program')) {
+        (raw.kind !== 'vote' && raw.kind !== 'program') || instructions === INVALID) {
       return null;
     }
     return {
@@ -106,7 +148,8 @@
       block_time: blockTime,
       ok: raw.ok,
       fee: raw.fee,
-      kind: raw.kind
+      kind: raw.kind,
+      payment_instructions: instructions
     };
   }
 
@@ -114,23 +157,35 @@
     if (!isObject(raw)) return null;
     const voteAccount = optional(raw.vote_account, isId);
     const lastVote = optional(raw.last_vote, isNatural);
+    const rootSlot = optional(raw.root_slot, isNatural);
     if (!isId(raw.identity) || typeof raw.active !== 'boolean' || voteAccount === INVALID ||
-        lastVote === INVALID) {
+        lastVote === INVALID || rootSlot === INVALID) {
       return null;
     }
-    return { identity: raw.identity, vote_account: voteAccount, last_vote: lastVote, active: raw.active };
+    return { identity: raw.identity, vote_account: voteAccount, last_vote: lastVote, root_slot: rootSlot,
+      active: raw.active };
   }
 
+  /* The payment counters are all present or all absent; they count from payments_since. */
   function readStats(raw) {
     if (!isObject(raw) || !isTime(raw.since) || !isNatural(raw.blocks_seen) ||
         !isNatural(raw.transactions_seen) || !isNatural(raw.non_vote_transactions_seen)) {
+      return null;
+    }
+    const marked = [raw.payments_since, raw.payment_transactions_seen, raw.executed_payments_seen]
+      .some(function (value) { return value !== undefined && value !== null; });
+    if (marked && (!isTime(raw.payments_since) || !isNatural(raw.payment_transactions_seen) ||
+        !isNatural(raw.executed_payments_seen) || raw.executed_payments_seen > raw.payment_transactions_seen)) {
       return null;
     }
     return {
       since: raw.since,
       blocks_seen: raw.blocks_seen,
       transactions_seen: raw.transactions_seen,
-      non_vote_transactions_seen: raw.non_vote_transactions_seen
+      non_vote_transactions_seen: raw.non_vote_transactions_seen,
+      payments_since: marked ? raw.payments_since : null,
+      payment_transactions_seen: marked ? raw.payment_transactions_seen : null,
+      executed_payments_seen: marked ? raw.executed_payments_seen : null
     };
   }
 
@@ -321,6 +376,124 @@
     return kind === 'vote' ? 'Vote' : 'Program';
   }
 
+  /* ---------- payment-program transactions ---------- */
+
+  /* What the mark of a transaction says:
+     'not_marked'  the feed does not say;
+     'none'        no instruction of the payment program;
+     'executed'    it succeeded and carries finalize or inline, the two that execute a payment;
+     'failed'      it carries one of those two and failed, so no payment was executed;
+     'staging'     it only initialized, wrote, sealed or closed a staging account;
+     'other'       it carries only an instruction the feed could not name. */
+  function paymentStep(transaction) {
+    const names = transaction ? transaction.payment_instructions : null;
+    if (!Array.isArray(names)) return 'not_marked';
+    if (names.length === 0) return 'none';
+    if (names.indexOf('finalize') !== -1 || names.indexOf('inline') !== -1) return transaction.ok ? 'executed' : 'failed';
+    return names.length === 1 && names[0] === 'unknown' ? 'other' : 'staging';
+  }
+
+  function isPaymentTransaction(transaction) {
+    const step = paymentStep(transaction);
+    return step !== 'not_marked' && step !== 'none';
+  }
+
+  /* The kind shown for a transaction. A failed payment keeps the name: the result column
+     says that it failed. */
+  function transactionLabel(transaction) {
+    const step = paymentStep(transaction);
+    if (step === 'executed' || step === 'failed') return 'Shielded payment';
+    if (step === 'staging') return 'Payment staging';
+    if (step === 'other') return 'Payment program';
+    return kindLabel(transaction.kind);
+  }
+
+  /* One sentence for the detail panel, or null when there is nothing to say. */
+  function describePayment(transaction) {
+    const step = paymentStep(transaction);
+    if (step === 'executed') return TEXT.paymentExecuted;
+    if (step === 'failed') return TEXT.paymentFailed;
+    if (step === 'staging') return TEXT.paymentStaging;
+    if (step === 'other') return TEXT.paymentOther;
+    return null;
+  }
+
+  function feedMarksPayments(feed) {
+    if (!feed) return false;
+    return feed.blocks.some(function (block) { return typeof block.payment_tx_count === 'number'; }) ||
+      feed.transactions.some(function (transaction) { return Array.isArray(transaction.payment_instructions); });
+  }
+
+  function filterTransactions(feed, filter) {
+    const transactions = feed ? feed.transactions : [];
+    return filter === 'payments' ? transactions.filter(isPaymentTransaction) : transactions;
+  }
+
+  /* What the "Shielded payments" figure of the recent window counts. */
+  function paymentsBasis(stats) {
+    if (!stats || stats.blocks === 0 || stats.marked_blocks === 0) return 'Not marked in this feed';
+    const from = ', from ' + formatInteger(stats.payment_transactions) +
+      (stats.payment_transactions === 1 ? ' payment-program transaction' : ' payment-program transactions');
+    if (stats.marked_blocks === stats.blocks) return 'Executed in this window\u2019s blocks' + from;
+    return 'Executed in the ' + formatInteger(stats.marked_blocks) + ' of ' + formatInteger(stats.blocks) +
+      ' blocks this feed marks' + from;
+  }
+
+  /* Says when the feed marks no block of the window, or only some. Empty otherwise. */
+  function paymentsNote(stats) {
+    if (!stats || stats.blocks === 0 || stats.marked_blocks === stats.blocks) return '';
+    if (stats.marked_blocks === 0) return TEXT.paymentsUnmarked;
+    return 'The feed marks payment-program transactions in ' + formatInteger(stats.marked_blocks) + ' of the ' +
+      formatInteger(stats.blocks) + ' blocks in this window.';
+  }
+
+  /* ---------- validators ---------- */
+
+  /* One row per validator the feed lists, in the feed's order. `behind` is how many slots
+     the validator's last vote is behind the tip slot of the same feed, never below zero;
+     null when either is not reported. `root_behind` is the same for its root slot. */
+  function validatorRows(feed) {
+    if (!feed) return [];
+    const tip = feed.network.tip_slot;
+    const behind = function (slot) {
+      return tip === null || slot === null || slot === undefined ? null : Math.max(0, tip - slot);
+    };
+    return feed.network.validators.map(function (validator) {
+      const root = validator.root_slot === undefined ? null : validator.root_slot;
+      return { identity: validator.identity, vote_account: validator.vote_account, last_vote: validator.last_vote,
+        behind: behind(validator.last_vote), root_slot: root, root_behind: behind(root), active: validator.active };
+    });
+  }
+
+  function slotsBehind(behind) {
+    if (behind === null) return null;
+    if (behind === 0) return 'At the tip';
+    return formatInteger(behind) + (behind === 1 ? ' slot behind' : ' slots behind');
+  }
+
+  /* While the feed is live the list says who is voting; otherwise only what was recorded. */
+  function votingLabel(active, live) {
+    if (live) return active ? 'Voting' : 'Not voting';
+    return active ? 'Voting when last recorded' : 'Not voting when last recorded';
+  }
+
+  function validatorsSummary(feed, live) {
+    const total = feed ? feed.network.validators.length : 0;
+    if (total === 0) return TEXT.validatorsNone;
+    const count = formatInteger(countActiveValidators(feed)) + ' of ' + formatInteger(total);
+    const noun = total === 1 ? ' validator in the feed' : ' validators in the feed';
+    return live ? count + noun + (total === 1 ? ' is voting' : ' are voting') :
+      'Last recorded: ' + count + noun + (total === 1 ? ' was voting' : ' were voting');
+  }
+
+  /* The notice of a page that lists validators: the same states, worded for that list. */
+  function validatorsNotice(description) {
+    if (description.message === TEXT.paused) return TEXT.validatorsPaused;
+    if (description.message === TEXT.refreshFailed) return TEXT.validatorsRefreshFailed;
+    if (description.message === TEXT.unavailable) return TEXT.validatorsWaiting;
+    return description.message;
+  }
+
   /* ---------- recent window ---------- */
 
   /* Figures for the blocks held in the feed, oldest first in `series`. A block's gap is
@@ -331,7 +504,8 @@
     const stats = {
       blocks: 0, newest_slot: null, oldest_slot: null, transactions: 0, non_vote_transactions: 0,
       slots_per_block: null, skipped_slots: 0, unlinked_blocks: 0, max_gap: 0, max_transactions: 0,
-      block_time_ms: null, blocks_per_minute: null, series: []
+      block_time_ms: null, blocks_per_minute: null, payment_transactions: 0, executed_payments: 0,
+      marked_blocks: 0, max_payment_transactions: 0, series: []
     };
     const blocks = feed && Array.isArray(feed.blocks) ? feed.blocks : [];
     if (blocks.length === 0) return stats;
@@ -342,6 +516,16 @@
       const older = i + 1 < blocks.length ? blocks[i + 1] : null;
       const gap = block.parent_slot !== null && block.parent_slot < block.slot ? block.slot - block.parent_slot : null;
       const nonVote = Math.min(block.non_vote_tx_count, block.tx_count);
+      /* Payment counts are sums over the blocks the feed marks; an unmarked block adds nothing. */
+      const marked = typeof block.payment_tx_count === 'number' && typeof block.executed_payment_count === 'number';
+      const payment = marked ? Math.min(block.payment_tx_count, block.tx_count) : null;
+      const executed = marked ? Math.min(block.executed_payment_count, payment) : null;
+      if (marked) {
+        stats.marked_blocks += 1;
+        stats.payment_transactions += payment;
+        stats.executed_payments += executed;
+        if (payment > stats.max_payment_transactions) stats.max_payment_transactions = payment;
+      }
       if (gap !== null) {
         gapSum += gap;
         gapCount += 1;
@@ -354,7 +538,8 @@
       stats.transactions += block.tx_count;
       stats.non_vote_transactions += nonVote;
       if (block.tx_count > stats.max_transactions) stats.max_transactions = block.tx_count;
-      stats.series.push({ slot: block.slot, gap: gap, transactions: block.tx_count, non_vote: nonVote, block: block });
+      stats.series.push({ slot: block.slot, gap: gap, transactions: block.tx_count, non_vote: nonVote,
+        payment: payment, executed: executed, block: block });
     }
     stats.blocks = blocks.length;
     stats.newest_slot = blocks[0].slot;
@@ -576,6 +761,20 @@
     formatSlotTime: formatSlotTime,
     shortHash: shortHash,
     kindLabel: kindLabel,
+    PAYMENT_INSTRUCTIONS: PAYMENT_INSTRUCTIONS,
+    paymentStep: paymentStep,
+    isPaymentTransaction: isPaymentTransaction,
+    transactionLabel: transactionLabel,
+    describePayment: describePayment,
+    feedMarksPayments: feedMarksPayments,
+    filterTransactions: filterTransactions,
+    paymentsBasis: paymentsBasis,
+    paymentsNote: paymentsNote,
+    validatorRows: validatorRows,
+    slotsBehind: slotsBehind,
+    votingLabel: votingLabel,
+    validatorsSummary: validatorsSummary,
+    validatorsNotice: validatorsNotice,
     searchFeed: searchFeed,
     windowStats: windowStats,
     slotStrip: slotStrip,
@@ -598,7 +797,9 @@
   function start(doc, win) {
     const app = doc.querySelector('[data-explorer-app]');
     const statusRoots = Array.prototype.slice.call(doc.querySelectorAll('[data-zolana-status]'));
-    if (!app && statusRoots.length === 0) return;
+    const validatorRoots = Array.prototype.slice.call(doc.querySelectorAll('[data-zolana-validators]'));
+    const noticeNodes = Array.prototype.slice.call(doc.querySelectorAll('[data-zolana-notice]'));
+    if (!app && statusRoots.length === 0 && validatorRoots.length === 0 && noticeNodes.length === 0) return;
 
     const state = {
       feed: null,
@@ -611,7 +812,8 @@
       stats: windowStats(null),
       strip: slotStrip(null, STRIP_SLOTS),
       link: parseDeepLink(win.location.hash),
-      chartIndex: -1
+      chartIndex: -1,
+      paymentFilter: 'all'
     };
     const reducedMotion = typeof win.matchMedia === 'function' ? win.matchMedia('(prefers-reduced-motion: reduce)') : null;
     const tweens = [];
@@ -700,6 +902,9 @@
       if (name === 'window_transactions') return stats.blocks === 0 ? null : formatInteger(stats.transactions);
       if (name === 'window_non_vote') return stats.blocks === 0 ? null : formatInteger(stats.non_vote_transactions);
       if (name === 'window_skipped') return stats.blocks === 0 ? null : formatInteger(stats.skipped_slots);
+      if (name === 'window_payments') return stats.marked_blocks === 0 ? null : formatInteger(stats.executed_payments);
+      if (name === 'window_payments_basis') return paymentsBasis(stats);
+      if (name === 'validators_summary') return validatorsSummary(feed, live);
       if (name === 'window_summary') {
         if (stats.blocks === 0) return 'No blocks recorded';
         return formatInteger(stats.blocks) + (stats.blocks === 1 ? ' block, slot ' + formatInteger(stats.newest_slot) :
@@ -811,6 +1016,7 @@
         plural: plural,
         rows: new Map()
       };
+      if (view.empty) view.emptyText = view.empty.textContent;
       return view.body && view.wrap && view.empty && view.count && view.more ? view : null;
     }
 
@@ -826,8 +1032,10 @@
       intervalChart: byId('chart-interval'),
       intervalNote: byId('chart-interval-note'),
       transactionChart: byId('chart-transactions'),
+      transactionTitle: byId('chart-transactions-title'),
       transactionNote: byId('chart-transactions-note'),
       readout: byId('window-readout'),
+      paymentsNote: byId('payments-note'),
       blocks: listView('blocks', 'block', 'blocks'),
       transactions: listView('transactions', 'transaction', 'transactions')
     } : null;
@@ -1063,6 +1271,10 @@
         detailRow(list, 'Block height', optionalValue(item.block_height, formatInteger));
         detailRow(list, 'Transactions', textValue(formatInteger(item.tx_count)));
         detailRow(list, 'Non-vote transactions', textValue(formatInteger(item.non_vote_tx_count)));
+        if (item.payment_tx_count !== null) {
+          detailRow(list, 'Payment-program transactions', textValue(formatInteger(item.payment_tx_count)));
+          detailRow(list, 'Shielded payments executed', textValue(formatInteger(item.executed_payment_count)));
+        }
         detailRow(list, 'Skipped slots before this block', optionalValue(skipped, formatInteger));
         detailRow(list, 'Finalized', detail.finalized);
         const held = state.feed ? state.feed.transactions.filter(function (transaction) {
@@ -1083,7 +1295,14 @@
         detailRow(list, 'Block time', optionalValue(item.block_time, formatUtc));
         detailRow(list, 'Result', resultBadge(item.ok));
         detailRow(list, 'Fee', textValue(formatZol(item.fee) + ' test coins (' + formatInteger(item.fee) + ' lamports)'));
-        detailRow(list, 'Kind', textValue(kindLabel(item.kind)));
+        detailRow(list, 'Kind', textValue(transactionLabel(item)));
+        if (feedMarksPayments(state.feed) || Array.isArray(item.payment_instructions)) {
+          const step = paymentStep(item);
+          const sentence = describePayment(item);
+          detailRow(list, 'Payment program', textValue(step === 'not_marked' ? TEXT.paymentNotMarked :
+            step === 'none' ? TEXT.paymentNone : 'Instructions: ' + item.payment_instructions.join(', ')));
+          if (sentence !== null) detailRow(list, 'What the feed shows', textValue(sentence));
+        }
         if (!findBlock(item.slot)) detailRow(list, 'Block', textValue('Not among the blocks in the recent window'));
       }
       panel.textContent = '';
@@ -1158,7 +1377,14 @@
       row.appendChild(age.cell);
       row.appendChild(wrapCell(resultBadge(transaction.ok)));
       row.appendChild(el('td', '', formatZol(transaction.fee)));
-      row.appendChild(el('td', '', kindLabel(transaction.kind)));
+      /* A transaction of the payment program carries a mark before its kind. */
+      const step = paymentStep(transaction);
+      const kind = el('td', '', transactionLabel(transaction));
+      if (isPaymentTransaction(transaction)) {
+        kind.className = 'kind-payment';
+        row.setAttribute('data-payment', step);
+      }
+      row.appendChild(kind);
       return { row: row, age: age.node, time: transaction.block_time };
     }
 
@@ -1169,7 +1395,8 @@
 
     function transactionKey(transaction) {
       return [transaction.signature, transaction.slot, transaction.block_time, transaction.ok,
-        transaction.fee, transaction.kind].join('|');
+        transaction.fee, transaction.kind, paymentStep(transaction),
+        (transaction.payment_instructions || []).join('+')].join('|');
     }
 
     /* Keeps existing rows in place so that keyboard focus and text selection survive
@@ -1230,7 +1457,10 @@
       const series = stats.series;
       const offset = CHART_COLUMNS - series.length;
       const top = Math.max(2, stats.max_gap);
-      const most = stats.max_transactions;
+      /* With the payment filter on, the columns count payment-program transactions and the
+         bright part the payments executed; otherwise all transactions and the non-vote part. */
+      const filtered = state.paymentFilter === 'payments';
+      const most = filtered ? stats.max_payment_transactions : stats.max_transactions;
       const line = [];
       const kept = state.chartIndex;
       clearNode(page.intervalChart);
@@ -1255,14 +1485,22 @@
           line.push(x + ',' + y);
           line.push((x + 1) + ',' + y);
         }
+        const total = filtered ? (point.payment === null ? 0 : point.payment) : point.transactions;
+        const bright = filtered ? (point.executed === null ? 0 : point.executed) : point.non_vote;
         page.transactionChart.appendChild(shape('rect', { class: 'bar-base', x: x + 0.15, y: 37, width: 0.7, height: 3 }));
-        if (point.transactions > 0) {
-          const height = Math.max(3, point.transactions / most * 33);
+        if (total > 0) {
+          const height = Math.max(3, total / most * 31);
           page.transactionChart.appendChild(shape('rect', { class: 'bar-total', x: x + 0.15, y: 36 - height, width: 0.7, height: height }));
         }
-        if (point.non_vote > 0) {
-          const part = Math.max(3, point.non_vote / most * 33);
+        if (bright > 0) {
+          const part = Math.max(3, bright / most * 31);
           page.transactionChart.appendChild(shape('rect', { class: 'bar-part', x: x + 0.15, y: 36 - part, width: 0.7, height: part }));
+        }
+        /* A mark above the column of a block that holds payment-program transactions:
+           filled when one of them executed a payment, hollow otherwise. */
+        if (!filtered && point.payment !== null && point.payment > 0) {
+          page.transactionChart.appendChild(shape('rect', { class: point.executed > 0 ? 'bar-mark executed' : 'bar-mark',
+            x: x + 0.15, y: 0.5, width: 0.7, height: 2.5 }));
         }
       });
       flush();
@@ -1273,6 +1511,7 @@
       } else {
         setText(page.intervalNote, intervalText(1) + ' to ' + intervalText(stats.max_gap));
       }
+      setText(page.transactionTitle, filtered ? 'Payment-program transactions per block' : 'Transactions per block');
       if (series.length === 0) setText(page.transactionNote, '');
       else if (most === 0) setText(page.transactionNote, 'None in these blocks');
       else setText(page.transactionNote, 'Most in one block: ' + formatInteger(most));
@@ -1301,6 +1540,12 @@
       }
       text += ' \u00b7 ' + formatInteger(point.transactions) + (point.transactions === 1 ? ' transaction' : ' transactions');
       if (point.transactions > 0) text += ', ' + formatInteger(point.non_vote) + ' non-vote';
+      if (point.payment !== null) {
+        text += ' \u00b7 ' + formatInteger(point.payment) + ' payment-program';
+        if (point.payment > 0) {
+          text += ', ' + formatInteger(point.executed) + (point.executed === 1 ? ' shielded payment' : ' shielded payments') + ' executed';
+        }
+      }
       setText(page.readout, text);
     }
 
@@ -1338,8 +1583,42 @@
       const feed = state.feed;
       page.data.hidden = !feed;
       if (!feed) return;
+      const filtered = state.paymentFilter === 'payments';
+      page.transactions.singular = filtered ? 'payment-program transaction' : 'transaction';
+      page.transactions.plural = filtered ? 'payment-program transactions' : 'transactions';
+      setText(page.transactions.empty, filtered ? 'No payment-program transactions in the recent window.' :
+        page.transactions.emptyText);
       renderList(page.blocks, feed.blocks, state.blockLimit, blockKey, buildBlockRow, arriving);
-      renderList(page.transactions, feed.transactions, state.transactionLimit, transactionKey, buildTransactionRow, arriving);
+      renderList(page.transactions, filterTransactions(feed, state.paymentFilter), state.transactionLimit,
+        transactionKey, buildTransactionRow, arriving);
+    }
+
+    /* ----- payment marks: the figure's footnote and the filter ----- */
+
+    const filterGroups = app ? Array.prototype.slice.call(app.querySelectorAll('[data-payment-filters]')) : [];
+    const filterButtons = app ? Array.prototype.slice.call(app.querySelectorAll('[data-payment-filter]')) : [];
+
+    /* The filter is offered only while the feed marks payment-program transactions. */
+    function renderPaymentMarks() {
+      const stats = state.stats;
+      const marked = feedMarksPayments(state.feed);
+      if (!marked) state.paymentFilter = 'all';
+      app.setAttribute('data-payments', stats.blocks === 0 ? 'unknown' : stats.marked_blocks === 0 ? 'unmarked' : 'marked');
+      setText(page.paymentsNote, paymentsNote(stats));
+      filterGroups.forEach(function (group) { group.hidden = !marked; });
+      filterButtons.forEach(function (button) {
+        const pressed = button.getAttribute('data-payment-filter') === state.paymentFilter;
+        button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+      });
+    }
+
+    function setPaymentFilter(name) {
+      state.paymentFilter = name === 'payments' && feedMarksPayments(state.feed) ? 'payments' : 'all';
+      state.transactionLimit = PAGE_ROWS;
+      renderPaymentMarks();
+      renderData(false);
+      renderAges(nowSeconds());
+      renderCharts();
     }
 
     /* Block times come from the chain's own clock, which stands still while the
@@ -1365,19 +1644,20 @@
       });
     }
 
-    /* Rewritten only when the wording changes, so it is announced once. */
-    function renderNotice(description) {
-      const notice = page.notice;
+    /* Rewritten only when the wording changes, so it is announced once. `message` is the
+       sentence for this notice; the time of the last update follows it when there is one. */
+    function renderNotice(notice, description, message) {
+      const text = description.updatedAt === null ? message : message + ' Last updated ' + formatUtc(description.updatedAt) + '.';
       if (notice.getAttribute('data-tone') !== description.state) notice.setAttribute('data-tone', description.state);
-      if (notice.textContent === description.notice) return;
+      if (notice.textContent === text) return;
       notice.textContent = '';
       if (description.updatedAt === null) {
-        notice.textContent = description.notice;
+        notice.textContent = text;
         return;
       }
       const time = el('time', '', formatUtc(description.updatedAt));
       time.setAttribute('datetime', isoUtc(description.updatedAt));
-      notice.appendChild(doc.createTextNode(description.message + ' Last updated '));
+      notice.appendChild(doc.createTextNode(message + ' Last updated '));
       notice.appendChild(time);
       notice.appendChild(doc.createTextNode('.'));
     }
@@ -1420,7 +1700,10 @@
         if (state.feed) showMore(page.blocks, 'blockLimit', state.feed.blocks);
       });
       page.transactions.more.addEventListener('click', function () {
-        if (state.feed) showMore(page.transactions, 'transactionLimit', state.feed.transactions);
+        if (state.feed) showMore(page.transactions, 'transactionLimit', filterTransactions(state.feed, state.paymentFilter));
+      });
+      filterButtons.forEach(function (button) {
+        button.addEventListener('click', function () { setPaymentFilter(button.getAttribute('data-payment-filter')); });
       });
       [page.blocks, page.transactions].forEach(function (view) {
         view.body.addEventListener('animationend', function (event) {
@@ -1455,6 +1738,75 @@
         followLink();
       });
       renderCharts();
+    }
+
+    /* ----- validators the feed lists, on any page that carries the list ----- */
+
+    const validatorViews = validatorRoots.map(function (root) {
+      const view = { root: root, body: root.querySelector('[data-validators-body]'),
+        wrap: root.querySelector('[data-validators-wrap]'), empty: root.querySelector('[data-validators-empty]'),
+        rows: new Map() };
+      return view.body && view.wrap && view.empty ? view : null;
+    }).filter(Boolean);
+
+    /* Each cell carries its column name, which a narrow layout shows beside the value. */
+    function labelledCell(tag, label, className) {
+      const cell = el(tag, className || '');
+      cell.setAttribute('data-label', label);
+      return cell;
+    }
+
+    function buildValidatorRow(validator) {
+      const entry = { row: el('tr'), name: labelledCell('th', 'Identity'), vote: labelledCell('td', 'Vote account'),
+        lastVote: labelledCell('td', 'Last vote'), behind: labelledCell('td', 'Behind the tip'),
+        root: labelledCell('td', 'Root slot', 'validator-root'), voting: labelledCell('td', 'Voting'),
+        badge: el('span', 'badge'), account: el('span', 'identifier') };
+      entry.name.setAttribute('scope', 'row');
+      entry.name.appendChild(el('span', 'identifier', validator.identity));
+      entry.vote.appendChild(entry.account);
+      entry.voting.appendChild(entry.badge);
+      [entry.name, entry.vote, entry.lastVote, entry.behind, entry.root, entry.voting].forEach(function (cell) {
+        entry.row.appendChild(cell);
+      });
+      return entry;
+    }
+
+    /* Rows stay in place from one feed to the next; only their values change. The root
+       slot column is shown when the feed carries a root slot for at least one validator. */
+    function renderValidators(live) {
+      if (validatorViews.length === 0) return;
+      const rows = validatorRows(state.feed);
+      const withRoot = rows.some(function (row) { return row.root_slot !== null; });
+      validatorViews.forEach(function (view) {
+        const wanted = new Set();
+        rows.forEach(function (row, index) {
+          const key = row.identity + '|' + (row.vote_account === null ? '' : row.vote_account);
+          let entry = view.rows.get(key);
+          if (!entry) {
+            entry = buildValidatorRow(row);
+            view.rows.set(key, entry);
+          }
+          wanted.add(key);
+          setValue(entry.account, row.vote_account);
+          setValue(entry.lastVote, row.last_vote === null ? null : formatInteger(row.last_vote));
+          setValue(entry.behind, slotsBehind(row.behind));
+          setValue(entry.root, row.root_slot === null ? null : formatInteger(row.root_slot));
+          setText(entry.badge, votingLabel(row.active, live));
+          const tone = !live ? 'badge' : row.active ? 'badge verified' : 'badge failed';
+          if (entry.badge.className !== tone) entry.badge.className = tone;
+          if (view.body.children[index] !== entry.row) view.body.insertBefore(entry.row, view.body.children[index] || null);
+        });
+        view.rows.forEach(function (entry, key) {
+          if (!wanted.has(key)) {
+            if (entry.row.parentNode === view.body) view.body.removeChild(entry.row);
+            view.rows.delete(key);
+          }
+        });
+        view.root.setAttribute('data-root', withRoot ? 'shown' : 'absent');
+        view.wrap.hidden = rows.length === 0;
+        view.empty.hidden = rows.length !== 0;
+        setText(view.empty, state.feed ? TEXT.validatorsNone : TEXT.validatorsWaiting);
+      });
     }
 
     /* ----- strip of recent slots, on any page that carries one ----- */
@@ -1494,9 +1846,14 @@
       const seconds = nowSeconds();
       const description = describeState(state.feed, state.lastFetchOk, seconds);
       statusViews.forEach(function (view) { renderStatus(view, description, seconds); });
+      renderValidators(description.state === 'live');
+      noticeNodes.forEach(function (node) {
+        renderNotice(node, description, node.getAttribute('data-zolana-notice') === 'validators' ?
+          validatorsNotice(description) : description.message);
+      });
       if (pageReady) {
         app.setAttribute('data-state', description.state);
-        renderNotice(description);
+        renderNotice(page.notice, description, description.message);
         renderAges(seconds);
       }
     }
@@ -1528,6 +1885,7 @@
         state.strip = slotStrip(result.feed, STRIP_SLOTS);
         renderPulses();
         if (pageReady) {
+          renderPaymentMarks();
           renderData(true);
           renderCharts();
           refreshDetail();

@@ -1,6 +1,8 @@
 // Runs with `node --test clients/devnet-explorer/*.test.mjs`. Offline, Node built-ins only.
-// Tests the validation, formatting, state, search, recent-window and link functions of
-// explorer.js against the two sample feeds beside it, and a few rules about its source.
+// Tests the validation, formatting, state, search, recent-window, payment-mark, validator
+// and link functions of explorer.js against the sample feeds beside it, and a few rules
+// about its source. feed.sample.json and feed.paused.json are feeds that do not mark
+// payment-program transactions; feed.payments.json is the same window with the marks.
 // explorer.js is a plain browser script that also exports these functions when a CommonJS
 // module object is present, which is how it is loaded here: no document is needed.
 import assert from 'node:assert';
@@ -14,6 +16,7 @@ const explorer = createRequire(import.meta.url)(scriptPath);
 const source = fs.readFileSync(scriptPath, 'utf8');
 const liveText = fs.readFileSync(new URL('./feed.sample.json', import.meta.url), 'utf8');
 const pausedText = fs.readFileSync(new URL('./feed.paused.json', import.meta.url), 'utf8');
+const markedText = fs.readFileSync(new URL('./feed.payments.json', import.meta.url), 'utf8');
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -28,6 +31,21 @@ function load(text) {
 const live = load(liveText).feed;
 const paused = load(pausedText).feed;
 const rawLive = JSON.parse(liveText);
+const rawMarked = JSON.parse(markedText);
+const marked = load(markedText).feed;
+
+/* What the page holds for a row of a feed that does not mark payments: the row itself,
+   with "not known" in the place of each mark. */
+function blockWithoutMarks(block) {
+  return Object.assign({}, block, { payment_tx_count: null, executed_payment_count: null });
+}
+function transactionWithoutMarks(transaction) {
+  return Object.assign({}, transaction, { payment_instructions: null });
+}
+function validatorWithoutRoot(validator) {
+  return { identity: validator.identity, vote_account: validator.vote_account, last_vote: validator.last_vote,
+    root_slot: null, active: validator.active };
+}
 const SCOPE = 'Only the recent window is searchable for now.';
 const LINK_SCOPE = 'A link opens a block or transaction only while it is in the recent window.';
 
@@ -57,13 +75,23 @@ test('both fixtures validate with nothing skipped', function () {
 });
 
 test('validated fixtures keep every contract value', function () {
-  assert.deepStrictEqual(live.blocks, rawLive.blocks);
-  assert.deepStrictEqual(live.transactions, rawLive.transactions);
-  assert.deepStrictEqual(live.network, rawLive.network);
-  assert.deepStrictEqual(live.stats, rawLive.stats);
+  assert.deepStrictEqual(live.blocks, rawLive.blocks.map(blockWithoutMarks));
+  assert.deepStrictEqual(live.transactions, rawLive.transactions.map(transactionWithoutMarks));
+  assert.deepStrictEqual(live.network, Object.assign({}, rawLive.network,
+    { validators: rawLive.network.validators.map(validatorWithoutRoot) }));
+  assert.deepStrictEqual(live.stats, Object.assign({}, rawLive.stats,
+    { payments_since: null, payment_transactions_seen: null, executed_payments_seen: null }));
   assert.strictEqual(live.generated_at, rawLive.generated_at);
   assert.strictEqual(live.genesis_hash, rawLive.genesis_hash);
-  assert.deepStrictEqual(paused.network, JSON.parse(pausedText).network);
+  const rawPaused = JSON.parse(pausedText);
+  assert.deepStrictEqual(paused.network, Object.assign({}, rawPaused.network,
+    { validators: rawPaused.network.validators.map(validatorWithoutRoot) }));
+  /* A feed that marks payments is kept as it is: every mark is a contract value too. */
+  assert.deepStrictEqual(marked.blocks, rawMarked.blocks);
+  assert.deepStrictEqual(marked.transactions, rawMarked.transactions);
+  assert.deepStrictEqual(marked.network, rawMarked.network);
+  assert.deepStrictEqual(marked.stats, rawMarked.stats);
+  assert.strictEqual(load(markedText).skipped, 0);
 });
 
 test('lists are newest first', function () {
@@ -185,7 +213,7 @@ test('orders, de-duplicates and caps the lists', function () {
   feed.transactions.reverse();
   feed.transactions.push(clone(feed.transactions[3]));
   let result = explorer.validateFeed(feed);
-  assert.deepStrictEqual(result.feed.blocks, rawLive.blocks);
+  assert.deepStrictEqual(result.feed.blocks, rawLive.blocks.map(blockWithoutMarks));
   assert.strictEqual(result.feed.transactions.length, rawLive.transactions.length);
   assert.strictEqual(result.feed.transactions[0].slot, rawLive.transactions[0].slot);
   assert.strictEqual(result.skipped, 2);
@@ -538,7 +566,9 @@ function quietFeed() {
 
 test('new helpers are exported', function () {
   ['windowStats', 'slotStrip', 'stripSummary', 'describeSlotMiss', 'parseDeepLink', 'formatDeepLink',
-    'resolveDeepLink', 'inWindow', 'tweenValue', 'validatorsVoting']
+    'resolveDeepLink', 'inWindow', 'tweenValue', 'validatorsVoting', 'paymentStep', 'isPaymentTransaction',
+    'transactionLabel', 'describePayment', 'feedMarksPayments', 'filterTransactions', 'paymentsBasis', 'paymentsNote',
+    'validatorRows', 'slotsBehind', 'votingLabel', 'validatorsSummary', 'validatorsNotice']
     .forEach(function (name) { assert.strictEqual(typeof explorer[name], 'function', name); });
   assert.strictEqual(explorer.STRIP_SLOTS, 120);
 });
@@ -600,7 +630,8 @@ test('window statistics of a quiet window with one older transaction', function 
 test('window statistics of an empty, missing or malformed feed', function () {
   const empty = { blocks: 0, newest_slot: null, oldest_slot: null, transactions: 0, non_vote_transactions: 0,
     slots_per_block: null, skipped_slots: 0, unlinked_blocks: 0, max_gap: 0, max_transactions: 0,
-    block_time_ms: null, blocks_per_minute: null, series: [] };
+    block_time_ms: null, blocks_per_minute: null, payment_transactions: 0, executed_payments: 0,
+    marked_blocks: 0, max_payment_transactions: 0, series: [] };
   assert.deepStrictEqual(explorer.windowStats(null), empty);
   assert.deepStrictEqual(explorer.windowStats(undefined), empty);
   assert.deepStrictEqual(explorer.windowStats({}), empty);
@@ -797,6 +828,251 @@ test('validators voting is the active share of the validators in the feed', func
   feed.network.validators = [];
   assert.strictEqual(explorer.validatorsVoting(feed), null);
   assert.strictEqual(explorer.validatorsVoting(null), null);
+});
+
+/* ---------- payment-program transactions ---------- */
+
+test('a feed that does not mark payments is read as before, and the page can say so', function () {
+  [live, paused].forEach(function (feed) {
+    const stats = explorer.windowStats(feed);
+    assert.strictEqual(explorer.feedMarksPayments(feed), false);
+    assert.strictEqual(stats.marked_blocks, 0);
+    assert.strictEqual(stats.payment_transactions, 0);
+    assert.strictEqual(stats.executed_payments, 0);
+    assert.strictEqual(explorer.paymentsBasis(stats), 'Not marked in this feed');
+    assert.strictEqual(explorer.paymentsNote(stats), 'The feed does not mark which transactions are shielded payments.');
+    assert.deepStrictEqual(explorer.filterTransactions(feed, 'payments'), []);
+    assert.strictEqual(explorer.filterTransactions(feed, 'all'), feed.transactions);
+    feed.transactions.forEach(function (transaction) {
+      assert.strictEqual(explorer.paymentStep(transaction), 'not_marked');
+      assert.strictEqual(explorer.isPaymentTransaction(transaction), false);
+      assert.strictEqual(explorer.transactionLabel(transaction), explorer.kindLabel(transaction.kind));
+      assert.strictEqual(explorer.describePayment(transaction), null);
+    });
+    stats.series.forEach(function (point) {
+      assert.strictEqual(point.payment, null);
+      assert.strictEqual(point.executed, null);
+    });
+  });
+  assert.strictEqual(explorer.feedMarksPayments(null), false);
+  assert.strictEqual(explorer.paymentsBasis(explorer.windowStats(null)), 'Not marked in this feed');
+  assert.strictEqual(explorer.paymentsNote(explorer.windowStats(null)), '');
+  assert.deepStrictEqual(explorer.filterTransactions(null, 'payments'), []);
+});
+
+test('a feed that marks payments is counted over the blocks of the window', function () {
+  const stats = explorer.windowStats(marked);
+  assert.strictEqual(explorer.feedMarksPayments(marked), true);
+  assert.strictEqual(stats.marked_blocks, 120);
+  assert.strictEqual(stats.payment_transactions, 8);
+  assert.strictEqual(stats.executed_payments, 2);
+  assert.strictEqual(stats.max_payment_transactions, 2);
+  assert.strictEqual(stats.payment_transactions,
+    marked.blocks.reduce(function (sum, block) { return sum + block.payment_tx_count; }, 0));
+  assert.strictEqual(explorer.paymentsBasis(stats), 'Executed in this window\u2019s blocks, from 8 payment-program transactions');
+  assert.strictEqual(explorer.paymentsNote(stats), '');
+  /* The other figures of the window do not change with the marks. */
+  const plain = explorer.windowStats(live);
+  ['blocks', 'transactions', 'non_vote_transactions', 'skipped_slots', 'max_transactions', 'block_time_ms']
+    .forEach(function (name) { assert.strictEqual(stats[name], plain[name], name); });
+  const at = function (slot) { return stats.series.filter(function (point) { return point.slot === slot; })[0]; };
+  assert.deepStrictEqual([at(254809).payment, at(254809).executed], [2, 1]);
+  assert.deepStrictEqual([at(254867).payment, at(254867).executed], [1, 1]);
+  assert.deepStrictEqual([at(254853).payment, at(254853).executed], [1, 0]);
+  assert.deepStrictEqual([at(254870).payment, at(254870).executed], [0, 0]);
+  /* One payment-program transaction is worded in the singular. */
+  const one = clone(rawMarked);
+  one.blocks.forEach(function (block) {
+    block.payment_tx_count = block.slot === 254867 ? 1 : 0;
+    block.executed_payment_count = 0;
+  });
+  assert.strictEqual(explorer.paymentsBasis(explorer.windowStats(explorer.validateFeed(one).feed)),
+    'Executed in this window\u2019s blocks, from 1 payment-program transaction');
+});
+
+test('a window the feed marks only in part says how much of it is counted', function () {
+  const feed = clone(rawMarked);
+  feed.blocks.forEach(function (block, index) {
+    if (index >= 40) {
+      block.payment_tx_count = null;
+      block.executed_payment_count = null;
+    }
+  });
+  const result = explorer.validateFeed(feed);
+  assert.strictEqual(result.skipped, 0);
+  const stats = explorer.windowStats(result.feed);
+  assert.strictEqual(stats.marked_blocks, 40);
+  assert.strictEqual(stats.payment_transactions, 3);
+  assert.strictEqual(stats.executed_payments, 1);
+  assert.strictEqual(explorer.paymentsBasis(stats),
+    'Executed in the 40 of 120 blocks this feed marks, from 3 payment-program transactions');
+  assert.strictEqual(explorer.paymentsNote(stats),
+    'The feed marks payment-program transactions in 40 of the 120 blocks in this window.');
+  assert.strictEqual(explorer.feedMarksPayments(result.feed), true);
+});
+
+test('the mark of a transaction says what it did at the payment program', function () {
+  const step = function (instructions, ok) {
+    return explorer.paymentStep({ ok: ok !== false, kind: 'program', payment_instructions: instructions });
+  };
+  assert.strictEqual(step(['finalize']), 'executed');
+  assert.strictEqual(step(['finalize', 'close']), 'executed');
+  assert.strictEqual(step(['inline']), 'executed');
+  assert.strictEqual(step(['finalize', 'close'], false), 'failed');
+  assert.strictEqual(step(['inline'], false), 'failed');
+  assert.strictEqual(step(['initialize', 'write']), 'staging');
+  assert.strictEqual(step(['seal']), 'staging');
+  assert.strictEqual(step(['close']), 'staging');
+  assert.strictEqual(step(['write', 'unknown']), 'staging');
+  assert.strictEqual(step(['unknown']), 'other');
+  assert.strictEqual(step(['unknown'], false), 'other');
+  assert.strictEqual(step([]), 'none');
+  assert.strictEqual(step(null), 'not_marked');
+  assert.strictEqual(step(undefined), 'not_marked');
+  assert.strictEqual(explorer.paymentStep(null), 'not_marked');
+  assert.deepStrictEqual(explorer.PAYMENT_INSTRUCTIONS, ['initialize', 'write', 'seal', 'finalize', 'close', 'inline', 'unknown']);
+
+  const steps = marked.transactions.map(explorer.paymentStep);
+  const count = function (name) { return steps.filter(function (value) { return value === name; }).length; };
+  assert.deepStrictEqual([count('executed'), count('failed'), count('staging'), count('other'), count('none'), count('not_marked')],
+    [4, 1, 8, 1, 23, 0]);
+  assert.strictEqual(explorer.filterTransactions(marked, 'payments').length, 14);
+  assert.strictEqual(explorer.filterTransactions(marked, 'all').length, 37);
+  /* The filtered list keeps the order of the feed: newest first. */
+  const filtered = explorer.filterTransactions(marked, 'payments');
+  for (let i = 1; i < filtered.length; i += 1) assert.ok(filtered[i - 1].slot >= filtered[i].slot);
+
+  const labels = {};
+  marked.transactions.forEach(function (transaction) {
+    labels[explorer.paymentStep(transaction)] = explorer.transactionLabel(transaction);
+  });
+  assert.deepStrictEqual(labels, { executed: 'Shielded payment', failed: 'Shielded payment', staging: 'Payment staging',
+    other: 'Payment program', none: 'Program' });
+  assert.strictEqual(explorer.transactionLabel({ ok: true, kind: 'vote', payment_instructions: [] }), 'Vote');
+
+  const say = function (instructions, ok) {
+    return explorer.describePayment({ ok: ok !== false, kind: 'program', payment_instructions: instructions });
+  };
+  assert.match(say(['finalize', 'close']), /^This transaction executed a shielded payment\. The feed does not say whether it was a deposit, a private send or a withdrawal, and it carries no amount\.$/);
+  assert.match(say(['finalize'], false), /failed\. No payment was executed\.$/);
+  assert.match(say(['initialize', 'write']), /^A staging step: .* It executed no payment\.$/);
+  assert.match(say(['unknown']), /could not name\. It executed no payment\.$/);
+  assert.strictEqual(say([]), null);
+  assert.strictEqual(say(null), null);
+});
+
+test('malformed payment marks are skipped like any other malformed row', function () {
+  const blockCases = [
+    function (block) { block.payment_tx_count = '1'; },
+    function (block) { block.payment_tx_count = -1; },
+    function (block) { block.payment_tx_count = 1.5; },
+    function (block) { block.payment_tx_count = true; },
+    function (block) { block.payment_tx_count = null; },
+    function (block) { block.executed_payment_count = null; },
+    function (block) { delete block.executed_payment_count; },
+    function (block) { block.executed_payment_count = block.payment_tx_count + 1; },
+    function (block) { block.payment_tx_count = block.tx_count + 1; },
+    function (block) { block.executed_payment_count = {}; }
+  ];
+  blockCases.forEach(function (change, index) {
+    const feed = clone(rawMarked);
+    change(feed.blocks[3]);                          /* slot 254867: 5 transactions, 1 payment, 1 executed */
+    const result = explorer.validateFeed(feed);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.skipped, 1, 'block case ' + index);
+    assert.strictEqual(result.feed.blocks.length, 119);
+  });
+  const transactionCases = [
+    'finalize', 3, true, {}, ['deposit'], ['Finalize'], [3], [null], [['finalize']], ['close', 'finalize'],
+    ['write', 'write'], ['initialize', 'write', 'seal', 'finalize', 'close', 'inline', 'unknown', 'unknown']
+  ];
+  transactionCases.forEach(function (value, index) {
+    const feed = clone(rawMarked);
+    feed.transactions[0].payment_instructions = value;
+    const result = explorer.validateFeed(feed);
+    assert.strictEqual(result.skipped, 1, 'transaction case ' + index);
+    assert.strictEqual(result.feed.transactions.length, 36);
+  });
+  /* Every name in the feed's order is the longest list there is. */
+  const all = clone(rawMarked);
+  all.transactions[0].payment_instructions = explorer.PAYMENT_INSTRUCTIONS.slice();
+  assert.strictEqual(explorer.validateFeed(all).skipped, 0);
+  /* A validator with an impossible root slot is skipped; stats with half the counters are dropped. */
+  ['12', -1, 1.5, false].forEach(function (value) {
+    const feed = clone(rawMarked);
+    feed.network.validators[0].root_slot = value;
+    const result = explorer.validateFeed(feed);
+    assert.strictEqual(result.skipped, 1);
+    assert.strictEqual(result.feed.network.validators.length, 2);
+  });
+  [function (stats) { delete stats.payments_since; }, function (stats) { stats.executed_payments_seen = 15; },
+    function (stats) { stats.payment_transactions_seen = '14'; }].forEach(function (change) {
+    const feed = clone(rawMarked);
+    change(feed.stats);
+    assert.strictEqual(explorer.validateFeed(feed).feed.stats, null);
+  });
+  /* The page's own copy of a mark is not the feed's array. */
+  const feed = clone(rawMarked);
+  const result = explorer.validateFeed(feed);
+  feed.transactions[0].payment_instructions.push('unknown');
+  assert.deepStrictEqual(result.feed.transactions[0].payment_instructions, ['finalize', 'close']);
+});
+
+/* ---------- validators ---------- */
+
+test('validator rows carry what the feed reports and how far each vote is behind the tip', function () {
+  assert.deepStrictEqual(explorer.validatorRows(null), []);
+  const rows = explorer.validatorRows(live);
+  assert.strictEqual(rows.length, 3);
+  assert.deepStrictEqual(rows[0], { identity: rawLive.network.validators[0].identity,
+    vote_account: rawLive.network.validators[0].vote_account, last_vote: 254870, behind: 1, root_slot: null,
+    root_behind: null, active: true });
+  assert.deepStrictEqual(rows.map(function (row) { return row.behind; }), [1, 1, 2]);
+  /* With a feed that carries root slots the rows carry them as well. */
+  const withRoots = explorer.validatorRows(marked);
+  assert.deepStrictEqual(withRoots.map(function (row) { return [row.root_slot, row.root_behind]; }),
+    [[254839, 32], [254838, 33], [254837, 34]]);
+  /* A paused feed knows no tip: the last vote is shown, the distance is not. */
+  const stopped = explorer.validatorRows(paused);
+  assert.deepStrictEqual(stopped.map(function (row) { return [row.last_vote, row.behind, row.active]; }),
+    [[276518, null, false], [276518, null, false], [null, null, false]]);
+  assert.strictEqual(stopped[2].vote_account, null);
+  /* A vote the node reports above the tip of the same feed is not a negative distance. */
+  const ahead = clone(live);
+  ahead.network.validators[0].last_vote = ahead.network.tip_slot + 3;
+  assert.strictEqual(explorer.validatorRows(ahead)[0].behind, 0);
+});
+
+test('validator wording: distance, voting and the summary line', function () {
+  assert.strictEqual(explorer.slotsBehind(0), 'At the tip');
+  assert.strictEqual(explorer.slotsBehind(1), '1 slot behind');
+  assert.strictEqual(explorer.slotsBehind(1500), '1,500 slots behind');
+  assert.strictEqual(explorer.slotsBehind(null), null);
+  assert.strictEqual(explorer.votingLabel(true, true), 'Voting');
+  assert.strictEqual(explorer.votingLabel(false, true), 'Not voting');
+  assert.strictEqual(explorer.votingLabel(true, false), 'Voting when last recorded');
+  assert.strictEqual(explorer.votingLabel(false, false), 'Not voting when last recorded');
+  assert.strictEqual(explorer.validatorsSummary(live, true), '3 of 3 validators in the feed are voting');
+  assert.strictEqual(explorer.validatorsSummary(live, false), 'Last recorded: 3 of 3 validators in the feed were voting');
+  assert.strictEqual(explorer.validatorsSummary(paused, false), 'Last recorded: 0 of 3 validators in the feed were voting');
+  const one = clone(live);
+  one.network.validators.length = 1;
+  assert.strictEqual(explorer.validatorsSummary(one, true), '1 of 1 validator in the feed is voting');
+  assert.strictEqual(explorer.validatorsSummary(one, false), 'Last recorded: 1 of 1 validator in the feed was voting');
+  one.network.validators = [];
+  assert.strictEqual(explorer.validatorsSummary(one, true), 'The feed lists no validators.');
+  assert.strictEqual(explorer.validatorsSummary(null, false), 'The feed lists no validators.');
+});
+
+test('the notice of a validators list uses the same states as the explorer', function () {
+  const notice = function (feed, fetched, now) { return explorer.validatorsNotice(explorer.describeState(feed, fetched, now)); };
+  assert.strictEqual(notice(null, null, 0), '');
+  assert.strictEqual(notice(null, false, 0), 'Validator data is not available yet.');
+  assert.strictEqual(notice(live, true, live.generated_at + 5), '');
+  assert.strictEqual(notice(live, true, live.generated_at + 31), 'The network is paused. Showing the validators as last recorded.');
+  assert.strictEqual(notice(paused, true, paused.generated_at), 'The network is paused. Showing the validators as last recorded.');
+  assert.strictEqual(notice(live, false, live.generated_at + 31),
+    'Explorer data could not be refreshed. Showing the validators as last recorded.');
 });
 
 /* ---------- source rules ---------- */

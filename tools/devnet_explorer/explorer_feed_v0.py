@@ -11,6 +11,10 @@ One process that
   * serves exactly GET/HEAD /feed.json and /feed.sig over plain HTTP from a
     background thread, always from memory.
 
+The feed marks which transactions invoke the native payment program and names
+the instructions they carry (see payment_instructions). It reads the first
+byte of an instruction's data and nothing after it.
+
 Standard library only.
 """
 
@@ -87,8 +91,26 @@ MAX_WINDOW_BYTES = 2 * 1024 * 1024
 SKIPPED_SLOT_CODES = frozenset((-32001, -32007, -32009))
 PENDING_BLOCK_CODES = frozenset((-32004, -32014))
 
-TRANSACTION_FIELDS =("signature", "slot", "block_time", "ok", "fee", "kind")
+TRANSACTION_FIELDS = ("signature", "slot", "block_time", "ok", "fee", "kind", "payment_instructions")
 STAT_FIELDS = ("since", "blocks_seen", "transactions_seen", "non_vote_transactions_seen")
+# Counted from payments_since on, which is later than "since" in a window that
+# was saved before payments were counted.
+PAYMENT_STAT_FIELDS = ("payments_since", "payment_transactions_seen", "executed_payments_seen")
+
+# The native payment program (PROGRAM_ID in protocol/payments/src/native_accounts.rs).
+# It is a built-in of the validator at the same address on every network.
+PAYMENT_PROGRAM = "78kCqctsuUaj7kyV8xNVwXQrqovY3QtSytt4eCYApVUh"
+# Its instructions, by the first byte of the instruction data (docs/protocol-spec.md,
+# section 13.3). Any other first byte, or no data, is listed as "unknown".
+PAYMENT_INSTRUCTIONS = ("initialize", "write", "seal", "finalize", "close", "inline")
+UNKNOWN_INSTRUCTION = "unknown"
+PAYMENT_INSTRUCTION_ORDER = PAYMENT_INSTRUCTIONS + (UNKNOWN_INSTRUCTION,)
+# The two instructions that execute a payment; the others stage its bytes or
+# return the rent of a staging account.
+EXECUTING_INSTRUCTIONS = frozenset(("finalize", "inline"))
+MAX_INSTRUCTION_TEXT = 24000    # longest base58 instruction data read: above the largest inline frame
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+BASE58_DIGITS = {character: digit for digit, character in enumerate(BASE58_ALPHABET)}
 
 BlockVariant = collections.namedtuple("BlockVariant", "details commitment")
 # getBlock request shapes in order of preference; the first one that works is remembered.
@@ -271,26 +293,49 @@ def is_skipped_slot(error):
     return error.code in SKIPPED_SLOT_CODES or "skipped" in error.message.lower()
 
 
-def account_keys(entry):
-    """Yield every account address a getBlock transaction entry names."""
-    if not isinstance(entry, dict):
-        return
-    transaction = entry.get("transaction")
+def _meta(entry):
+    meta = entry.get("meta") if isinstance(entry, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def _message(entry):
+    transaction = entry.get("transaction") if isinstance(entry, dict) else None
     message = transaction.get("message") if isinstance(transaction, dict) else None
-    keys = message.get("accountKeys") if isinstance(message, dict) else None
+    return message if isinstance(message, dict) else None
+
+
+def account_key_table(entry):
+    """The account addresses of a getBlock transaction entry by index.
+
+    The message's own keys come first, then the addresses loaded from lookup
+    tables, writable before read-only: the order an instruction's program
+    index counts in. A key that cannot be read is None, so later ones keep
+    their index.
+    """
+    table = []
+    message = _message(entry)
+    keys = message.get("accountKeys") if message is not None else None
     for key in keys if isinstance(keys, list) else ():
         if isinstance(key, str):
-            yield key
+            table.append(key)
         elif isinstance(key, dict) and isinstance(key.get("pubkey"), str):
-            yield key["pubkey"]
-    meta = entry.get("meta")
-    loaded = meta.get("loadedAddresses") if isinstance(meta, dict) else None
+            table.append(key["pubkey"])
+        else:
+            table.append(None)
+    loaded = _meta(entry).get("loadedAddresses")
     if isinstance(loaded, dict):
         for group in ("writable", "readonly"):
             addresses = loaded.get(group)
             for key in addresses if isinstance(addresses, list) else ():
-                if isinstance(key, str):
-                    yield key
+                table.append(key if isinstance(key, str) else None)
+    return table
+
+
+def account_keys(entry):
+    """Yield every account address a getBlock transaction entry names."""
+    for key in account_key_table(entry):
+        if key is not None:
+            yield key
 
 
 def transaction_kind(entry):
@@ -304,16 +349,77 @@ def transaction_kind(entry):
     return "program"
 
 
-def _transaction_row(entry, slot, block_time, position, kind):
+def first_data_byte(data):
+    """The first byte of base58-encoded instruction data, or None if it cannot be read.
+
+    The whole text has to be decoded to find that byte; nothing else of the
+    result is kept or returned.
+    """
+    if not isinstance(data, str) or not 0 < len(data) <= MAX_INSTRUCTION_TEXT:
+        return None
+    number = 0
+    for start in range(0, len(data), 10):
+        part = 0
+        for character in data[start:start + 10]:
+            digit = BASE58_DIGITS.get(character)
+            if digit is None:
+                return None
+            part = part * 58 + digit
+        number = number * 58 ** len(data[start:start + 10]) + part
+    if data[0] == "1":
+        return 0                    # each leading "1" stands for one leading zero byte
+    return number >> (8 * ((number.bit_length() - 1) // 8))
+
+
+def payment_instructions(entry):
+    """Names of the payment-program instructions a getBlock transaction entry carries.
+
+    Only the top level of the transaction is read: the program refuses to be
+    invoked by another program. Each name appears once, in the order of
+    PAYMENT_INSTRUCTION_ORDER. The list is empty when the entry carries no such
+    instruction or its instructions cannot be read.
+
+    This is what the ledger shows to anyone who reads the block: the program
+    an instruction is addressed to and the first byte of its data. Nothing
+    after that byte is looked at, so no amount, account, nullifier, note
+    commitment or ciphertext reaches the feed from here.
+    """
+    message = _message(entry)
+    instructions = message.get("instructions") if message is not None else None
+    if not isinstance(instructions, list):
+        return []
+    table = account_key_table(entry)
+    found = set()
+    for instruction in instructions:
+        if not isinstance(instruction, dict):
+            continue
+        program = instruction.get("programId")
+        if not isinstance(program, str):
+            index = instruction.get("programIdIndex")
+            program = table[index] if type(index) is int and 0 <= index < len(table) else None
+        if program != PAYMENT_PROGRAM:
+            continue
+        opcode = first_data_byte(instruction.get("data"))
+        known = opcode is not None and opcode < len(PAYMENT_INSTRUCTIONS)
+        found.add(PAYMENT_INSTRUCTIONS[opcode] if known else UNKNOWN_INSTRUCTION)
+    return [name for name in PAYMENT_INSTRUCTION_ORDER if name in found]
+
+
+def executes_payment(instructions, ok):
+    """True for a transaction that succeeded and carries a finalize or inline instruction."""
+    return bool(ok) and any(name in EXECUTING_INSTRUCTIONS for name in instructions or ())
+
+
+def _transaction_row(entry, slot, block_time, position, kind, instructions):
     transaction = entry.get("transaction") if isinstance(entry, dict) else None
     signatures = transaction.get("signatures") if isinstance(transaction, dict) else None
     signature = as_text(signatures[0]) if isinstance(signatures, list) and signatures else None
     if signature is None:
         return None
-    meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
+    meta = _meta(entry)
     return {"signature": signature, "slot": slot, "block_time": block_time,
             "ok": meta.get("err") is None, "fee": as_count(meta.get("fee")) or 0,
-            "kind": kind, "position": position}
+            "kind": kind, "payment_instructions": instructions, "position": position}
 
 
 def parse_block(slot, data):
@@ -321,6 +427,10 @@ def parse_block(slot, data):
 
     Accepts both the "full" shape (a "transactions" list) and the "signatures"
     shape. Returns None when the reply does not look like a block.
+
+    The payment counts of a block cover every transaction in it, listed or
+    not. In the "signatures" shape they are None, and so is the
+    payment_instructions of each of its transactions: not known.
     """
     if not isinstance(data, dict):
         return None
@@ -334,28 +444,37 @@ def parse_block(slot, data):
     signatures = data.get("signatures")
     if isinstance(entries, list):
         tx_count = len(entries)
-        non_vote = 0
+        non_vote = payment = executed = 0
         for position, entry in enumerate(entries):
             kind = transaction_kind(entry)
             if kind != "vote":
                 non_vote += 1
-            row = _transaction_row(entry, slot, block_time, position, kind)
+            instructions = payment_instructions(entry)
+            if instructions:
+                payment += 1
+                # The same "ok" as the transaction's row: no error recorded.
+                if executes_payment(instructions, _meta(entry).get("err") is None):
+                    executed += 1
+            row = _transaction_row(entry, slot, block_time, position, kind, instructions)
             if row is not None:
                 (votes if kind == "vote" else program).append(row)
     elif isinstance(signatures, list):
         # No account keys and no execution metadata in this shape: every
         # transaction is listed as "program" with no error and no fee reported.
         tx_count = non_vote = len(signatures)
+        payment = executed = None
         for position, signature in enumerate(signatures):
             signature = as_text(signature)
             if signature is not None:
                 program.append({"signature": signature, "slot": slot, "block_time": block_time,
-                                "ok": True, "fee": 0, "kind": "program", "position": position})
+                                "ok": True, "fee": 0, "kind": "program", "payment_instructions": None,
+                                "position": position})
     else:
         return None
     row = {"slot": slot, "parent_slot": as_count(data.get("parentSlot")), "blockhash": blockhash,
            "block_time": block_time, "block_height": as_count(data.get("blockHeight")),
-           "tx_count": tx_count, "non_vote_tx_count": non_vote}
+           "tx_count": tx_count, "non_vote_tx_count": non_vote,
+           "payment_tx_count": payment, "executed_payment_count": executed}
     return ParsedBlock(row, list(program), list(votes))
 
 
@@ -369,7 +488,8 @@ def parse_validators(result):
             identity = as_text(entry.get("nodePubkey")) if isinstance(entry, dict) else None
             if identity is not None:
                 rows.append({"identity": identity, "vote_account": as_text(entry.get("votePubkey")),
-                             "last_vote": as_count(entry.get("lastVote")), "active": active})
+                             "last_vote": as_count(entry.get("lastVote")),
+                             "root_slot": as_count(entry.get("rootSlot")), "active": active})
     rows.sort(key=lambda row: (not row["active"], row["identity"]))
     return rows[:MAX_VALIDATORS]
 
@@ -575,7 +695,8 @@ class FeedPoller:
         self.program_txs = collections.deque(maxlen=MAX_TRANSACTIONS)      # oldest first
         self.vote_txs = collections.deque(maxlen=VOTE_FILL_TARGET)         # oldest first
         self.stats = {"since": int(now), "blocks_seen": 0, "transactions_seen": 0,
-                      "non_vote_transactions_seen": 0}
+                      "non_vote_transactions_seen": 0, "payments_since": int(now),
+                      "payment_transactions_seen": 0, "executed_payments_seen": 0}
         self.network = {"tip_slot": None, "finalized_slot": None, "block_height": None,
                         "slot_time_ms": None, "last_block_at": None, "validators": []}
         self.next_slot = None
@@ -599,6 +720,9 @@ class FeedPoller:
         self.stats["blocks_seen"] += 1
         self.stats["transactions_seen"] += row["tx_count"]
         self.stats["non_vote_transactions_seen"] += row["non_vote_tx_count"]
+        if row["payment_tx_count"] is not None:
+            self.stats["payment_transactions_seen"] += row["payment_tx_count"]
+            self.stats["executed_payments_seen"] += row["executed_payment_count"]
 
     # -- start and stop ----------------------------------------------------
 
@@ -623,7 +747,7 @@ class FeedPoller:
             log("window-ignored", reason=type(exc).__name__)
             return False
         try:
-            self._restore(json.loads(raw))
+            self._restore(json.loads(raw), now)
         except (ValueError, TypeError, KeyError, RecursionError):
             log("window-ignored", reason="not a valid window file")
             self._start_clean(now)
@@ -632,7 +756,7 @@ class FeedPoller:
         log("window-loaded", blocks=len(self.blocks), genesis=self.genesis_hash)
         return True
 
-    def _restore(self, data):
+    def _restore(self, data, now):
         if not isinstance(data, dict) or data.get("format") != WINDOW_FORMAT:
             raise ValueError("unknown window format")
         genesis = data["genesis_hash"]
@@ -645,7 +769,13 @@ class FeedPoller:
         program = [_restore_transaction(row) for row in data["transactions"]][-MAX_TRANSACTIONS:]
         votes = [_restore_transaction(row) for row in data["votes"]][-VOTE_FILL_TARGET:]
         stats = {name: as_count(data["stats"][name]) for name in STAT_FIELDS}
-        if None in stats.values():
+        if any(name in data["stats"] for name in PAYMENT_STAT_FIELDS):
+            stats.update((name, as_count(data["stats"][name])) for name in PAYMENT_STAT_FIELDS)
+        else:
+            # Saved before payments were counted: the counters start now, and the
+            # saved blocks and transactions stay marked "not known".
+            stats.update(payments_since=int(now), payment_transactions_seen=0, executed_payments_seen=0)
+        if None in stats.values() or stats["executed_payments_seen"] > stats["payment_transactions_seen"]:
             raise ValueError("bad stats")
         saved = data["network"]
         slot_time = saved["slot_time_ms"]
@@ -999,9 +1129,28 @@ def _restore_block(row):
     non_vote = as_count(row["non_vote_tx_count"])
     if None in (slot, blockhash, tx_count, non_vote):
         raise ValueError("bad block row")
+    # Both payment counts or neither: a row saved before payments were counted has neither.
+    payment = row.get("payment_tx_count")
+    executed = row.get("executed_payment_count")
+    if (payment is None) != (executed is None):
+        raise ValueError("bad block row")
+    if payment is not None and (as_count(payment) is None or as_count(executed) is None
+                                or not executed <= payment <= tx_count):
+        raise ValueError("bad block row")
     return {"slot": slot, "parent_slot": as_count(row["parent_slot"]), "blockhash": blockhash,
             "block_time": as_count(row["block_time"]), "block_height": as_count(row["block_height"]),
-            "tx_count": tx_count, "non_vote_tx_count": non_vote}
+            "tx_count": tx_count, "non_vote_tx_count": non_vote,
+            "payment_tx_count": payment, "executed_payment_count": executed}
+
+
+def _restore_instructions(value):
+    """None (not known), or instruction names, each once, in the order the feed lists them."""
+    if value is None:
+        return None
+    if (not isinstance(value, list) or any(name not in PAYMENT_INSTRUCTION_ORDER for name in value)
+            or value != [name for name in PAYMENT_INSTRUCTION_ORDER if name in value]):
+        raise ValueError("bad payment instructions")
+    return list(value)
 
 
 def _restore_transaction(row):
@@ -1012,7 +1161,9 @@ def _restore_transaction(row):
     if None in (signature, slot, fee, position) or type(row["ok"]) is not bool or row["kind"] not in ("vote", "program"):
         raise ValueError("bad transaction row")
     return {"signature": signature, "slot": slot, "block_time": as_count(row["block_time"]),
-            "ok": row["ok"], "fee": fee, "kind": row["kind"], "position": position}
+            "ok": row["ok"], "fee": fee, "kind": row["kind"],
+            "payment_instructions": _restore_instructions(row.get("payment_instructions")),
+            "position": position}
 
 
 def _restore_validator(row):
@@ -1020,7 +1171,8 @@ def _restore_validator(row):
     if identity is None or type(row["active"]) is not bool:
         raise ValueError("bad validator row")
     return {"identity": identity, "vote_account": as_text(row["vote_account"]),
-            "last_vote": as_count(row["last_vote"]), "active": row["active"]}
+            "last_vote": as_count(row["last_vote"]), "root_slot": as_count(row.get("root_slot")),
+            "active": row["active"]}
 
 
 # --------------------------------------------------------------------------

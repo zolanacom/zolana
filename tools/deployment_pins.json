@@ -9,6 +9,7 @@
   "tools/devnet_explorer/explorer_feed_v0.py": {
    "pins": [
     "/var/lib/zolana-explorer-feed-v0",
+    "78kCqctsuUaj7kyV8xNVwXQrqovY3QtSytt4eCYApVUh",
     "Vote111111111111111111111111111111111111111",
     "e111111111111111111111111111111111111111"
    ],
@@ -420,7 +421,7 @@
   "acceptance-rig": "Source directories on the hosts of one acceptance run.",
   "accepted-source": "The accepted service source. Two startup wrappers and their tests bind its exact bytes, so it cannot be edited. native_network_service.py runs it for any description.",
   "copy-record": "The SHA-256 values in the protocol copy guard's allow-list. They identify reviewed source text and patches, not an installation.",
-  "explorer": "The explorer feed and puller are installed on their own and take their settings from their unit files; not in the description yet. The feed also names the vote program, which is the same on every network.",
+  "explorer": "The explorer feed and puller are installed on their own and take their settings from their unit files; not in the description yet. The feed also names the vote program and the payment program, which are the same on every network.",
   "installed-alone": "Installed without its sibling modules (a single sealed file or an exact file list), so the built-in values stay in the file. The tool reads its own fields of a description named by ZOLANA_DEPLOYMENT, and deployment_test.py holds the built-in values equal to the built-in description.",
   "local-macos-service": "The local macOS validator service and its acceptance tools. Its install root, account and label are not in the description yet.",
   "macos-pilot": "The macOS invite pilot installer and host plan. Not in the description yet.",

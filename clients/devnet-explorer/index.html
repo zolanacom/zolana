@@ -26,13 +26,15 @@
         <div><dt>Transactions</dt><dd data-zolana-field="window_transactions">—</dd><dd class="basis">In this window’s blocks</dd></div>
         <div><dt>Non-vote transactions</dt><dd data-zolana-field="window_non_vote">—</dd><dd class="basis">In this window’s blocks</dd></div>
         <div><dt>Skipped slots</dt><dd data-zolana-field="window_skipped">—</dd><dd class="basis">Slots in this window without a block</dd></div>
+        <div class="payment-figure"><dt>Shielded payments</dt><dd data-zolana-field="window_payments">—</dd><dd class="basis" data-zolana-field="window_payments_basis">Executed in this window’s blocks</dd></div>
       </dl>
       <div class="window-charts" id="window-charts" role="group" tabindex="0" aria-label="Charts of the recent window, one column per block. Use the left and right arrow keys to read one block and Enter to open it.">
         <div class="window-chart"><p class="chart-label"><span>Block interval</span><span class="chart-note" id="chart-interval-note"></span></p><svg class="chart" id="chart-interval" viewBox="0 0 120 40" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg></div>
-        <div class="window-chart"><p class="chart-label"><span>Transactions per block</span><span class="chart-note" id="chart-transactions-note"></span></p><svg class="chart" id="chart-transactions" viewBox="0 0 120 40" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg></div>
+        <div class="window-chart"><p class="chart-label"><span id="chart-transactions-title">Transactions per block</span><span class="chart-note" id="chart-transactions-note"></span></p><svg class="chart" id="chart-transactions" viewBox="0 0 120 40" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg></div>
       </div>
       <p class="window-readout" id="window-readout" role="status"></p>
-      <p class="window-footnote">Block interval is the number of slots since a block’s parent, multiplied by the average slot time in the feed; it is not measured block by block. The measured figures are shown only while the network is live. The feed does not mark which transactions are shielded payments.</p>
+      <div class="payment-filter" role="group" aria-label="Transactions shown in the chart and in the list" data-payment-filters hidden><span class="payment-filter-label">Show</span><button type="button" class="filter-button" data-payment-filter="all" aria-pressed="true">All transactions</button><button type="button" class="filter-button" data-payment-filter="payments" aria-pressed="false">Payment program only</button></div>
+      <p class="window-footnote">Block interval is the number of slots since a block’s parent, multiplied by the average slot time in the feed; it is not measured block by block. The measured figures are shown only while the network is live. A shielded payment is counted when a transaction that succeeded carries the payment program’s finalize or inline instruction, the two that execute a payment; a mark above a column of the transactions chart shows a block with payment-program transactions. The feed names the instructions and nothing else about a payment: not whether it is a deposit, a private send or a withdrawal, and no amount. <span id="payments-note"></span></p>
     </section>
     <div class="explorer-columns" id="explorer-data" hidden>
       <div class="explorer-list">
@@ -43,7 +45,7 @@
         <button type="button" class="load-more" id="blocks-more" hidden>Show more<span class="sr-only"> blocks</span></button>
       </div>
       <div class="explorer-list">
-        <h2 class="subheading" id="transactions-title">Latest transactions</h2>
+        <div class="list-heading"><h2 class="subheading" id="transactions-title">Latest transactions</h2><div class="payment-filter" role="group" aria-label="Transactions shown in the list and in the chart" data-payment-filters hidden><button type="button" class="filter-button" data-payment-filter="all" aria-pressed="true">All</button><button type="button" class="filter-button" data-payment-filter="payments" aria-pressed="false">Payment program</button></div></div>
         <div class="table-wrap" id="transactions-wrap" role="region" aria-labelledby="transactions-title" tabindex="0"><table class="explorer-table explorer-table-wide"><caption class="sr-only">Latest transactions, newest first</caption><thead><tr><th scope="col">Signature</th><th scope="col">Slot</th><th scope="col">Age</th><th scope="col">Result</th><th scope="col">Fee (test coins)</th><th scope="col">Kind</th></tr></thead><tbody id="transactions-body"></tbody></table></div>
         <p class="explorer-empty" id="transactions-empty" hidden>No transactions have been recorded yet.</p>
         <p class="explorer-count" id="transactions-count"></p>
