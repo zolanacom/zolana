@@ -145,6 +145,8 @@ Runbooks describe how to run one tool or procedure. Most were written for local
 rehearsals on one development machine, so amounts, limits and paths in them are
 development values.
 
+- **Protocol:** [specification of the implemented formats and rules](docs/protocol-spec.md)
+  and its [test vectors](protocol/payments/tests/vectors/README.md).
 - **Local network and wallets:** [validators](docs/local-validator-runbook.md),
   [command-line wallet](docs/local-wallet-runbook.md),
   [wallet UI](docs/local-wallet-ui-runbook.md),

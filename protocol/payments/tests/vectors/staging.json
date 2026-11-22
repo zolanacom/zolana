@@ -1,0 +1,441 @@
+{
+  "format": "zolana-protocol-vectors/staging/1",
+  "max_payload_bytes": 16384,
+  "max_chunk_bytes": 768,
+  "header_bytes": 96,
+  "account_bytes": 16480,
+  "digest_personalization": "NativeStageV1!!!",
+  "payload_digests": [
+    {
+      "input_hex": "",
+      "digest": "29d7be4aaff67d6fbc544595c5f8d664dcabf9c02a693bfbe961e6f3cdc25f22"
+    },
+    {
+      "input_hex": "616263",
+      "digest": "2ed5ef4ba8fb7fb8ac3b32bc5f59dbf6514595beb190f1c690f9db351b73167d"
+    },
+    {
+      "input_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "digest": "1946e9e47ace7659180f1ac31678a9886911e7cc090814c0e87b67ab8e9386d7"
+    }
+  ],
+  "buffer": {
+    "payment": "send",
+    "sponsor": "97caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe",
+    "length": 9222,
+    "digest": "261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed4",
+    "expiry": 3100,
+    "steps": [
+      {
+        "operation": "initialize",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000000000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 0,
+        "account_blake2b_256": "5d84c3c90b122ca916eebf1a446f9f04ba68b517d41f7649dfb6d055bda9cea4"
+      },
+      {
+        "operation": "seal before any write",
+        "result": "InvalidAccountData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000000000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 0,
+        "account_blake2b_256": "5d84c3c90b122ca916eebf1a446f9f04ba68b517d41f7649dfb6d055bda9cea4"
+      },
+      {
+        "operation": "write at offset 1",
+        "result": "InvalidInstructionData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000000000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 0,
+        "account_blake2b_256": "5d84c3c90b122ca916eebf1a446f9f04ba68b517d41f7649dfb6d055bda9cea4"
+      },
+      {
+        "operation": "write of no bytes",
+        "result": "InvalidInstructionData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000000000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 0,
+        "account_blake2b_256": "5d84c3c90b122ca916eebf1a446f9f04ba68b517d41f7649dfb6d055bda9cea4"
+      },
+      {
+        "operation": "write of 769 bytes",
+        "result": "InvalidInstructionData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000000000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 0,
+        "account_blake2b_256": "5d84c3c90b122ca916eebf1a446f9f04ba68b517d41f7649dfb6d055bda9cea4"
+      },
+      {
+        "operation": "write 768 bytes at offset 0",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000030000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 768,
+        "account_blake2b_256": "058594b42e4d5ab1ffe3fe1bfd77a011da735a9afe66a4e56f8432fa2b0a6935"
+      },
+      {
+        "operation": "write again at offset 0",
+        "result": "InvalidInstructionData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000030000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 768,
+        "account_blake2b_256": "058594b42e4d5ab1ffe3fe1bfd77a011da735a9afe66a4e56f8432fa2b0a6935"
+      },
+      {
+        "operation": "payload before sealing",
+        "result": "InvalidAccountData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000030000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 768,
+        "account_blake2b_256": "058594b42e4d5ab1ffe3fe1bfd77a011da735a9afe66a4e56f8432fa2b0a6935"
+      },
+      {
+        "operation": "seal before the last write",
+        "result": "InvalidAccountData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000030000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 768,
+        "account_blake2b_256": "058594b42e4d5ab1ffe3fe1bfd77a011da735a9afe66a4e56f8432fa2b0a6935"
+      },
+      {
+        "operation": "write 768 bytes at offset 768",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000060000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 1536,
+        "account_blake2b_256": "22d70c01e6d9d3b2354ed472f850c834e1dd1bd3807f382f7e3b0573b7c789d3"
+      },
+      {
+        "operation": "write 768 bytes at offset 1536",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000090000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 2304,
+        "account_blake2b_256": "a3417eedf5cefd1dfb4e407dc32c45675825eb452b7ced64c92c45444778cda5"
+      },
+      {
+        "operation": "write 768 bytes at offset 2304",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe06240000000c0000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 3072,
+        "account_blake2b_256": "4e27f073cfadcd4b96b18f644c5c88e1cf253f5ca2915d50326d96f7e87ec26a"
+      },
+      {
+        "operation": "write 768 bytes at offset 3072",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe06240000000f0000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 3840,
+        "account_blake2b_256": "bddba75b155f00f902dc7bded0e22bed37c7d6ddc248cf8c45e506d46433b552"
+      },
+      {
+        "operation": "write 768 bytes at offset 3840",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000120000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 4608,
+        "account_blake2b_256": "a6833ba755d623a1ac42af356f528195113a7264a055d97e22e60d37512c24ab"
+      },
+      {
+        "operation": "write 768 bytes at offset 4608",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000150000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 5376,
+        "account_blake2b_256": "865c64e2f9bd2c12e523c2a5a09eae086621cc1a76da0e804e8a07f7ab05cccd"
+      },
+      {
+        "operation": "write 768 bytes at offset 5376",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000180000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 6144,
+        "account_blake2b_256": "25d1c2e42bc31aa39e6e87e251eaa5175fe4952fb1ff27e6261becfdf9b4875c"
+      },
+      {
+        "operation": "write 768 bytes at offset 6144",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe06240000001b0000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 6912,
+        "account_blake2b_256": "c72db26e7d88cc21493d9a99eea32f117cc4922acfb7e92b84040c1a3065009c"
+      },
+      {
+        "operation": "write 768 bytes at offset 6912",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe06240000001e0000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 7680,
+        "account_blake2b_256": "8e86a56fbc02e9efbc8bd4f178c58572a3e0807cfae3a95aad6955578554d7f3"
+      },
+      {
+        "operation": "write 768 bytes at offset 7680",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000210000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 8448,
+        "account_blake2b_256": "a680461db947296a399eb83de2d29b2532c8aecd2ec358153c348316a6243c12"
+      },
+      {
+        "operation": "write 768 bytes at offset 8448",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000000240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 9216,
+        "account_blake2b_256": "958f16745bdfdb3ff0d61638316ceb860ab4500340a31aeca0c57a7dd058e2c9"
+      },
+      {
+        "operation": "write 6 bytes at offset 9216",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "f372518cb939c31a3798351b4b1fd44bc38cffac2b4a0a31ce028c8678448aff"
+      },
+      {
+        "operation": "write past the stated length",
+        "result": "InvalidInstructionData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000000000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "f372518cb939c31a3798351b4b1fd44bc38cffac2b4a0a31ce028c8678448aff"
+      },
+      {
+        "operation": "seal",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000100000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "7e88a3f034de2430acbb9f47ecb6e4eaf1507a5f9908e476bb8b0b30b8efe7fc"
+      },
+      {
+        "operation": "seal again",
+        "result": "InvalidAccountData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000100000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "7e88a3f034de2430acbb9f47ecb6e4eaf1507a5f9908e476bb8b0b30b8efe7fc"
+      },
+      {
+        "operation": "write after sealing",
+        "result": "InvalidInstructionData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000100000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "7e88a3f034de2430acbb9f47ecb6e4eaf1507a5f9908e476bb8b0b30b8efe7fc"
+      },
+      {
+        "operation": "consume",
+        "result": "ok",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000300000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "46e192fc9741ece7e151fdaf7331c67d565516e589259e6fb5a4c4569ea773f2"
+      },
+      {
+        "operation": "consume again",
+        "result": "InvalidAccountData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000300000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "46e192fc9741ece7e151fdaf7331c67d565516e589259e6fb5a4c4569ea773f2"
+      },
+      {
+        "operation": "payload after consuming",
+        "result": "InvalidAccountData",
+        "header_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0624000006240000261b0a57280462acf924a30a55e4a7637ef1d9cff926152b50acaf2b22561ed41c0c0000000000000300000000000000",
+        "payload_bytes_present": 9222,
+        "account_blake2b_256": "46e192fc9741ece7e151fdaf7331c67d565516e589259e6fb5a4c4569ea773f2"
+      }
+    ]
+  },
+  "seal_with_other_bytes": "InvalidAccountData",
+  "initializations": [
+    {
+      "name": "length of zero",
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "length of 16,384",
+      "result": "ok"
+    },
+    {
+      "name": "length of 16,385",
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "account one byte short",
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "account with a non-zero byte",
+      "result": "InvalidAccountData"
+    }
+  ],
+  "stored_bases": {
+    "sealed four-byte buffer": {
+      "bytes": 16480,
+      "prefix_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0400000004000000ea95cd28225e9b080e92e261fcbdfe95d847d3bca2ebefe0799f6679c02eb9321c0c000000000000010000000000000007070707",
+      "blake2b_256": "57b5f9ea475ef908f1bd88c8df62fa33b61097a632cab47058d52325db5c95cc"
+    },
+    "unsealed four-byte buffer": {
+      "bytes": 16480,
+      "prefix_hex": "4e4255463030303197caf30c06291c5839c32ecb767c0512e6e5d75ff18341613d89d846cd2662fe0400000004000000ea95cd28225e9b080e92e261fcbdfe95d847d3bca2ebefe0799f6679c02eb9321c0c000000000000000000000000000007070707",
+      "blake2b_256": "f0b570314dc1c3e90c159116e84f251bd05c3cedc99f3506f3aed1c743176a56"
+    }
+  },
+  "stored_cases": [
+    {
+      "name": "unchanged",
+      "base": "sealed four-byte buffer",
+      "edits": [],
+      "result": "ok"
+    },
+    {
+      "name": "unsealed unchanged",
+      "base": "unsealed four-byte buffer",
+      "edits": [],
+      "result": "ok"
+    },
+    {
+      "name": "tag changed",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 0,
+          "hex": "4e42554630303032"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "one byte short",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "truncate",
+          "to": 16479
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "state 2",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 88,
+          "hex": "02"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "state 3",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 88,
+          "hex": "03"
+        }
+      ],
+      "result": "ok"
+    },
+    {
+      "name": "state 4",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 88,
+          "hex": "04"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "reserved byte set",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 95,
+          "hex": "01"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "length of zero",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 40,
+          "hex": "00000000"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "length above the limit",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 40,
+          "hex": "01400000"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "received above the length",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 44,
+          "hex": "05000000"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "sealed with bytes missing",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 44,
+          "hex": "03000000"
+        },
+        {
+          "op": "replace",
+          "at": 99,
+          "hex": "00"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "byte after the received bytes",
+      "base": "unsealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 100,
+          "hex": "01"
+        }
+      ],
+      "result": "InvalidAccountData"
+    },
+    {
+      "name": "sealed with another digest stored",
+      "base": "sealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 48,
+          "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "result": "ok"
+    },
+    {
+      "name": "unsealed with two bytes received",
+      "base": "unsealed four-byte buffer",
+      "edits": [
+        {
+          "op": "replace",
+          "at": 44,
+          "hex": "02000000"
+        },
+        {
+          "op": "replace",
+          "at": 98,
+          "hex": "0000"
+        }
+      ],
+      "result": "ok"
+    }
+  ]
+}
