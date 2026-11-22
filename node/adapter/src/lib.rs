@@ -38,6 +38,12 @@ pub const INLINE_PAYMENT_ACTIVATION_ID: Pubkey = Pubkey::new_from_array([
     229, 76, 97, 21, 3, 87, 217, 161, 55, 209,
 ]);
 
+/// Enables explicitly initialized NPOOL004 state; never migrates NPOOL003.
+pub const SLOT_ANCHOR_ACTIVATION_ID: Pubkey = Pubkey::new_from_array([
+    196, 47, 61, 8, 73, 55, 102, 89, 124, 17, 171, 200, 51, 88, 71, 95, 72, 43, 189, 112, 141, 91,
+    229, 76, 97, 21, 3, 87, 217, 161, 55, 209,
+]);
+
 pub fn id() -> Pubkey {
     ID
 }

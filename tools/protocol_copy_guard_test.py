@@ -20,10 +20,19 @@ import reconstruct_native_candidate as candidate
 # workspace copy gained two pool-state rules that the plan's copy does not
 # have. The proposed patch below carries the same rules for the candidate; with
 # it applied the two files differ in 7 and 186 lines again.
+#
+# The two program files were (10, 7, "behaviour") and (287, 25, "behaviour")
+# in that review. They were reviewed again when the workspace program gained
+# the slot-anchor rule and its binding file (decision 0043). Their class fell,
+# because the rule is now the same in both programs. Three counts rose,
+# because the workspace text names the functions of its binding file where the
+# candidate copy names its runtime's interfaces. The difference in behaviour
+# that remains is in the binding file, which was added below with two test
+# files; finalization.rs fell from "behaviour" to "refactor".
 REVIEWED_DIFFERENCES = {
-    "node/adapter/src/lib.rs": (10, 7, "behaviour"),
+    "node/adapter/src/lib.rs": (5, 8, "refactor"),
     "node/adapter/src/nullifiers.rs": (10, 3, "refactor"),
-    "node/adapter/src/processor.rs": (287, 25, "behaviour"),
+    "node/adapter/src/processor.rs": (293, 45, "refactor"),
     "node/adapter/src/staging.rs": (80, 18, "refactor"),
     "protocol/payments/src/envelope.rs": (0, 1, "refactor"),
     "protocol/payments/src/lib.rs": (0, 1, "refactor"),
@@ -31,7 +40,10 @@ REVIEWED_DIFFERENCES = {
     "protocol/payments/src/wire.rs": (5, 11, "refactor"),
 }
 REVIEWED_WORKSPACE_ONLY = {
-    "node/adapter/src/processor/finalization.rs": "behaviour",
+    "node/adapter/src/processor/finalization.rs": "refactor",
+    "node/adapter/src/processor/runtime_features.rs": "behaviour",
+    "node/adapter/src/processor/runtime_features_tests.rs": "refactor",
+    "node/adapter/src/processor/slot_anchor_tests.rs": "refactor",
     "protocol/payments/src/native_accounts.rs": "refactor",
 }
 REVIEWED_CANDIDATE_ONLY = {}

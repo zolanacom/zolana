@@ -4,8 +4,15 @@
 //! The Bank commits public transfers, permanent nullifiers, pool state and staged-payload
 //! consumption together. Helpers release each account borrow before the next
 //! phase or a native System Program invocation.
+//!
+//! A pool in the `NPOOL004` format is refused unless the `native_slot_anchors`
+//! feature is active. With it, a payment may name the root of a completed slot
+//! of the last 512 slots, `PoolState::accepted_roots`. This program records no
+//! completed slot: that is done once per block, outside any transaction, by
+//! the runtime. An `NPOOL003` pool is handled the same way with the feature
+//! active or not.
 
-use super::KEY;
+use super::{runtime_features, KEY};
 use crate::{id, nullifiers, pool_address, staging::Buffer};
 use native_payments::{
     state::PoolState,
@@ -22,12 +29,18 @@ pub(super) fn finalize(
     context: &mut InvokeContext,
     slot: u64,
     inline: Option<&[u8]>,
+    slot_anchors: bool,
 ) -> Result<(), Error> {
     let sponsor_index = if inline.is_some() { 1 } else { 2 };
     let system_index = if inline.is_some() { 2 } else { 3 };
     let nullifier_start = if inline.is_some() { 3 } else { 4 };
-    let (state, mut buffer, sponsor) =
-        load_accounts(context, inline.is_some(), sponsor_index, system_index)?;
+    let (state, mut buffer, sponsor) = load_accounts(
+        context,
+        inline.is_some(),
+        sponsor_index,
+        system_index,
+        slot_anchors,
+    )?;
     let payment = if let Some(bytes) = inline {
         native_payments::envelope::decode(state.network, slot, bytes)
             .map_err(|_| Error::InvalidInstructionData)?
@@ -66,7 +79,11 @@ pub(super) fn finalize(
         return Err(Error::InvalidInstructionData);
     }
     validate_nullifiers(context, &nullifiers, nullifier_start)?;
-    let roots = state.roots();
+    // The stored recent roots for an NPOOL003 pool; for an NPOOL004 pool the
+    // roots of completed earlier slots, never one of the executing slot.
+    let roots = state
+        .accepted_roots(slot)
+        .map_err(|_| Error::InvalidAccountData)?;
     // Public movement is executed below, atomically with these verified effects.
     let effects = PaymentVerifier::with_shared_key(state.network, Arc::clone(&KEY))
         .map_err(|_| Error::InvalidAccountData)?
@@ -116,6 +133,7 @@ fn load_accounts(
     inline: bool,
     sponsor_index: u16,
     system_index: u16,
+    slot_anchors: bool,
 ) -> Result<(PoolState, Option<Buffer>, Pubkey), Error> {
     let instruction = context
         .transaction_context
@@ -150,6 +168,9 @@ fn load_accounts(
         return Err(Error::InvalidAccountOwner);
     }
     let state = PoolState::decode(pool.get_data()).map_err(|_| Error::InvalidAccountData)?;
+    if state.uses_slot_anchors() && !slot_anchors {
+        return Err(Error::InvalidAccountData);
+    }
     if pool.get_lamports()
         < state
             .rent_floor
@@ -216,7 +237,11 @@ fn validate_recipient(
                 .get_lamports()
                 .checked_add(authorization.public_value_balance as u64)
                 .ok_or(Error::ArithmeticOverflow)?;
-            if final_balance < context.get_sysvar_cache().get_rent()?.minimum_balance(0) {
+            if final_balance
+                < runtime_features::sysvars(context)
+                    .get_rent()?
+                    .minimum_balance(0)
+            {
                 return Err(Error::AccountNotRentExempt);
             }
             6
@@ -265,13 +290,13 @@ fn apply_effects(
     nullifier_start: u16,
 ) -> Result<(), Error> {
     if effects.public_value_balance < 0 {
-        context.native_invoke(
+        runtime_features::invoke(
+            context,
             solana_system_interface::instruction::transfer(
                 sponsor,
                 &pool_address(),
                 effects.public_value_balance.unsigned_abs(),
             ),
-            &[],
         )?;
     } else if effects.public_value_balance > 0 {
         let instruction = context
@@ -292,29 +317,32 @@ fn apply_effects(
             .try_borrow_instruction_account(nullifier_start + index as u16)?
             .get_lamports();
         // Zero-lamport accounts are purged even when rent is free.
-        let rent = context
-            .get_sysvar_cache()
+        let rent = runtime_features::sysvars(context)
             .get_rent()?
             .minimum_balance(nullifiers::MARKER_BYTES)
             .max(1);
         // Allocate/assign rather than create_account: an unsolicited transfer to
         // an unused PDA must not make an otherwise valid note unspendable.
         if existing < rent {
-            context.native_invoke(
+            runtime_features::invoke(
+                context,
                 solana_system_interface::instruction::transfer(sponsor, &address, rent - existing),
-                &[],
             )?;
         }
-        context.native_invoke(
+        runtime_features::invoke_as_marker(
+            context,
             solana_system_interface::instruction::allocate(
                 &address,
                 nullifiers::MARKER_BYTES as u64,
             ),
-            &[address],
+            &address,
+            nullifier,
         )?;
-        context.native_invoke(
+        runtime_features::invoke_as_marker(
+            context,
             solana_system_interface::instruction::assign(&address, &id()),
-            &[address],
+            &address,
+            nullifier,
         )?;
         context
             .transaction_context

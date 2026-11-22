@@ -6,6 +6,11 @@ use solana_program_runtime::invoke_context::InvokeContext;
 use std::sync::{Arc, LazyLock};
 
 mod finalization;
+mod runtime_features;
+#[cfg(test)]
+mod runtime_features_tests;
+#[cfg(test)]
+mod slot_anchor_tests;
 use finalization::finalize;
 
 static KEY: LazyLock<Arc<VerifyingKey>> =
@@ -17,6 +22,13 @@ pub(crate) fn prepare_verifying_key() {
 }
 
 pub fn process(context: &mut InvokeContext) -> Result<(), Error> {
+    let slot_anchors = runtime_features::slot_anchors(context);
+    process_gated(context, slot_anchors)
+}
+
+/// The program, with the state of the `native_slot_anchors` feature given by
+/// the caller. `process` is the only caller outside tests.
+fn process_gated(context: &mut InvokeContext, slot_anchors: bool) -> Result<(), Error> {
     let instruction = context
         .transaction_context
         .get_current_instruction_context()?
@@ -25,28 +37,30 @@ pub fn process(context: &mut InvokeContext) -> Result<(), Error> {
     let (&opcode, rest) = instruction
         .split_first()
         .ok_or(Error::InvalidInstructionData)?;
-    context
-        .consume_checked(if opcode == 3 || opcode == 5 {
+    runtime_features::consume_compute_units(
+        context,
+        if opcode == 3 || opcode == 5 {
             FINALIZE_COMPUTE_UNITS
         } else {
             10_000
-        })
-        .map_err(|_| Error::ComputationalBudgetExceeded)?;
+        },
+    )
+    .map_err(|_| Error::ComputationalBudgetExceeded)?;
     if context.get_stack_height() != 1 {
         return Err(Error::InvalidInstructionData);
     }
-    let slot = context.get_sysvar_cache().get_clock()?.slot;
+    let slot = runtime_features::sysvars(context).get_clock()?.slot;
     if opcode == 3 {
         if !rest.is_empty() {
             return Err(Error::InvalidInstructionData);
         }
-        return finalize(context, slot, None);
+        return finalize(context, slot, None, slot_anchors);
     }
     if opcode == 5 {
         if !context.get_feature_set().native_inline_payments {
             return Err(Error::InvalidInstructionData);
         }
-        return finalize(context, slot, Some(rest));
+        return finalize(context, slot, Some(rest), slot_anchors);
     }
     let instruction_context = context
         .transaction_context

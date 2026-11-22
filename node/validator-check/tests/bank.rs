@@ -1,9 +1,10 @@
 use native_payment_program::{
     id, instructions, nullifiers, pool_address, staging::ACCOUNT_BYTES, ACTIVATION_ID,
+    SLOT_ANCHOR_ACTIVATION_ID,
 };
 use native_payments::{
     staging::{payload_digest, MAX_CHUNK_BYTES},
-    state::{PoolState, STATE_BYTES},
+    state::{PoolState, SLOT_STATE_BYTES, STATE_BYTES},
     wire,
 };
 use payment_lab::proof_smoke::{
@@ -942,4 +943,96 @@ fn shielded_fee_native_atomicity_activation_and_exact_replay() {
     bank.freeze();
     replay.freeze();
     assert_eq!(bank.hash(), replay.hash());
+}
+
+/// The Agave 3.0.14 runtime of this workspace does not list the
+/// `native_slot_anchors` feature and has no end-of-slot step for the pool
+/// (decision 0043). This test pins what follows from that, through a Bank: the
+/// feature account activates nothing, the registered program refuses an
+/// `NPOOL004` pool, and freezing a block writes no checkpoint. When a runtime
+/// with the feature and the step is built here, this test has to change.
+#[test]
+fn slot_anchored_pool_is_refused_and_gets_no_checkpoint_on_this_runtime() {
+    use solana_instruction::error::InstructionError;
+    use solana_transaction_error::TransactionError;
+
+    let sponsor = Keypair::new();
+    let mut legacy = genesis(&sponsor, true);
+    // The account that activates the feature on a runtime that lists it, in
+    // both configurations.
+    legacy.accounts.insert(
+        SLOT_ANCHOR_ACTIVATION_ID,
+        create_account(
+            &Feature {
+                activated_at: Some(0),
+            },
+            1_000_000,
+        )
+        .into(),
+    );
+    let mut slot_anchored = legacy.clone();
+    let floor = slot_anchored.rent.minimum_balance(SLOT_STATE_BYTES);
+    let mut pool = AccountSharedData::new(floor, SLOT_STATE_BYTES, &id());
+    pool.set_data_from_slice(
+        &PoolState::new_slot_anchored(FIXTURE_GENESIS, floor)
+            .unwrap()
+            .encode(),
+    );
+    slot_anchored.accounts.insert(pool_address(), pool.into());
+    // Any sealed staging account will do: the pool is judged before the
+    // staged bytes are read.
+    let bytes = vec![7; 1_000];
+    let outcome = |config: &GenesisConfig| {
+        let forks = BankForks::new_rw_arc(Bank::new_for_tests(config));
+        let bank = forks.read().unwrap().root_bank();
+        // The Bank reads the program's own feature account and ignores the
+        // other one: its feature list does not name it.
+        assert!(bank.feature_set.is_active(&ACTIVATION_ID));
+        assert!(!bank.feature_set.is_active(&SLOT_ANCHOR_ACTIVATION_ID));
+        assert!(bank.get_account(&SLOT_ANCHOR_ACTIVATION_ID).is_some());
+        let (buffer, txs) = stage_transactions(&bank, &sponsor, &bytes);
+        for tx in txs {
+            bank.process_transaction(&tx).unwrap();
+        }
+        let before = bank.get_account(&pool_address()).unwrap();
+        let result = bank.process_transaction(&transaction(
+            &bank,
+            &sponsor,
+            &[
+                ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+                instructions::finalize(buffer, sponsor.pubkey(), [[1; 32], [2; 32]]),
+            ],
+            &[],
+        ));
+        assert_eq!(bank.get_account(&pool_address()).unwrap(), before);
+        bank.freeze();
+        assert_eq!(bank.get_account(&pool_address()).unwrap(), before);
+        let next = Bank::new_from_parent(bank, &sponsor.pubkey(), 1);
+        next.freeze();
+        assert_eq!(next.get_account(&pool_address()).unwrap(), before);
+        (result, PoolState::decode(before.data()).unwrap())
+    };
+
+    let (result, state) = outcome(&slot_anchored);
+    assert_eq!(
+        result,
+        Err(TransactionError::InstructionError(
+            1,
+            InstructionError::InvalidAccountData
+        ))
+    );
+    assert!(state.uses_slot_anchors());
+    assert!(state.slot_anchors().unwrap().entries().is_empty());
+
+    // The same transaction against a legacy pool gets past the pool and is
+    // refused for its staged bytes, which are not a payment.
+    let (result, state) = outcome(&legacy);
+    assert_eq!(
+        result,
+        Err(TransactionError::InstructionError(
+            1,
+            InstructionError::InvalidInstructionData
+        ))
+    );
+    assert!(!state.uses_slot_anchors());
 }

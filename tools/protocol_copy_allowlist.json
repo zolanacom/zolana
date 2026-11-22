@@ -4,13 +4,13 @@
   "differences": {
     "node/adapter/src/lib.rs": {
       "candidate_sha256": "ea8e5f094ae30696867b64fa0a0ea439e334f6dc15fce85ebcba330a67b9eb56",
-      "workspace_sha256": "87ef529e49e677541373d2dbe90f2b7207ae4c4f951b1177a62822534bd44235",
+      "workspace_sha256": "ca650e4988c5aae9dbb06c9efacb77e5a35c4156cea753af625701f2a151cd89",
       "unmatched_lines": {
-        "candidate": 10,
-        "workspace": 7
+        "candidate": 5,
+        "workspace": 8
       },
-      "class": "behaviour",
-      "review": "The candidate copy declares SLOT_ANCHOR_ACTIVATION_ID, the feature that enables NPOOL004 pools; the workspace has no such feature. Without behaviour: the workspace takes the program id and the pool address from native_accounts (same bytes, same seed) and adds prepare_verifying_key, which builds the verifying key before the first payment instead of during it."
+      "class": "refactor",
+      "review": "Both copies declare SLOT_ANCHOR_ACTIVATION_ID, the feature that enables NPOOL004 pools, with the same bytes; the five identifiers, the program id and the compute charge are equal. Without behaviour: the workspace takes the program id and the pool address from native_accounts (same bytes, same seed) and adds prepare_verifying_key, which builds the verifying key before the first payment instead of during it."
     },
     "node/adapter/src/nullifiers.rs": {
       "candidate_sha256": "a98e176f28f60cf2534eb8fce4dd32772d9ebf98c6aef6ac80472a5eddc93584",
@@ -24,13 +24,13 @@
     },
     "node/adapter/src/processor.rs": {
       "candidate_sha256": "ca53ad4140b57bb063a0f976ac7206d0a12f1ddc499c4383f83646f31fa4cef9",
-      "workspace_sha256": "6bee37a694c55c492ae4c8381c82e7a0ab745238a1e8ca9d55fcdc59b44a9db8",
+      "workspace_sha256": "eab86fceb392f035fc6a1839129db08079d61401db7abf15ad4abd535bc026bb",
       "unmatched_lines": {
-        "candidate": 287,
-        "workspace": 25
+        "candidate": 293,
+        "workspace": 45
       },
-      "class": "behaviour",
-      "review": "Finalization lives in processor/finalization.rs in the workspace. The candidate copy refuses an NPOOL004 pool unless the slot-anchor feature is active and takes the accepted anchors from PoolState::accepted_roots(slot); the workspace takes them from PoolState::roots(), which is empty for an NPOOL004 pool, so the workspace program refuses every payment against such a pool. For an NPOOL003 pool both accept the same anchors. Without behaviour: runtime accessor names of the two validator releases, marker accounts signed by seed instead of by address (the same address), prepare_verifying_key and its test."
+      "class": "refactor",
+      "review": "Finalization lives in processor/finalization.rs in the workspace. What remains here is the candidate copy's entry rules in the same order with the same errors: the opcode, the charge of compute units, the top-level check, the slot, the two finalizing opcodes and the staging instructions. Without behaviour: the workspace reaches the compute meter and the Clock sysvar through processor/runtime_features.rs where the candidate copy names its runtime's interfaces; process asks for the state of the slot-anchor feature once and hands it to process_gated, where the candidate copy reads it at the check; prepare_verifying_key and its test; the declarations of two test modules. More lines differ than before the workspace had the slot-anchor rule, because the workspace text now names its binding functions; the difference in what the two programs do is recorded for processor/runtime_features.rs."
     },
     "node/adapter/src/staging.rs": {
       "candidate_sha256": "28d739526fc5959f873040df7e4b3e0b427dfd7dc23d1b2dee10d890c17df614",
@@ -85,9 +85,24 @@
   },
   "workspace_only": {
     "node/adapter/src/processor/finalization.rs": {
-      "workspace_sha256": "3e435d86d0bb99f46ad08fd7d5b8c5c938a9dac6da8e85b71a9e7cef0018a5cb",
+      "workspace_sha256": "0c200827ed7c113ca739d022c813a4d17650288e10370390a04685a312cc5665",
+      "class": "refactor",
+      "review": "The workspace's finalization, split out of processor.rs into four helpers. Every check and effect is the candidate copy's, in the same order with the same errors, including the refusal of an NPOOL004 pool while the slot-anchor feature is inactive and the accepted anchors taken from PoolState::accepted_roots(slot). Without behaviour: the state of the feature is a parameter; rent and the System program are reached through processor/runtime_features.rs; the allocation and assignment of a marker name the marker's address and its nullifier, where the candidate copy builds the seeds of the same address."
+    },
+    "node/adapter/src/processor/runtime_features.rs": {
+      "workspace_sha256": "6326d466e76a8d94c2b2b8788bfd1cc686e1c6a504c98ad4dffe8ff437d0d376",
       "class": "behaviour",
-      "review": "The workspace's finalization, split out of processor.rs into four helpers. It carries the anchor-source difference recorded for processor.rs; every other check and effect is the candidate copy's, in the same order."
+      "review": "The workspace program's binding to the Agave 3.0.14 runtime: five functions for what the candidate copy writes in the words of the 4.3.2 runtime. Four pass their arguments on and return the runtime's answer: the compute meter, the sysvar cache, an invocation with no added signer, and an invocation signed for a marker's address, where the candidate copy passes the seeds of that address. The fifth is a difference in behaviour: slot_anchors answers false always, because the 3.0.14 feature set has no native_slot_anchors switch. The program built from the workspace therefore refuses every NPOOL004 pool, as the candidate copy does while the feature is inactive, and can never accept one; the candidate copy reads the switch from its runtime."
+    },
+    "node/adapter/src/processor/runtime_features_tests.rs": {
+      "workspace_sha256": "39453068bae67820b57f1a00ab520f499f6edd370e6608f84bcaeeaf5ac586f1",
+      "class": "refactor",
+      "review": "Tests only, compiled for test builds: the compute units charged, the slot and the rent read, and the System program invocations of the registered program, in the mock context of the 3.0.14 runtime. No counterpart in the candidate series, whose program tests are in its harness crate."
+    },
+    "node/adapter/src/processor/slot_anchor_tests.rs": {
+      "workspace_sha256": "72c6a95757a7734ed8fe71448eb87ff2a891f3dd083cba2a8aa7b08f9e94b72d",
+      "class": "refactor",
+      "review": "Tests only, compiled for test builds: the slot-anchor rule run through the finalizer with real proofs, with the state of the feature given by the test and the end of a slot performed by the test. No counterpart in the candidate series, whose tests of the rule are in its harness crate."
     },
     "protocol/payments/src/native_accounts.rs": {
       "workspace_sha256": "648dcd56988623e62d70a62e4a1cbe60adbaabf37a72e577a56de41ef18bceec",
